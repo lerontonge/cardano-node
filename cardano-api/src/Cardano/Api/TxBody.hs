@@ -144,7 +144,7 @@ import           Data.Aeson.Types (ToJSONKey (..), toJSONKeyText)
 import           Data.Bifunctor (first)
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
-import           Data.Foldable (toList)
+import           Data.Foldable (for_, toList)
 import           Data.Function (on)
 import           Data.List (intercalate, sortBy)
 import qualified Data.List.NonEmpty as NonEmpty
@@ -157,7 +157,7 @@ import qualified Data.Set as Set
 import           Data.String (IsString)
 import           Data.Text (Text)
 import qualified Data.Text as Text
-import           Data.Word (Word64)
+import           Data.Word (Word32, Word64)
 import           GHC.Generics
 
 import           Cardano.Binary (Annotated (..), reAnnotate, recoverBytes)
@@ -1569,6 +1569,7 @@ data TxBodyError =
      | TxBodyMetadataError [(Word64, TxMetadataRangeError)]
      | TxBodyMintAdaError
      | TxBodyMissingProtocolParams
+     | TxBodyInIxOverflow TxIn
      deriving Show
 
 instance Error TxBodyError where
@@ -1594,6 +1595,10 @@ instance Error TxBodyError where
     displayError TxBodyMissingProtocolParams =
       "Transaction uses Plutus scripts but does not provide the protocol " ++
       "parameters to hash"
+    displayError (TxBodyInIxOverflow txin) =
+      "Transaction input index is too big, " ++
+      "acceptable value is up to 2^32-1, " ++
+      "in input " ++ show txin
 
 
 makeTransactionBody :: forall era.
@@ -1977,8 +1982,10 @@ fromLedgerTxMintValue era body =
 makeByronTransactionBody :: TxBodyContent BuildTx ByronEra
                          -> Either TxBodyError (TxBody ByronEra)
 makeByronTransactionBody TxBodyContent { txIns, txOuts } = do
-    ins'  <- NonEmpty.nonEmpty txIns      ?! TxBodyEmptyTxIns
-    let ins'' = NonEmpty.map (toByronTxIn . fst) ins'
+    ins' <- NonEmpty.nonEmpty (map fst txIns) ?! TxBodyEmptyTxIns
+    for_ ins' $ \txin@(TxIn _ (TxIx txix)) ->
+      guard (txix <= maxByronTxInIx) ?! TxBodyInIxOverflow txin
+    let ins'' = fmap toByronTxIn ins'
 
     outs'  <- NonEmpty.nonEmpty txOuts    ?! TxBodyEmptyTxOuts
     outs'' <- traverse
@@ -1991,6 +1998,9 @@ makeByronTransactionBody TxBodyContent { txIns, txOuts } = do
             (Byron.UnsafeTx ins'' outs'' (Byron.mkAttributes ()))
             ()
   where
+    maxByronTxInIx :: Word
+    maxByronTxInIx = fromIntegral (maxBound :: Word32)
+
     classifyRangeError :: TxOut ByronEra -> TxBodyError
     classifyRangeError
       txout@(TxOut (AddressInEra ByronAddressInAnyEra ByronAddress{})
