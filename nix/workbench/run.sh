@@ -111,7 +111,8 @@ case "$op" in
         local tag=${1:?$usage}
         local dir=$(run get "$tag")
 
-        rm -f      "$global_rundir"/current
+        rm -f      "$global_rundir"/{current,-current}
+        ln -s $tag "$global_rundir"/-current
         ln -s $tag "$global_rundir"/current;;
 
     current-run-path | current-path | path )
@@ -244,7 +245,7 @@ case "$op" in
         then fatal "run fails sanity checks:  $tag at $dir"; fi
 
         cat <<EOF
-workbench:  run $tag params:
+workbench:  run $(with_color yellow $tag) params:
   - run dir:         $dir
   - profile JSON:    $dir/profile.json
   - node specs:      $dir/node-specs.json
@@ -298,7 +299,7 @@ EOF
 
         local genesis_args=(
             ## Positionals:
-            "$cacheDir"/gene            "$dir"/profile.json
+            "$cacheDir"/genesis "$dir"/profile.json
             "$dir"/topology
             "$dir"/genesis
         )
