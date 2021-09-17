@@ -44,7 +44,8 @@ def genesis_profile_variants:
 
 
   ## Chainsync:
-  , { name:   "chainsync"
+  , { name: "chainsync"
+    , scenario: "chainsync"
     , preset: "mainnet"
     , composition:
       { locations:                      ["LO"]

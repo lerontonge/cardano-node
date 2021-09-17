@@ -87,4 +87,3 @@ git_repo_commit_description() {
         git -C "$repo" diff --exit-code --quiet || echo '-modified'
     } || echo "unknown-not-a-git-repo"
 }
-

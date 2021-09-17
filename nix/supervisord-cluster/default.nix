@@ -123,6 +123,8 @@ let
   profile = workbenchProfiles.profiles."${profileName}"
     or (throw "No such profile: ${profileName};  Known profiles: ${toString (__attrNames workbenchProfiles.profiles)}");
 
+  profileOut = workbench.profileOutput { inherit profile; };
+
   inherit (profile.value) era composition monetary;
 
   path = makeBinPath path';
@@ -133,97 +135,31 @@ let
     ++ optionals (!workbenchDevMode)
     [ workbench.workbench ];
 
-  startClusterUsage = ''
-Usage:
-   start-cluster [FLAGS..]
-
-   Flags:
-
-      --batch-name NAME               Override the batch name (default: ${batchName})
-      --no-generator | --no-gen       Don't auto-start the tx-generator
-
-      --trace | --debug               Trace the start-cluster script
-      --trace-wb | --trace-workbench  Trace the workbench script
-      --help                          This help message
-'';
-
   start = pkgs.writeScriptBin "start-cluster" ''
     set -euo pipefail
 
-    batch_name=${batchName}
-    run_start_flags=()
-
-    while test $# -gt 0
-    do case "$1" in
-        --batch-name )                   batch_name=$2; shift;;
-        --no-generator | --no-gen )      run_start_flags+=($1);;
-
-        --trace | --debug )              set -x;;
-        --trace-wb | --trace-workbench ) export WORKBENCH_EXTRA_FLAGS=--trace;;
-        --help )                         cat <<EOF
-${startClusterUsage}
-EOF
-                                         exit 1;;
-        * ) break;; esac; shift; done
-
-    workbench-prebuild-executables
-
     export PATH=$PATH:${path}
 
-    wb backend assert-is supervisor
-    wb backend assert-stopped
-
-    wb_run_allocate_args=(
-        --cache-dir            "${cacheDir}"
-        --base-port             ${toString basePort}
-        --stagger-ports
-        --
-        --port-shift-ekg        100
-        --port-shift-prometheus 200
-        --supervisor-conf      "${backend.supervisord.mkSupervisorConf profile}"
-      )
-    wb run allocate $batch_name ${profile.name} "''${wb_run_allocate_args[@]}"
-
-    current_run_path=$(wb run current-path)
-    ${workbench.initialiseProfileRunDirShellScript profile "$current_run_path"}
-
-    wb run start "''${run_start_flags[@]}" $(wb run current-tag)
-
-    echo 'workbench:  cluster started. Run `stop-cluster` to stop'
+    wb start \
+        --batch-name  ${batchName} \
+        --profile-out ${profileOut} \
+        --cache-dir   ${cacheDir} \
+        --base-port   ${toString basePort} \
+        "$@" &&
+        echo 'workbench:  cluster started. Run `stop-cluster` to stop' >&2
   '';
 
   stop = pkgs.writeScriptBin "stop-cluster" ''
     set -euo pipefail
 
-    while test $# -gt 0
-    do case "$1" in
-        --trace | --debug )              set -x;;
-        --trace-wb | --trace-workbench ) export WORKBENCH_EXTRA_FLAGS=--trace;;
-        * ) break;; esac; shift; done
-
-    wb run stop $(wb run current-tag)
+    wb finish "$@"
   '';
 
   restart = pkgs.writeScriptBin "restart-cluster" ''
     set -euo pipefail
 
-    wb_flags=()
-    wb_run_restart_flags=()
-
-    while test $# -gt 0
-    do case "$1" in
-        --no-generator | --no-gen )      wb_run_restart_flags+=($1);;
-        --trace | --debug | --trace-wb | --trace-workbench )
-                                         wb_flags+=(--trace);;
-        --help )                         cat <<EOF
-${startClusterUsage}
-EOF
-                                         exit 1;;
-        * ) break;; esac; shift; done
-
-    wb "''${wb_flags[@]}" run restart "''${wb_run_restart_flags[@]}"
-
-    echo "workbench:  alternate command for this action:  wb run restart"
+    wb run restart "$@" && \
+        echo "workbench:  alternate command for this action:  wb run restart" >&2
   '';
 
 in

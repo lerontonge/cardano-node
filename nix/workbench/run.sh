@@ -12,9 +12,12 @@ usage_run() {
                           A unique name would be allocated for this run,
                             and a run alias 'current' will be created for it.
 
-    start [--no-generator] TAG
+    start [--scenario NAME] [--idle] TAG
                           Start the named run.
-                            --no-generator disables automatic tx-generator startup
+                            --scenario forces a scenario, different from what
+                                is implied by the run profile;
+                                See 'wb scenario --help' for scenario descriptions
+                            --idle is a short-cut for the 'generic-idle' scenario
 
     stop TAG              Stop the named run
 
@@ -280,12 +283,13 @@ EOF
                }' "${compat_args[@]}";;
 
     start )
-        local usage="USAGE: wb run $op [--no-generator] TAG"
+        local usage="USAGE: wb run $op [--no-generator] [--scenario NAME] TAG"
 
-        local no_generator=
+        local scenario_override=
         while test $# -gt 0
         do case "$1" in
-               --no-generator | --no-gen )  no_generator='true';;
+               --idle )     scenario_override='generic-idle';;
+               --scenario ) scenario_override=$2; shift;;
                --* ) msg "FATAL:  unknown flag '$1'"; usage_run;;
                * ) break;; esac; shift; done
 
@@ -308,9 +312,11 @@ EOF
         ## Record genesis.
         cp "$dir"/genesis/genesis.json "$dir"/genesis.json
 
-        backend start-cluster "$dir"
-        test -z "$no_generator" &&
-            backend start-generator "$dir"
+        ## Execute the scenario
+        local scenario=$(if test -z "$scenario_override"
+                         then jq -r .scenario "$global_envjson"
+                         else echo "$scenario_override")
+        scenario "$scenario" "$dir"
 
         run compat-meta-fixups "$tag"
         ;;
