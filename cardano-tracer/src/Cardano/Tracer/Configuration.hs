@@ -12,13 +12,14 @@ module Cardano.Tracer.Configuration
   , LogMode (..)
   , LogFormat (..)
   , LoggingParams (..)
-  , ConnectMode (..)
+  , Network (..)
   , TracerConfig (..)
   , readTracerConfig
   ) where
 
 import           Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict')
 import           Data.Fixed (Pico)
+import           Data.List.NonEmpty
 import           Data.Word (Word16, Word64)
 import           GHC.Generics (Generic)
 import           System.Exit (die)
@@ -59,24 +60,20 @@ data LoggingParams = LoggingParams
   , logFormat :: !LogFormat -- ^ Log format.
   } deriving (Eq, Generic, FromJSON, Show, ToJSON)
 
--- | 'cardano-tracer' can be an initiator or a responder:
---   1. 'Initiator' mode - it tries to establish the connection.
---   2. 'Responder' mode - it accepts the connection.
-data ConnectMode
-  = Initiator
-  | Responder
+data Network
+  = AcceptAt  !Address
+  | ConnectTo !(NonEmpty Address)
   deriving (Eq, Generic, FromJSON, Show, ToJSON)
 
 -- | Complete configuration.
 data TracerConfig = TracerConfig
-  { connectMode    :: !ConnectMode            -- ^ How cardano-tracer will be connected.
-  , acceptAt       :: ![Address]              -- ^ Local socket(s) for connection with node(s).
-  , loRequestNum   :: !(Maybe Word16)         -- ^ How many 'TraceObject's will be asked in each request.
-  , ekgRequestFreq :: !(Maybe Pico)           -- ^ How often to request for EKG-metrics, in seconds.
-  , hasEKG         :: !(Maybe Endpoint)       -- ^ Endpoint for EKG web-page.
-  , hasPrometheus  :: !(Maybe Endpoint)       -- ^ Endpoint for Promeheus web-page.
-  , logging        :: ![LoggingParams]        -- ^ Logging parameters.
-  , rotation       :: !(Maybe RotationParams) -- ^ Rotation parameters.
+  { network        :: !Network                  -- ^ How cardano-tracer will be connected to node(s).
+  , loRequestNum   :: !(Maybe Word16)           -- ^ How many 'TraceObject's will be asked in each request.
+  , ekgRequestFreq :: !(Maybe Pico)             -- ^ How often to request for EKG-metrics, in seconds.
+  , hasEKG         :: !(Maybe Endpoint)         -- ^ Endpoint for EKG web-page.
+  , hasPrometheus  :: !(Maybe Endpoint)         -- ^ Endpoint for Promeheus web-page.
+  , logging        :: !(NonEmpty LoggingParams) -- ^ Logging parameters.
+  , rotation       :: !(Maybe RotationParams)   -- ^ Rotation parameters.
   } deriving (Eq, Generic, FromJSON, Show, ToJSON)
 
 -- | Read the tracer's configuration file (path is passed via '--config' CLI option).

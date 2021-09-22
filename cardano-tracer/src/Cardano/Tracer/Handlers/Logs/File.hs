@@ -28,8 +28,7 @@ import           Cardano.Logging
 import           Trace.Forward.Protocol.Type (NodeInfo (..))
 
 import           Cardano.Tracer.Configuration
-import           Cardano.Tracer.Handlers.Logs.Log (createLogAndSymLink, doesSymLinkValid,
-                                                   symLinkName)
+import           Cardano.Tracer.Handlers.Logs.Log
 import           Cardano.Tracer.Types
 
 -- | Log files structure can be represented like this (for example, with json format):
@@ -52,7 +51,7 @@ writeNodeInfoToFile
   -> NodeInfo
   -> IO ()
 writeNodeInfoToFile nodeId rootDir format nodeInfo = do
-  pathToCurrentLog <- prepareLogsStructure nodeId (niName nodeInfo) rootDir format 
+  pathToCurrentLog <- prepareLogsStructure nodeId (niName nodeInfo) rootDir format
   LBS.appendFile pathToCurrentLog . encodeUtf8 $ preparedNodeInfo
  where
   preparedNodeInfo =
@@ -69,14 +68,14 @@ writeTraceObjectsToFile
   -> IO ()
 writeTraceObjectsToFile _ _ _ _ [] = return ()
 writeTraceObjectsToFile nodeId nodeName rootDir format traceObjects = do
-  pathToCurrentLog <- prepareLogsStructure nodeId nodeName rootDir format 
+  pathToCurrentLog <- prepareLogsStructure nodeId nodeName rootDir format
   unless (null itemsToWrite) $
     LBS.appendFile pathToCurrentLog . encodeUtf8 . TL.concat $ itemsToWrite
  where
-  itemsToWrite = mapMaybe formatter traceObjects
-  formatter = case format of
-                ForHuman   -> traceObjectToText
-                ForMachine -> traceObjectToJSON
+  itemsToWrite =
+    case format of
+      ForHuman   -> mapMaybe traceObjectToText traceObjects
+      ForMachine -> mapMaybe traceObjectToJSON traceObjects
 
 prepareLogsStructure
   :: NodeId
@@ -85,6 +84,7 @@ prepareLogsStructure
   -> LogFormat
   -> IO FilePath
 prepareLogsStructure nodeId nodeName rootDir format = do
+  -- Root directory (as a parent for subDirForLogs) will be created as well if needed.
   createDirectoryIfMissing True subDirForLogs
   ifM (doesFileExist pathToCurrentLog)
     (unlessM (doesSymLinkValid pathToCurrentLog) $ do
@@ -123,7 +123,7 @@ data NodeInfoForJSON = NodeInfoForJSON
   , jVersion         :: !T.Text
   , jCommit          :: !T.Text
   , jStartTime       :: !UTCTime
-  , jSystemStartTime :: !UTCTime 
+  , jSystemStartTime :: !UTCTime
   }
 
 instance ToJSON NodeInfoForJSON where

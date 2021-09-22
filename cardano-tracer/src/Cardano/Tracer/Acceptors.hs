@@ -14,6 +14,8 @@ import           Control.Concurrent.Async (forConcurrently_, race_, wait)
 import           Control.Concurrent.STM.TVar (TVar, newTVarIO, readTVarIO)
 import "contra-tracer" Control.Tracer (nullTracer)
 import qualified Data.ByteString.Lazy as LBS
+import           Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
 import           Data.Maybe (fromMaybe)
 import           Data.HashMap.Strict ((!))
 import           Data.Time.Clock (secondsToNominalDiffTime)
@@ -63,41 +65,40 @@ runAcceptors
   -> AcceptedMetrics
   -> AcceptedNodeInfo
   -> IO ()
-runAcceptors config@TracerConfig{acceptAt} acceptedMetrics acceptedNodeInfo =
-  forConcurrently_ acceptAt $ \(LocalSocket p) -> do
-    stopEKG <- newTVarIO False
-    stopTF  <- newTVarIO False
-    runAcceptorsForOneNode config acceptedMetrics acceptedNodeInfo p stopEKG stopTF
+runAcceptors config@TracerConfig{network} acceptedMetrics acceptedNodeInfo =
+  case network of
+    AcceptAt (LocalSocket p) -> do
+      stopEKG <- newTVarIO False
+      stopTF  <- newTVarIO False
+      runActionInLoop
+        (runAcceptorsResp config p (mkAcceptorsConfigs config p stopEKG stopTF) acceptedMetrics acceptedNodeInfo)
+        (TF.LocalPipe p) 1
+    ConnectTo localSocks ->
+      forConcurrently_ (NE.nub localSocks) $ \(LocalSocket p) -> do
+        stopEKG <- newTVarIO False
+        stopTF  <- newTVarIO False
+        runActionInLoop
+          (runAcceptorsInit config p (mkAcceptorsConfigs config p stopEKG stopTF) acceptedMetrics acceptedNodeInfo)
+          (TF.LocalPipe p) 1
 
 runAcceptorsWithBrakes
   :: TracerConfig
   -> AcceptedMetrics
   -> AcceptedNodeInfo
-  -> [(TVar Bool, TVar Bool)]
+  -> NonEmpty (TVar Bool, TVar Bool)
   -> IO ()
-runAcceptorsWithBrakes config@TracerConfig{acceptAt} acceptedMetrics acceptedNodeInfo protocolsBrakes =
-  forConcurrently_ (zip acceptAt protocolsBrakes) $ \(LocalSocket p, (stopEKG, stopTF)) ->
-    runAcceptorsForOneNode config acceptedMetrics acceptedNodeInfo p stopEKG stopTF
-
-runAcceptorsForOneNode
-  :: TracerConfig
-  -> AcceptedMetrics
-  -> AcceptedNodeInfo
-  -> FilePath
-  -> TVar Bool
-  -> TVar Bool
-  -> IO ()
-runAcceptorsForOneNode config acceptedMetrics acceptedNodeInfo p stopEKG stopTF = do
-  let acceptorsConfigs = mkAcceptorsConfigs config p stopEKG stopTF
-  runActionInLoop
-    (runAcceptor
-       config
-       p
-       acceptorsConfigs
-       acceptedMetrics
-       acceptedNodeInfo)
-    (TF.LocalPipe p)
-    1
+runAcceptorsWithBrakes config@TracerConfig{network} acceptedMetrics acceptedNodeInfo protocolsBrakes =
+  case network of
+    AcceptAt (LocalSocket p) -> do
+      let (stopEKG, stopTF) = NE.head protocolsBrakes
+      runActionInLoop
+        (runAcceptorsResp config p (mkAcceptorsConfigs config p stopEKG stopTF) acceptedMetrics acceptedNodeInfo)
+        (TF.LocalPipe p) 1
+    ConnectTo localSocks ->
+      forConcurrently_ (NE.zip localSocks protocolsBrakes) $ \(LocalSocket p, (stopEKG, stopTF)) ->
+        runActionInLoop
+          (runAcceptorsInit config p (mkAcceptorsConfigs config p stopEKG stopTF) acceptedMetrics acceptedNodeInfo)
+          (TF.LocalPipe p) 1
 
 mkAcceptorsConfigs
   :: TracerConfig
@@ -123,32 +124,22 @@ mkAcceptorsConfigs TracerConfig{ekgRequestFreq, loRequestNum} p stopEKG stopTF =
       }
   )
 
-runAcceptor
+runAcceptorsInit
   :: TracerConfig
   -> FilePath
   -> (EKGF.AcceptorConfiguration, TF.AcceptorConfiguration TraceObject)
   -> AcceptedMetrics
   -> AcceptedNodeInfo
   -> IO ()
-runAcceptor config@TracerConfig{connectMode} p (ekgConfig, tfConfig) acceptedMetrics acceptedNodeInfo =
-  withIOManager $ \iocp -> do
-    let snock = localSnocket iocp p
-        addr  = localAddressFromPath p
-    case connectMode of
-      Initiator -> do
-        doConnectToForwarder snock addr noTimeLimitsHandshake $
-          appInitiator
-            [ (runEKGAcceptorInit ekgConfig acceptedMetrics, 1)
-            , (runTraceObjectsAcceptorInit config tfConfig acceptedNodeInfo, 2)
-            ]
-      Responder ->
-        doListenToAcceptor snock addr noTimeLimitsHandshake $
-          appResponder
-            [ (runEKGAcceptor ekgConfig acceptedMetrics, 1)
-            , (runTraceObjectsAcceptor config tfConfig acceptedNodeInfo, 2)
-            ]
+runAcceptorsInit config p (ekgConfig, tfConfig) acceptedMetrics acceptedNodeInfo =
+  withIOManager $ \iocp ->
+    doConnectToForwarder (localSnocket iocp p) (localAddressFromPath p) noTimeLimitsHandshake $
+      appInitiator
+        [ (runEKGAcceptorInit ekgConfig acceptedMetrics, 1)
+        , (runTraceObjectsAcceptorInit config tfConfig acceptedNodeInfo, 2)
+        ]
  where
-  appResponder protocols =
+  appInitiator protocols =
     OuroborosApplication $ \connectionId _shouldStopSTM ->
       [ MiniProtocol
          { miniProtocolNum    = MiniProtocolNum num
@@ -158,7 +149,22 @@ runAcceptor config@TracerConfig{connectMode} p (ekgConfig, tfConfig) acceptedMet
       | (protocol, num) <- protocols
       ]
 
-  appInitiator protocols =
+runAcceptorsResp
+  :: TracerConfig
+  -> FilePath
+  -> (EKGF.AcceptorConfiguration, TF.AcceptorConfiguration TraceObject)
+  -> AcceptedMetrics
+  -> AcceptedNodeInfo
+  -> IO ()
+runAcceptorsResp config p (ekgConfig, tfConfig) acceptedMetrics acceptedNodeInfo =
+  withIOManager $ \iocp -> do
+    doListenToForwarder (localSnocket iocp p) (localAddressFromPath p) noTimeLimitsHandshake $
+      appResponder
+        [ (runEKGAcceptor ekgConfig acceptedMetrics, 1)
+        , (runTraceObjectsAcceptor config tfConfig acceptedNodeInfo, 2)
+        ]
+ where
+  appResponder protocols =
     OuroborosApplication $ \connectionId _shouldStopSTM ->
       [ MiniProtocol
          { miniProtocolNum    = MiniProtocolNum num
@@ -189,14 +195,14 @@ doConnectToForwarder snocket address timeLimits app =
     Nothing
     address
 
-doListenToAcceptor
+doListenToForwarder
   :: Ord addr
   => Snocket IO fd addr
   -> addr
   -> ProtocolTimeLimits (Handshake UnversionedProtocol Term)
   -> OuroborosApplication 'ResponderMode addr LBS.ByteString IO Void ()
   -> IO ()
-doListenToAcceptor snocket address timeLimits app = do
+doListenToForwarder snocket address timeLimits app = do
   networkState <- newNetworkMutableState
   race_ (cleanNetworkMutableState networkState)
         $ withServerNode

@@ -15,7 +15,7 @@ import           Control.Concurrent.STM.TVar (modifyTVar', readTVarIO)
 import           Control.Exception (IOException, try)
 import "contra-tracer" Control.Tracer (showTracing, stdoutTracer, traceWith)
 import           Data.HashMap.Strict ((!), insert)
-import           Data.List (nub)
+import qualified Data.List.NonEmpty as NE
 
 import           Trace.Forward.Protocol.Type (NodeInfo (..))
 
@@ -37,11 +37,13 @@ nodeInfoHandler
   -> IO ()
 nodeInfoHandler TracerConfig{logging} nodeId acceptedNodeInfo ni = do
   atomically . modifyTVar' acceptedNodeInfo $ insert nodeId ni
-  -- We can already write this node's info in the log and/or journal.
-  forConcurrently_ (nub logging) $ \LoggingParams{logMode, logRoot, logFormat} ->
+  -- We can already write this node's info in the beginning of log and/or journal.
+  forConcurrently_ (NE.nub logging) $ \LoggingParams{logMode, logRoot, logFormat} ->
     case logMode of
-      FileMode    -> showProblemIfAny $ writeNodeInfoToFile nodeId logRoot logFormat ni
-      JournalMode -> showProblemIfAny $ writeNodeInfoToJournal nodeId ni
+      FileMode ->
+        showProblemIfAny $ writeNodeInfoToFile nodeId logRoot logFormat ni
+      JournalMode ->
+        showProblemIfAny $ writeNodeInfoToJournal nodeId ni
 
 traceObjectsHandler
   :: TracerConfig
@@ -55,7 +57,7 @@ traceObjectsHandler TracerConfig{logging} nodeId acceptedNodeInfo traceObjects =
   -- So if we are here, it means that info about corresponding node is already received and stored.
   nodesInfo <- readTVarIO acceptedNodeInfo
   let NodeInfo{niName} = nodesInfo ! nodeId
-  forConcurrently_ (nub logging) $ \LoggingParams{logMode, logRoot, logFormat} ->
+  forConcurrently_ (NE.nub logging) $ \LoggingParams{logMode, logRoot, logFormat} ->
     case logMode of
       FileMode ->
         showProblemIfAny $ writeTraceObjectsToFile nodeId niName logRoot logFormat traceObjects

@@ -54,15 +54,24 @@ import           Trace.Forward.Utils
 import qualified System.Metrics.Configuration as EKGF
 import           System.Metrics.Network.Forwarder
 
-launchForwardersSimple :: FilePath -> IO ()
-launchForwardersSimple p = withIOManager $ \iomgr ->
+launchForwardersSimple
+  :: FilePath
+  -> Word
+  -> Word
+  -> IO ()
+launchForwardersSimple p connSize disconnSize = withIOManager $ \iomgr ->
   runActionInLoop
-    (launchForwardersSimple' iomgr p)
+    (launchForwardersSimple' iomgr p connSize disconnSize)
     (TF.LocalPipe p)
     1
 
-launchForwardersSimple' :: IOManager -> FilePath -> IO ()
-launchForwardersSimple' iomgr p = do
+launchForwardersSimple'
+  :: IOManager
+  -> FilePath
+  -> Word
+  -> Word
+  -> IO ()
+launchForwardersSimple' iomgr p connSize disconnSize = do
   now <- getCurrentTime
   let snocket = localSnocket iomgr p
       address = localAddressFromPath p
@@ -91,8 +100,8 @@ launchForwardersSimple' iomgr p = do
             , niStartTime       = now
             , niSystemStartTime = now
             }
-      , TF.disconnectedQueueSize = 200000
-      , TF.connectedQueueSize    = 2000
+      , TF.disconnectedQueueSize = disconnSize
+      , TF.connectedQueueSize    = connSize
       }
 
 doListenToAcceptor

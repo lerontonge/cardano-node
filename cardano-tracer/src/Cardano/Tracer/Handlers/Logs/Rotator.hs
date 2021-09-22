@@ -15,6 +15,7 @@ import           Control.Monad.Extra (whenJust, whenM)
 import "contra-tracer" Control.Tracer (showTracing, stdoutTracer, traceWith)
 import           Data.List (nub, sort)
 import           Data.List.Extra (dropEnd)
+import qualified Data.List.NonEmpty as NE
 import           Data.Time (diffUTCTime, getCurrentTime)
 import           Data.Word (Word64)
 import           System.Directory
@@ -30,8 +31,8 @@ runLogsRotator TracerConfig{rotation, logging} =
   whenJust rotation $
     launchRotator loggingParamsForFiles
  where
-  loggingParamsForFiles = nub . filter onlyForFiles $ logging
-  onlyForFiles LoggingParams{logMode} = logMode == FileMode
+  loggingParamsForFiles = nub . NE.filter filesOnly $ logging
+  filesOnly LoggingParams{logMode} = logMode == FileMode
 
 -- | All the logs with 'TraceObject's received from particular node
 -- will be stored in a separate directory, so they can be checked

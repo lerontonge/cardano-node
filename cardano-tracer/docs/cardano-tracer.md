@@ -65,14 +65,14 @@ The real-life example of the configuration file looks like this:
 
 ```
 {
-  "connectMode": "Initiator",
-  "acceptAt": [
-    "/tmp/forwarder-1.sock",
-    "/tmp/forwarder-2.sock",
-    "/tmp/forwarder-3.sock"
-  ],
-  "loRequestNum": 10,
-  "ekgRequestFreq": 1,
+  "network": {
+    "tag": "ConnectTo",
+    "contents": [
+      "/tmp/forwarder-1.sock",
+      "/tmp/forwarder-2.sock",
+      "/tmp/forwarder-3.sock"
+    ]
+  },
   "hasEKG": null,
   "hasPrometheus": [
     "127.0.0.1",
@@ -95,19 +95,27 @@ The real-life example of the configuration file looks like this:
 
 Let's explore it in detail.
 
-## Accept endpoints
+## Network endpoints
 
-The field `acceptAt` specifies a list of endpoints which using to connect `cardano-tracer` with one or more `cardano-node` processes:
+There are two ways how `cardano-tracer` can be connected to one or more `cardano-node`(s):
+
+1. As **initiator**, when `cardano-tracer` initiates network connection as a client.
+2. As **responder**, when `cardano-tracer` accepts network connection as a server.
+
+And the field `network` specifies it. In an example above it is initiator:
 
 ```
-"acceptAt": [
-  "/tmp/forwarder-1.sock",
-  "/tmp/forwarder-2.sock",
-  "/tmp/forwarder-3.sock"
-]
+"network": {
+  "tag": "ConnectTo",
+  "contents": [
+    "/tmp/forwarder-1.sock",
+    "/tmp/forwarder-2.sock",
+    "/tmp/forwarder-3.sock"
+  ]
+}
 ```
 
-where `/tmp/forwarder-*.sock` are local paths to Unix sockets. You can think of these sockets as channels to connect with nodes, in this example - with 3 nodes. It can be shown like this:
+These paths `/tmp/forwarder-*.sock` are local Unix sockets. You can think of these sockets as channels to connect with nodes, in this example - with 3 nodes. It can be shown like this:
 
 ```
                                                   +----------------+
@@ -121,24 +129,35 @@ where `/tmp/forwarder-*.sock` are local paths to Unix sockets. You can think of 
                                                   +----------------+
 ```
 
+But if `cardano-tracer` is a responder, this field looks like this:
+
+
+```
+"network": {
+  "tag": "AcceptAt",
+  "contents": "/tmp/forwarder.sock"
+}
+```
+
+In this case, `cardano-tracer` works as a server and just accepts incoming connections from one or more `cardano-node`(s) using local socket `/tmp/forwarder.sock`.
+
+
+
+
+
+
+
+
 Please note that `cardano-tracer` **does not** support connection via IP-address and port, to avoid unauthorized connections. So there are two possible cases:
 
 1. `cardano-tracer` and `cardano-node` work on the **same** machine. In this case, they will use the same Unix socket directly.
 2. `cardano-tracer` and `cardano-node` work on **different** machines. In this case, they will be connected using SSH socket forwarding (please see an explanation below). Also, this case corresponds to the situation when _one_ `cardano-tracer` is connected to _multiple_ `cardano-node`s.
 
-## Connection mode
-
-The field `connectMode` specifies the connection mode, i.e. how `cardano-tracer` and `cardano-node` will be connected. There are two possible modes, `Initiator` and `Responder`.
-
-The mode `Initiator` means that `cardano-tracer` **initiates** the connection, so you can think of `cardano-tracer` as a client and `cardano-node` as a server. By default you should use `Initiator` mode.
-
-The mode `Responder` means that `cardano-tracer` **accepts** the connection.
-
 ## Requests
 
-The field `loRequestNum` specifies the number of log items that will be requested from the node. In this example, `loRequestNum` is `10`, it means that `cardano-tracer` will periodically ask 10 log item in one request. It is useful to reduce the network traffic: it is possible to ask 50 log items in one request or ask them in 50 requests one at a time. Please note that if `loRequestNum` is bigger than the real number of log items in the node, all these items will be returned immediately. For example, if `cardano-tracer` asks 50 log items but the node has only 40 log items _in this moment of time_, these 40 items will be returned, there is no waiting for missing 10 items.
+The optional field `loRequestNum` specifies the number of log items that will be requested from the node. In this example, `loRequestNum` is `10`, it means that `cardano-tracer` will periodically ask 10 log item in one request. It is useful to reduce the network traffic: it is possible to ask 50 log items in one request or ask them in 50 requests one at a time. Please note that if `loRequestNum` is bigger than the real number of log items in the node, all these items will be returned immediately. For example, if `cardano-tracer` asks 50 log items but the node has only 40 log items _in this moment of time_, these 40 items will be returned, there is no waiting for missing 10 items.
 
-The field `ekgRequestFreq` specifies the period of how often EKG metrics will be requested, in seconds. In this example, `ekgRequestFreq` is `1`, which means that `cardano-tracer` will ask for new EKG metrics every second. Please note that there is no limit as `loRequestNum`, so every request returns _all_ the metrics the node has _in this moment of time_.
+The optional field `ekgRequestFreq` specifies the period of how often EKG metrics will be requested, in seconds. In this example, `ekgRequestFreq` is `1`, which means that `cardano-tracer` will ask for new EKG metrics every second. Please note that there is no limit as `loRequestNum`, so every request returns _all_ the metrics the node has _in this moment of time_.
 
 ## Logging
 
@@ -280,6 +299,12 @@ where:
 3. `USER_ON_MACHINE_A` is the name of your user on `A`,
 4. `IP_OF_MACHINE_A` is an IP address (or hostname) of `A`.
 
+Flags are:
+
+1. `-n` - prevents ssh from reading commands from stdin,
+2. `-N` - does not execute remote commands,
+3. `-T` - prevents a pseudo-tty being allocated.
+
 Real example:
 
 ```
@@ -295,3 +320,33 @@ First, run `cardano-node` on `A`. This is because `cardano-tracer` is configured
 Finally, run `cardano-tracer` on `B`.
 
 Please make sure that `TraceOptionForwarder` field in the node's configuration file and `acceptAt` field in the tracer's configuration file contain correct paths to the local sockets. In the previous example, both `TraceOptionForwarder` and `acceptAt` should contain `/tmp/cardano-tracer.sock` path.
+
+## Example 2
+
+Suppose you have:
+
+1. machine `A` with the **first** `cardano-node` installed,
+2. machine `B` with the **second** `cardano-node` installed,
+3. machine `C` with `cardano-tracer` installed and configured as `Initiator`,
+4. SSH-access from `C` to both `A` and `B`.
+
+Conceptually, this is the same example. You only have to run two `ssh`-commands on `C`, in two different terminals:
+
+```
+ssh -nNT -L /tmp/cardano-tracer-1.sock:/tmp/cardano-node.sock -o "ExitOnForwardFailure yes" john@109.75.33.121
+```
+
+```
+ssh -nNT -L /tmp/cardano-tracer-2.sock:/tmp/cardano-node.sock -o "ExitOnForwardFailure yes" denis@103.65.32.131
+```
+
+The first command connects the local socket `/tmp/cardano-tracer-1.sock` on your local machine with the local socket `/tmp/cardano-node.sock` on the first remote machine `109.75.33.121`. The second command connects the local socket `/tmp/cardano-tracer-2.sock` on your local machine with the local socket `/tmp/cardano-node.sock` on the second remote machine `103.65.32.131`.
+
+Now you can run the nodes on `A` and on `B`, then the tracer on `C`.
+
+## Example 3
+
+
+
+
+

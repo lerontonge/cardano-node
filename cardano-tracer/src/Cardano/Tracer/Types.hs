@@ -50,7 +50,7 @@ connIdToNodeId ConnectionId{remoteAddress} = NodeId preparedAddress
     $ show remoteAddress
 
 printNodeFullId :: Text -> NodeId -> Text
-printNodeFullId ""       (NodeId p) = T.drop 2 p -- In this case '--' in the beginning is useless.
+printNodeFullId ""       (NodeId p) = T.drop 2 p -- In this case, '--' in the beginning is useless.
 printNodeFullId nodeName (NodeId p) = nodeName <> p
 
 -- | We have to create EKG.Store and MetricsLocalStore

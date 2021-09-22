@@ -4,12 +4,14 @@
 module Cardano.Tracer.Run
   ( runCardanoTracer
   -- | For testing purposes.
+  , runCardanoTracerWithConfig
   , runCardanoTracerWithConfigBrakes
   ) where
 
 import           Control.Concurrent.Async (withAsync, wait)
 import           Control.Concurrent.STM.TVar (TVar)
 import           Control.Monad (void)
+import           Data.List.NonEmpty (NonEmpty)
 
 import           Cardano.Tracer.Acceptors (runAcceptors, runAcceptorsWithBrakes)
 import           Cardano.Tracer.CLI (TracerParams (..))
@@ -19,8 +21,13 @@ import           Cardano.Tracer.Handlers.Metrics.Run (runMetricsHandler)
 import           Cardano.Tracer.Types
 
 runCardanoTracer :: TracerParams -> IO ()
-runCardanoTracer TracerParams{tracerConfig} = do
-  config <- readTracerConfig tracerConfig
+runCardanoTracer TracerParams{tracerConfig} =
+  readTracerConfig tracerConfig >>= runCardanoTracerWithConfig
+
+runCardanoTracerWithConfig
+  :: TracerConfig
+  -> IO ()
+runCardanoTracerWithConfig config = do
   acceptedMetrics  <- initAcceptedMetrics
   acceptedNodeInfo <- initAcceptedNodeInfo
   run3ActionsInParallel
@@ -30,7 +37,7 @@ runCardanoTracer TracerParams{tracerConfig} = do
 
 runCardanoTracerWithConfigBrakes
   :: TracerConfig
-  -> [(TVar Bool, TVar Bool)]
+  -> NonEmpty (TVar Bool, TVar Bool)
   -> IO ()
 runCardanoTracerWithConfigBrakes config protocolsBrakes = do
   acceptedMetrics  <- initAcceptedMetrics
