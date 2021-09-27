@@ -70,13 +70,11 @@ library
                       , cardano-protocol-tpraos
                       , cardano-slotting
                       , containers
-                      , filepath
                       , ouroboros-consensus
                       , ouroboros-network
                       , plutus-ledger
                       , plutus-ledger-api
                       , plutus-tx
-                      , plutus-tx-plugin
                       , serialise
                       , shelley-spec-ledger
                       , strict-containers
