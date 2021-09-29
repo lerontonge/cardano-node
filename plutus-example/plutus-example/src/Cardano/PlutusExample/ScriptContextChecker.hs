@@ -259,7 +259,7 @@ txToCustomRedeemer sbe pparams utxo eInfo sStart (ShelleyTx ShelleyBasedEraAlonz
       scriptsNeeded = Alonzo.scriptsNeeded ledgerUTxO ledgerTx
       sPurpose = case scriptsNeeded of
                    [(p ,_)] -> Alonzo.transScriptPurpose p
-                   _ -> Prelude.error $ "More than one redeemer ptr: " <> show redeemerPtrs
+                   needed -> Prelude.error $ "More than one redeemer ptr: " <> show needed
       mTxIns = Prelude.map (Alonzo.txInfoIn ledgerUTxO) . Set.toList $ Alonzo.inputs txBody
       mTouts = Prelude.map Alonzo.txInfoOut $ seqToList $ Alonzo.outputs txBody
       minted = Alonzo.transValue $ Alonzo.mint txBody
