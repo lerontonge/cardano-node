@@ -15,9 +15,6 @@ import qualified Data.Text.IO as TIO
 import           Data.Void (Void)
 import           System.IO (hFlush, stdout)
 
-
-import Debug.Trace
-
 import           Cardano.Logging.DocuGenerator
 import           Cardano.Logging.Types
 import           Cardano.Logging.Utils (uncurry3)
@@ -55,12 +52,12 @@ standardTracer mbFilePath = do
     output stateRef LoggingContext {} Nothing (FormattedHuman _c msg) = liftIO $ do
       st  <- readIORef stateRef
       case stRunning st of
-        Just (inChannel, _, _) -> trace "write a message" $ writeChan inChannel msg
+        Just (inChannel, _, _) -> writeChan inChannel msg
         Nothing                -> pure ()
     output stateRef LoggingContext {} Nothing (FormattedMachine msg) = liftIO $ do
       st  <- readIORef stateRef
       case stRunning st of
-        Just (inChannel, _, _) -> trace "write a message" $ writeChan inChannel msg
+        Just (inChannel, _, _) -> writeChan inChannel msg
         Nothing                -> pure ()
     output stateRef LoggingContext {} (Just Reset) _msg = liftIO $ do
       st <- readIORef stateRef
