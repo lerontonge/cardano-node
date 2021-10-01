@@ -62,7 +62,9 @@ standardTracer mbFilePath = do
     output stateRef LoggingContext {} (Just Reset) _msg = liftIO $ do
       st <- readIORef stateRef
       case stRunning st of
-        Nothing -> initLogging stateRef
+        Nothing -> case stRunning st of
+                      Just (inChannel, _, _) -> pure ()
+                      Nothing                -> startWriterThread stateRef
         Just _  -> pure ()
     output _ lk (Just c@Document {}) (FormattedHuman co msg) =
        docIt
@@ -74,17 +76,13 @@ standardTracer mbFilePath = do
     output _stateRef LoggingContext {} _ _a = pure ()
 
 -- | Forks a new thread, which writes the messages either to stdout or a file
-initLogging :: IORef (StandardTracerState a) -> IO ()
-initLogging stateRef = do
+startWriterThread :: IORef (StandardTracerState a) -> IO ()
+startWriterThread stateRef = do
     (inChan, outChan) <- newChan 2048
     as <- async (writerThread stateRef outChan)
     modifyIORef stateRef (\ st ->
       st {stRunning = Just (inChan, outChan, as)})
 
-    -- this doesn't work for unknown reason
-    -- withAsync (writerThread stateRef outChan) (\ as ->
-    --   modifyIORef stateRef (\ st ->
-    --     st {stRunning = Just (inChan, outChan, as)})
 
 -- | The new thread, which does the actual write from the queue.
 -- runs forever, and never returns
