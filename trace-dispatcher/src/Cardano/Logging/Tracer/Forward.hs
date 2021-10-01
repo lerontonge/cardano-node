@@ -106,7 +106,7 @@ forwardTracer iomgr config nodeInfo = liftIO $ do
 
 launchForwarders
   :: IOManager
-  -> RemoteAddr
+  -> ForwarderAddr
   -> EKG.Store
   -> EKGF.ForwarderConfiguration
   -> TF.ForwarderConfiguration TraceObject
@@ -122,7 +122,7 @@ launchForwarders iomgr ep@(LocalSocket p) store ekgConfig tfConfig sink = flip
 
 launchForwardersViaLocalSocket
   :: IOManager
-  -> RemoteAddr
+  -> ForwarderAddr
   -> (EKGF.ForwarderConfiguration, TF.ForwarderConfiguration TraceObject)
   -> ForwardSink TraceObject
   -> EKG.Store

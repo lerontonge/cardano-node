@@ -21,7 +21,7 @@ module Cardano.Logging.Types (
   , SeverityS(..)
   , SeverityF(..)
   , ConfigOption(..)
-  , RemoteAddr(..)
+  , ForwarderAddr(..)
   , FormatLogging(..)
   , TraceConfig(..)
   , emptyTraceConfig
@@ -274,17 +274,17 @@ data ConfigOption =
   | ConfLimiter Text Double
   deriving (Eq, Ord, Show)
 
-newtype RemoteAddr
+newtype ForwarderAddr
   = LocalSocket FilePath
   deriving (Eq, Ord, Show)
 
-instance AE.FromJSON RemoteAddr where
-  parseJSON = AE.withObject "RemoteAddr" $ \o -> LocalSocket <$> o AE..: "filePath"
+instance AE.FromJSON ForwarderAddr where
+  parseJSON = AE.withObject "ForwarderAddr" $ \o -> LocalSocket <$> o AE..: "filePath"
 
 data TraceConfig = TraceConfig {
      -- | Options specific to a certain namespace
     tcOptions            :: Map.Map Namespace [ConfigOption]
-  , tcForwarder          :: RemoteAddr
+  , tcForwarder          :: ForwarderAddr
   , tcForwarderQueueSize :: Int
 }
   deriving (Eq, Ord, Show)
@@ -325,7 +325,8 @@ data LogDoc = LogDoc {
 emptyLogDoc :: Text -> [(Text, Text)] -> LogDoc
 emptyLogDoc d m = LogDoc d (Map.fromList m) [] [] [] [] [] [] []
 
--- | Type for a Fold
+-- | Type for the functions foldTraceM and foldMTraceM from module
+-- Cardano/Logging/Trace
 newtype Folding a b = Folding b
 
 unfold :: Folding a b -> b

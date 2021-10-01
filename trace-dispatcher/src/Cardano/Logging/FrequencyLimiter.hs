@@ -84,21 +84,21 @@ data FrequencyRec a = FrequencyRec {
 } deriving (Show)
 
 -- | Limits the frequency of messages to nMsg which is given per minute.
-
+--
 -- If the limiter detects more messages, it traces randomly selected
--- messages with the given percentage on the 'vtracer' until the
+-- messages with the given frequency on the 'vtracer' until the
 -- frequency falls under the treshold long enough.(see below)
-
+--
 -- Before this the 'ltracer' gets a 'StartLimiting' message.
 -- Inbetween you receive 'ContinueLimiting' messages on the 'ltracer'
 -- every 'reminderPeriod' seconds, with the number of suppressed messages.
 -- Finally it sends a 'StopLimiting' message on the 'ltracer' and traces all
 -- messages on the 'vtracer' again.
-
+--
 -- A budget is used to decide when to start limiting and stop limiting,
 -- so that the limiter does not get activated if few messages are send in
 -- high frequency, and doesn't get deactivated if their are only few messages
--- which come with low frequency.  When messages arrive in shorter frquency then
+-- which come with low frequency.  When messages arrive in shorter frequency then
 -- by the given 'thresholdFrequency' budget is earned, and if they
 -- arrive in a longer period budget is spend. If budget is gets higher
 -- then 'budgetLimit', the limiter starts, and if it falls below minus 'budgetLimit'

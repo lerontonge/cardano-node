@@ -497,7 +497,7 @@ data TraceConfig = TraceConfig {
      -- | Options specific to a certain namespace
     tcOptions            :: Map.Map Namespace [ConfigOption]
      -- | Options for trace-forwarder    
-  , tcForwarder          :: RemoteAddr
+  , tcForwarder          :: ForwarderAddr
   , tcForwarderQueueSize :: Int
 }
 ```

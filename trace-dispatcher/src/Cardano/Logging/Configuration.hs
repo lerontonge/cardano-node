@@ -461,7 +461,7 @@ data ConfigRepresentation = ConfigRepresentation {
   , traceOptionDetail           :: [TraceOptionDetail]
   , traceOptionBackend          :: [TraceOptionBackend]
   , traceOptionLimiter          :: [TraceOptionLimiter]
-  , traceOptionForwarder        :: RemoteAddr
+  , traceOptionForwarder        :: ForwarderAddr
   , traceOptionForwardQueueSize :: Int
   }
   deriving (Eq, Ord, Show)
