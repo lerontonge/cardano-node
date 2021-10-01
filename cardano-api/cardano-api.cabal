@@ -131,6 +131,7 @@ library
                       , ouroboros-consensus-shelley
                       , ouroboros-network
                       , ouroboros-network-framework
+                      , parsec
                       , plutus-ledger-api
                       , prettyprinter
                       , scientific

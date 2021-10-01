@@ -138,11 +138,12 @@ module Cardano.Api.TxBody (
 import           Prelude
 
 import           Control.Monad (guard)
-import           Data.Aeson (object, (.=))
+import           Data.Aeson (object, withText, (.=))
 import qualified Data.Aeson as Aeson
 import           Data.Aeson.Types (ToJSONKey (..), toJSONKeyText)
 import           Data.Bifunctor (first)
 import           Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Foldable (toList)
 import           Data.Function (on)
@@ -159,6 +160,10 @@ import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word (Word64)
 import           GHC.Generics
+import qualified Text.Parsec as Parsec
+import qualified Text.Parsec.Language as Parsec
+import qualified Text.Parsec.String as Parsec
+import qualified Text.Parsec.Token as Parsec
 
 import           Cardano.Binary (Annotated (..), reAnnotate, recoverBytes)
 import qualified Cardano.Binary as CBOR
@@ -384,6 +389,29 @@ instance ToJSON TxIn where
 
 instance ToJSONKey TxIn where
   toJSONKey = toJSONKeyText renderTxIn
+
+instance FromJSON TxIn where
+  parseJSON = withText "TxIn" $ \txinStr ->
+    case Parsec.parse (parseTxIn <* Parsec.eof) "" (Text.unpack txinStr) of
+      Right txin -> pure txin
+      Left parseError -> fail $ formatParsecError parseError
+
+parseTxId :: Parsec.Parser TxId
+parseTxId = do
+  str <- Parsec.many1 Parsec.hexDigit Parsec.<?> "transaction id (hexadecimal)"
+  case deserialiseFromRawBytesHex AsTxId (BSC.pack str) of
+    Just addr -> return addr
+    Nothing -> fail $ "Incorrect transaction id format:: " ++ show str
+
+parseTxIn :: Parsec.Parser TxIn
+parseTxIn = TxIn <$> parseTxId <*> (Parsec.char '#' *> parseTxIx)
+
+parseTxIx :: Parsec.Parser TxIx
+parseTxIx = TxIx . fromIntegral <$> decimal
+
+decimal :: Parsec.Parser Integer
+Parsec.TokenParser { Parsec.decimal = decimal } = Parsec.haskell
+
 
 renderTxIn :: TxIn -> Text
 renderTxIn (TxIn txId (TxIx ix)) =
