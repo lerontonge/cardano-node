@@ -1,8 +1,7 @@
-{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE OverloadedStrings #-}
 
 -- | This  module initializes a reforwarding service for use by
 --   cardano-tracer.  It could [re-] serve the three miniprotocols on
@@ -16,22 +15,21 @@ module Cardano.Tracer.Handlers.ReForwarder
   ( initReForwarder
   ) where
 
-import           Control.Monad(when)
-import           Data.List (isPrefixOf)
-import qualified Data.Text as Text
-
-import           Ouroboros.Network.Magic (NetworkMagic (..))
-import           Ouroboros.Network.NodeToClient (withIOManager)
-
 import           Cardano.Logging.Forwarding
 import           Cardano.Logging.Trace
 import           Cardano.Logging.Tracer.DataPoint
-import           Cardano.Logging.Types qualified as Log
-import           Trace.Forward.Utils.DataPoint
-import           Trace.Forward.Utils.TraceObject (writeToSink,ForwardSink)
-
+import qualified Cardano.Logging.Types as Log
 import           Cardano.Tracer.Configuration
 import           Cardano.Tracer.MetaTrace
+import           Ouroboros.Network.Magic (NetworkMagic (..))
+import           Ouroboros.Network.NodeToClient (withIOManager)
+
+import           Control.Monad (when)
+import           Data.List (isPrefixOf)
+import qualified Data.Text as Text
+
+import           Trace.Forward.Utils.DataPoint
+import           Trace.Forward.Utils.TraceObject (ForwardSink, writeToSink)
 
 -- | Initialize the reforwarding service if configured to be active.
 --   Returns
@@ -62,18 +60,18 @@ initReForwarder TracerConfig{networkMagic, hasForwarding}
                           fwdsink
                       , dataPointTracer @IO dpStore
                       )
-  
+
   let traceDP = case mForwarding of
                   Just (_,tr) -> tr
                   Nothing     -> mempty
-                 
+
   let writesToSink' =
         case mForwarding of
           Just (writeToSink',_) ->
             mapM_ writeToSink'
           _ ->
             const $ return ()
-    
+
   return (writesToSink', traceDP)
 
 
@@ -89,4 +87,4 @@ filteredWriteToSink :: (Log.TraceObject -> Bool)
                     -> Log.TraceObject -> IO ()
 filteredWriteToSink p fwdsink logObj =
   when (p logObj) $ writeToSink fwdsink logObj
-           
+

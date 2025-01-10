@@ -7,14 +7,6 @@ module Cardano.Tracer.Handlers.RTView.UI.HTML.Body
   ( mkPageBody
   ) where
 
-import           Control.Monad (unless, void, when)
-import           Control.Monad.Extra (whenJustM, whenM)
-import           Data.Text (Text)
-import qualified Graphics.UI.Threepenny as UI
-import           Graphics.UI.Threepenny.Core
-import           Graphics.UI.Threepenny.JQuery (Easing (..), fadeIn, fadeOut)
-import           Text.Read (readMaybe)
-
 import           Cardano.Tracer.Configuration
 import           Cardano.Tracer.Environment
 import           Cardano.Tracer.Handlers.RTView.State.Historical
@@ -33,15 +25,25 @@ import           Cardano.Tracer.Handlers.RTView.UI.Types
 import           Cardano.Tracer.Handlers.RTView.UI.Utils
 import           Cardano.Tracer.Handlers.RTView.Update.Logs
 
+import           Control.Monad (unless, void, when)
+import           Control.Monad.Extra (whenJustM, whenM)
+import           Data.Text (Text)
+import           Text.Read (readMaybe)
+
+import qualified Graphics.UI.Threepenny as UI
+import           Graphics.UI.Threepenny.Core
+import           Graphics.UI.Threepenny.JQuery (Easing (..), fadeIn, fadeOut)
+
 mkPageBody
   :: TracerEnv
+  -> TracerEnvRTView
   -> Network
   -> DatasetsIndices
   -> UI Element
-mkPageBody tracerEnv networkConfig dsIxs = do
-  let ResHistory rHistory   = teResourcesHistory tracerEnv
-      ChainHistory cHistory = teBlockchainHistory tracerEnv
-      TXHistory tHistory    = teTxHistory tracerEnv
+mkPageBody tracerEnv tracerEnvRTView networkConfig dsIxs = do
+  let ResHistory rHistory   = teResourcesHistory tracerEnvRTView
+      ChainHistory cHistory = teBlockchainHistory tracerEnvRTView
+      TXHistory tHistory    = teTxHistory tracerEnvRTView
 
   txsProcessedNumTimer <- mkChartTimer tracerEnv tHistory dsIxs TxsProcessedNumData TxsProcessedNumChart
   mempoolBytesTimer    <- mkChartTimer tracerEnv tHistory dsIxs MempoolBytesData    MempoolBytesChart
@@ -118,13 +120,13 @@ mkPageBody tracerEnv networkConfig dsIxs = do
                               # set dataTooltip "Click to hide Resources"
                               # set dataState shownState
 
-  on UI.click showHideTxs . const $
+  on_ UI.click showHideTxs do
     changeVisibilityForCharts showHideTxs "transactions-charts" "Transactions"
-  on UI.click showHideChain . const $
+  on_ UI.click showHideChain do
     changeVisibilityForCharts showHideChain "chain-charts" "Blockchain"
-  on UI.click showHideLeadership . const $
+  on_ UI.click showHideLeadership do
     changeVisibilityForCharts showHideLeadership "leadership-charts" "Leadership"
-  on UI.click showHideResources . const $
+  on_ UI.click showHideResources do
     changeVisibilityForCharts showHideResources "resources-charts" "Resources"
 
   logsLiveView <- mkLogsLiveView tracerEnv
@@ -132,7 +134,7 @@ mkPageBody tracerEnv networkConfig dsIxs = do
                                   #. "button is-info is-medium"
                                   # set text "Logs view"
                                   # hideIt
-  on UI.click logsLiveViewButton . const $ do
+  on_ UI.click logsLiveViewButton do
     fadeInModal logsLiveView
     void $ element logsLiveView # set dataState "opened"
     updateLogsLiveViewNodes tracerEnv
@@ -146,7 +148,7 @@ mkPageBody tracerEnv networkConfig dsIxs = do
           [ UI.div ## "preloader" #. "pageloader is-active" #+
               [ UI.span #. "title" # set text "Just a second..."
               ]
-          , topNavigation tracerEnv
+          , topNavigation tracerEnv tracerEnvRTView
           , mkNoNodesInfo networkConfig
           , UI.mkElement "section" #. "section" #+
               [ UI.div ## "main-table-container"
@@ -394,7 +396,7 @@ mkPageBody tracerEnv networkConfig dsIxs = do
   UI.start aboutToLeadTimer
   UI.start couldNotForgeTimer
 
-  on UI.disconnect window . const $ do
+  on_ UI.disconnect window do
     UI.stop txsProcessedNumTimer
     UI.stop mempoolBytesTimer
     UI.stop txsInMempoolTimer
@@ -451,7 +453,7 @@ mkPageBody tracerEnv networkConfig dsIxs = do
         , UI.option # set value "3600" # set text "1 hour"
         ]
 
-    on UI.selectionChange selectTimeRange . const $
+    on_ UI.selectionChange selectTimeRange do
       whenJustM (readMaybe <$> get value selectTimeRange) $ \(rangeInSec :: Int) -> do
         Chart.setTimeRange chartId rangeInSec
         when (rangeInSec == 0) $ do
@@ -462,10 +464,10 @@ mkPageBody tracerEnv networkConfig dsIxs = do
           Chart.resetZoomChartJS chartId
         saveChartsSettings tracerEnv
 
-    on UI.selectionChange selectUpdatePeriod . const $
-      whenJustM (readMaybe <$> get value selectUpdatePeriod) $ \(periodInSec :: Int) -> do
+    on_ UI.selectionChange selectUpdatePeriod do
+      whenJustM (readMaybe <$> get value selectUpdatePeriod) \(periodInSec :: Int) -> do
         whenM (get UI.running chartUpdateTimer) $ UI.stop chartUpdateTimer
-        unless (periodInSec == 0) $ do
+        unless (periodInSec == 0) do
           void $ return chartUpdateTimer # set UI.interval (periodInSec * 1_000)
           UI.start chartUpdateTimer
         saveChartsSettings tracerEnv
@@ -489,13 +491,14 @@ mkPageBody tracerEnv networkConfig dsIxs = do
       , UI.canvas ## show chartId #. "rt-view-chart-area" #+ []
       ]
 
-topNavigation :: TracerEnv -> UI Element
-topNavigation tracerEnv@TracerEnv{teEventsQueues} = do
+topNavigation :: TracerEnv -> TracerEnvRTView -> UI Element
+topNavigation tracerEnv TracerEnvRTView{teEventsQueues} = do
   info <- mkAboutInfo
   infoIcon <- image "has-tooltip-multiline has-tooltip-bottom rt-view-info-icon mr-1" rtViewInfoSVG
                     ## "info-icon"
                     # set dataTooltip "RTView info"
-  on UI.click infoIcon . const $ fadeInModal info
+  on_ UI.click infoIcon do
+    fadeInModal info
 
   notificationsEvents   <- mkNotificationsEvents tracerEnv teEventsQueues
   notificationsSettings <- mkNotificationsSettings tracerEnv
@@ -508,9 +511,9 @@ topNavigation tracerEnv@TracerEnv{teEventsQueues} = do
                                  [ image "rt-view-notify-menu-icon" settingsSVG
                                  , string "Settings"
                                  ]
-  on UI.click notificationsEventsItem . const $
+  on_ UI.click notificationsEventsItem do
     fadeInModal notificationsEvents
-  on UI.click notificationsSettingsItem . const $ do
+  on_ UI.click notificationsSettingsItem do
     restoreEmailSettings tracerEnv
     fadeInModal notificationsSettings
 
@@ -520,7 +523,8 @@ topNavigation tracerEnv@TracerEnv{teEventsQueues} = do
   themeIcon <- image "has-tooltip-multiline has-tooltip-bottom rt-view-theme-icon" rtViewThemeToLightSVG
                      ## "theme-icon"
                      # set dataTooltip "Switch to light theme"
-  on UI.click themeIcon . const $ switchTheme tracerEnv
+  on_ UI.click themeIcon do
+    switchTheme tracerEnv
 
   UI.div ## "top-bar" #. "navbar rt-view-top-bar" #+
     [ element info
@@ -556,12 +560,12 @@ footer =
             [ string "© IOHK 2015—2022"
             ]
         , UI.div #. "column has-text-right" #+
-            [ UI.anchor # set UI.href "https://github.com/input-output-hk/cardano-node/blob/master/cardano-tracer/README.md"
+            [ UI.anchor # set UI.href "https://github.com/intersectmbo/cardano-node/blob/master/cardano-tracer/README.md"
                         # set UI.target "_blank" #+
                 [ image "has-tooltip-multiline has-tooltip-left rt-view-footer-github" githubSVG
                         # set dataTooltip "Browse our GitHub repository"
                 ]
-            , UI.anchor # set UI.href "https://github.com/input-output-hk/cardano-node/blob/master/cardano-tracer/docs/cardano-rtview.md"
+            , UI.anchor # set UI.href "https://github.com/intersectmbo/cardano-node/blob/master/cardano-tracer/docs/cardano-rtview.md"
                         # set UI.target "_blank" #+
                 [ image "has-tooltip-multiline has-tooltip-left rt-view-footer-doc" docSVG
                         # set dataTooltip "Read RTView documentation"
@@ -595,35 +599,16 @@ changeVisibilityForCharts showHideIcon areaId areaName = do
                                     # set dataState   shownState
                                     # set dataTooltip ("Click to hide " <> areaName)
 
-mkChartTimer, mkChartTimer'
-  :: TracerEnv
-  -> History
-  -> DatasetsIndices
-  -> DataName
-  -> ChartId
-  -> UI UI.Timer
+mkChartTimer, mkChartTimer' :: PointsAdder UI.Timer
 mkChartTimer  = doMakeChartTimer addPointsToChart
 mkChartTimer' = doMakeChartTimer addAllPointsToChart
 
-type PointsAdder =
-     TracerEnv
-  -> History
-  -> DatasetsIndices
-  -> DataName
-  -> ChartId
-  -> UI ()
-
 doMakeChartTimer
-  :: PointsAdder
-  -> TracerEnv
-  -> History
-  -> DatasetsIndices
-  -> DataName
-  -> ChartId
-  -> UI UI.Timer
+  :: PointsAdder ()
+  -> PointsAdder UI.Timer
 doMakeChartTimer addPoints tracerEnv history datasetIndices dataName chartId = do
   uiUpdateTimer <- UI.timer # set UI.interval defaultUpdatePeriodInMs
-  on UI.tick uiUpdateTimer . const $
+  on_ UI.tick uiUpdateTimer do
     addPoints tracerEnv history datasetIndices dataName chartId
   return uiUpdateTimer
  where

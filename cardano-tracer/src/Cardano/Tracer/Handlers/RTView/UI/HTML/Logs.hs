@@ -6,14 +6,15 @@ module Cardano.Tracer.Handlers.RTView.UI.HTML.Logs
   ( mkLogsLiveView
   ) where
 
-import           Control.Monad (void)
-import qualified Graphics.UI.Threepenny as UI
-import           Graphics.UI.Threepenny.Core
-
 import           Cardano.Tracer.Environment
 import           Cardano.Tracer.Handlers.RTView.UI.Img.Icons
 import           Cardano.Tracer.Handlers.RTView.UI.Logs
 import           Cardano.Tracer.Handlers.RTView.UI.Utils
+
+import           Control.Monad (void)
+
+import qualified Graphics.UI.Threepenny as UI
+import           Graphics.UI.Threepenny.Core
 
 mkLogsLiveView :: TracerEnv -> UI Element
 mkLogsLiveView tracerEnv = do
@@ -75,7 +76,7 @@ mkLogsLiveView tracerEnv = do
              # set min_     "1"
              # set max_     "6"
              # set value    "5"
-  on change fontSetter . const $ do
+  on_ change fontSetter do
     window <- askWindow
     fontSizePct <-
       get value fontSetter >>= \case
@@ -146,7 +147,7 @@ mkLogsLiveView tracerEnv = do
           -}
           ]
       ]
-  on UI.click closeIt . const $ do
+  on_ UI.click closeIt do
     void $ element logsLiveViewTable #. "modal"
     void $ element logsLiveViewTable # set dataState "closed"
 

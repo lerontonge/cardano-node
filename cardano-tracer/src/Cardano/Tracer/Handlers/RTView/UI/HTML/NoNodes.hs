@@ -8,15 +8,16 @@ module Cardano.Tracer.Handlers.RTView.UI.HTML.NoNodes
   , showNoNodes
   ) where
 
-import           Data.List (intercalate)
-import qualified Data.List.NonEmpty as NE
-import           Data.String.QQ
-import qualified Graphics.UI.Threepenny as UI
-import           Graphics.UI.Threepenny.Core
-
 import           Cardano.Tracer.Configuration
 import           Cardano.Tracer.Handlers.RTView.UI.Img.Icons
 import           Cardano.Tracer.Handlers.RTView.UI.Utils
+
+import           Data.List (intercalate)
+import qualified Data.List.NonEmpty as NE
+import           Data.String.QQ
+
+import qualified Graphics.UI.Threepenny as UI
+import           Graphics.UI.Threepenny.Core
 
 -- | If the user doesn't see connected nodes - possible reason of it is
 --   misconfiguration of 'cardano-tracer' and/or 'cardano-node'.
@@ -26,7 +27,8 @@ mkNoNodesInfo :: Network -> UI Element
 mkNoNodesInfo networkConfig = do
   window <- askWindow
   closeIt <- UI.button #. "delete" # set (UI.attr "aria-label") "delete"
-  on UI.click closeIt . const $ findAndHide window "no-nodes-info"
+  on_ UI.click closeIt do
+    findAndHide window "no-nodes-info"
 
   UI.div ## "no-nodes" #. "container is-max-widescreen" #+
     [ UI.p #. "has-text-centered" #+
@@ -62,7 +64,7 @@ mkNoNodesInfo networkConfig = do
                 ]
             , UI.p #. "mt-5" #+
                 [ UI.span # set UI.html sshNote
-                , UI.anchor # set UI.href "https://github.com/input-output-hk/cardano-node/blob/master/cardano-tracer/docs/cardano-tracer.md#distributed-scenario"
+                , UI.anchor # set UI.href "https://github.com/intersectmbo/cardano-node/blob/master/cardano-tracer/docs/cardano-tracer.md#distributed-scenario"
                             # set text "here"
                             # set UI.target "_blank"
                 , image "rt-view-href-icon" externalLinkSVG
@@ -73,7 +75,7 @@ mkNoNodesInfo networkConfig = do
                 ]
             , UI.p #. "mt-5" #+
                 [ string "For more details, please read "
-                , UI.anchor # set UI.href "https://github.com/input-output-hk/cardano-node/blob/master/cardano-tracer/docs/cardano-tracer.md#configuration"
+                , UI.anchor # set UI.href "https://github.com/intersectmbo/cardano-node/blob/master/cardano-tracer/docs/cardano-tracer.md#configuration"
                             # set text "our documentation"
                             # set UI.target "_blank"
                 , image "rt-view-href-icon" externalLinkSVG

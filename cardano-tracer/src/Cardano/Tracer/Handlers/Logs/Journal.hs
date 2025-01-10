@@ -1,10 +1,5 @@
 {-# LANGUAGE CPP #-}
-
-#if defined(linux_HOST_OS)
-#define LINUX
-#endif
-
-#ifdef LINUX
+#ifdef SYSTEMD
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 #endif
@@ -13,40 +8,38 @@ module Cardano.Tracer.Handlers.Logs.Journal
   ( writeTraceObjectsToJournal
   ) where
 
-#ifdef LINUX
+#ifdef SYSTEMD
+import qualified Cardano.Logging as L
+#endif
+import           Cardano.Logging (TraceObject (..))
+import           Cardano.Tracer.Configuration (LogFormat (..))
+import           Cardano.Tracer.Types (NodeName)
+
+#ifdef SYSTEMD
 import           Data.Char (isDigit)
+import           Data.Maybe (fromMaybe)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.Text as T
 import           Data.Text.Encoding (encodeUtf8)
 import           Data.Time.Format (defaultTimeLocale, formatTime)
+
 import           Systemd.Journal (Priority (..), message, mkJournalField, priority,
                    sendJournalFields, syslogIdentifier)
 
-import           Cardano.Logging (TraceObject (..))
-import qualified Cardano.Logging as L
-
-import           Cardano.Tracer.Types
-#else
-import           Cardano.Logging (TraceObject)
-
-import           Cardano.Tracer.Types
-#endif
-
-#ifdef LINUX
 -- | Store 'TraceObject's in Linux systemd's journal service.
-writeTraceObjectsToJournal :: NodeName -> [TraceObject] -> IO ()
-writeTraceObjectsToJournal nodeName = mapM_ (sendJournalFields . mkJournalFields)
+writeTraceObjectsToJournal :: LogFormat -> NodeName -> [TraceObject] -> IO ()
+writeTraceObjectsToJournal logFormat nodeName =
+  mapM_ (sendJournalFields . mkJournalFields)
  where
-  mkJournalFields trOb@TraceObject{toHuman, toMachine} =
-    case (toHuman, toMachine) of
-      (Just msgForHuman, Nothing)            -> mkJournalFields' trOb msgForHuman
-      (Nothing,          Just msgForMachine) -> mkJournalFields' trOb msgForMachine
-      (Just _,           Just msgForMachine) -> mkJournalFields' trOb msgForMachine
-      (Nothing,          Nothing)            -> HM.empty
+  -- when no forHuman message is implemented for a trace, fallback to forMachine (same as for file handler)
+  getMsg :: TraceObject -> T.Text
+  getMsg = case logFormat of
+    ForMachine -> toMachine
+    ForHuman   -> \TraceObject{toHuman, toMachine} -> fromMaybe toMachine toHuman
 
-  mkJournalFields' TraceObject{toSeverity, toNamespace, toThreadId, toTimestamp} msg =
+  mkJournalFields trObj@TraceObject{toSeverity, toNamespace, toThreadId, toTimestamp} =
        syslogIdentifier nodeName
-    <> message msg
+    <> message (getMsg trObj)
     <> priority (mkPriority toSeverity)
     <> HM.fromList
          [ (namespace, encodeUtf8 $ mkName toNamespace)
@@ -72,7 +65,7 @@ writeTraceObjectsToJournal nodeName = mapM_ (sendJournalFields . mkJournalFields
   mkPriority L.Alert     = Alert
   mkPriority L.Emergency = Emergency
 #else
--- It works on Linux only.
-writeTraceObjectsToJournal :: NodeName -> [TraceObject] -> IO ()
-writeTraceObjectsToJournal _ _ = return ()
+-- It works only on Linux distributions with systemd support.
+writeTraceObjectsToJournal :: LogFormat -> NodeName -> [TraceObject] -> IO ()
+writeTraceObjectsToJournal _ _ _ = pure ()
 #endif

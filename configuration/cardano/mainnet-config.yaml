@@ -8,9 +8,11 @@ AlonzoGenesisHash: 7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed
 ByronGenesisFile: mainnet-byron-genesis.json
 ByronGenesisHash: 5f20df933584822601f9e3f8c024eb5eb252fe8cefb24d1317dc3d432e940ebb
 ConwayGenesisFile: mainnet-conway-genesis.json
-ConwayGenesisHash: f28f1c1280ea0d32f8cd3143e268650d6c1a8e221522ce4a7d20d62fc09783e1
+ConwayGenesisHash: 15a199f895e461ec0ffc6dd4e4028af28a492ab4e806d39cb674c88f7643ef62
 ShelleyGenesisFile: mainnet-shelley-genesis.json
 ShelleyGenesisHash: 1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81
+
+EnableP2P: true
 
 ##### Core protocol parameters #####
 
@@ -24,11 +26,23 @@ RequiresNetworkMagic: RequiresNoMagic
 # This protocol version number gets used by block producing nodes as part
 # of the system for agreeing on and synchronising protocol updates.
 #
-# See https://github.com/input-output-hk/cardano-node/blob/master/cardano-node/src/Cardano/Node/Protocol/Cardano.hs#L199
+# See https://github.com/intersectmbo/cardano-node/blob/master/cardano-node/src/Cardano/Node/Protocol/Cardano.hs#L199
 LastKnownBlockVersion-Major: 3
 LastKnownBlockVersion-Minor: 0
 LastKnownBlockVersion-Alt: 0
 MaxKnownMajorProtocolVersion: 2
+
+##### Network Configuration #####
+
+PeerSharing: True
+TargetNumberOfActivePeers: 20
+TargetNumberOfEstablishedPeers: 40
+TargetNumberOfKnownPeers: 150
+TargetNumberOfRootPeers: 60
+
+##### Version Information #####
+
+MinNodeVersion: 8.12.0
 
 ##### Logging configuration #####
 
@@ -39,6 +53,9 @@ TurnOnLogging: True
 # These metrics are traced in the context name: 'cardano.node.metrics' and can
 # be directed to the logs or monitoring backends.
 TurnOnLogMetrics: True
+
+# Use legacy tracing
+UseTraceDispatcher: False
 
 # Global logging severity filter. Messages must have at least this severity to
 # pass. Typical values would be Warning, Notice, Info or Debug.
@@ -180,7 +197,7 @@ TraceLocalErrorPolicy: True
 TraceForge: True
 
 # Trace Handshake protocol messages.
-TraceHandshake: False
+TraceHandshake: True
 
 # Trace IP Subscription messages.
 TraceIpSubscription: True
@@ -203,8 +220,11 @@ TraceServer: True
 # Trace local ChainSync protocol messages.
 TraceLocalChainSyncProtocol: False
 
+# Trace local connection manager messages.
+TraceLocalConnectionManager: True
+
 # Trace local Handshake protocol messages.
-TraceLocalHandshake: False
+TraceLocalHandshake: True
 
 # Trace local TxSubmission protocol messages.
 TraceLocalTxSubmissionProtocol: False
@@ -213,7 +233,7 @@ TraceLocalTxSubmissionProtocol: False
 TraceLocalTxSubmissionServer: False
 
 # Trace mempool.
-TraceMempool: True
+TraceMempool: False
 
 # Trace Mux Events.
 TraceMux: False
@@ -226,7 +246,6 @@ TraceTxOutbound: False
 
 # Trace TxSubmission protocol messages.
 TraceTxSubmissionProtocol: False
-
 
 ##### Fine grained logging control #####
 

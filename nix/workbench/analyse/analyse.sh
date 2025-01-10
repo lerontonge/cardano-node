@@ -94,6 +94,20 @@ local multi_aspect='--inter-cdf' rtsmode=
 local locli_render=() locli_timeline=()
 locli_args=()
 
+if test -v "WB_BACKEND"
+then backend=$WB_BACKEND
+else backend=
+fi
+
+if test -v "WB_LOCLI_DB"
+then storage=$WB_LOCLI_DB
+else storage=0
+fi
+if [[ $storage -eq 1 ]]
+then info analyse "$(red locli storage backend: database)"
+else info analyse "$(red locli storage backend: file)"
+fi
+
 progress "analyse" "args:  $(yellow $*)"
 while test $# -gt 0
 do case "$1" in
@@ -124,6 +138,12 @@ do case "$1" in
        * ) break;; esac; shift; done
 
 local op=${1:-$analyse_default_op}; if test $# != 0; then shift; fi
+
+if [ $backend = "nomadcloud" ]
+then
+   rtsmode='lomem'
+   verbose "analyse" "backend is nomadcloud - forcing $(yellow --lomem)"
+fi
 
 verbose "analyse" "op:    $(yellow $op)"
 verbose "analyse" "sargs: $(yellow ${sargs[*]})"
@@ -221,6 +241,7 @@ EOF
 
     standard | full | std )
         local script=(
+            hash-timeline
             logs               $(test -n "$dump_logobjects" && echo 'dump-logobjects')
             read-context
 
@@ -399,10 +420,13 @@ EOF
 
         local v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 va vb vc vd ve vf vg vh vi vj vk vl vm vn vo
         v0=( $* )
-        v1=("${v0[@]/#logs/                 'unlog' --run-logs \"$adir\"/log-manifest.json ${analysis_allowed_loanys[*]/#/--ok-loany } }")
-        v2=("${v1[@]/#read-context/         'read-meta-genesis' --run-metafile    \"$dir\"/meta.json --shelley-genesis \"$dir\"/genesis-shelley.json }")
+        if [[ $storage -eq 1 ]]
+        then v1=("${v0[@]/#logs/            'unlog-db' --run-logs \"$adir\"/log-manifest-db.json }")
+        else v1=("${v0[@]/#logs/            'unlog' --run-logs \"$adir\"/log-manifest.json ${analysis_allowed_loanys[*]/#/--ok-loany } }")
+        fi
+        v2=("${v1[@]/#read-context/         'read-meta-genesis'  --run-metafile    \"$dir\"/meta.json --shelley-genesis \"$dir\"/genesis-shelley.json }")
         v3=("${v2[@]/#write-context/        'write-meta-genesis' --run-metafile    \"$dir\"/meta.json --shelley-genesis \"$dir\"/genesis-shelley.json }")
-        v4=("${v3[@]/#read-chain/           'read-chain'            --chain \"$adir\"/chain.json}")
+        v4=("${v3[@]/#read-chain/           'read-chain'         --chain \"$adir\"/chain.json}")
         v5=("${v4[@]/#rebuild-chain/        'rebuild-chain'                  ${filters[@]}}")
         v6=("${v5[@]/#dump-chain/           'dump-chain'         --chain \"$adir\"/chain.json --chain-rejecta \"$adir\"/chain-rejecta.json }")
         v7=("${v6[@]/#chain-timeline/       'timeline-chain'     --timeline \"$adir\"/chain.txt                ${locli_render[*]} ${locli_timeline[*]} }")
@@ -427,8 +451,9 @@ EOF
         vq=("${vp[@]/#read-summaries/       'read-summaries'        --summary \"$adir\"/summary.json }")
         vr=("${vq[@]/#summary-json/         'render-summary'           --json \"$adir\"/summary.json }")
         vs=("${vr[@]/#summary-report/       'render-summary'     --org-report \"$adir\"/summary.org            ${locli_render[*]}}")
+        vt=("${vs[@]/#hash-timeline/        'hash-timeline'        --timeline \"$adir\"/hash-timeline.json }")
         local ops_final=()
-        for v in "${vs[@]}"
+        for v in "${vt[@]}"
         do eval ops_final+=($v); done
 
         call_locli "$rtsmode" "${ops_final[@]}"
@@ -437,7 +462,9 @@ EOF
                                     fgrep -v -e '.flt.json'             \
                                              -e '.logobjs.json'         \
                                              -e 'chain.json'            \
+                                             -e 'hash-timeline.json'    \
                                              -e 'log-manifest.json'     \
+                                             -e 'log-manifest-db.json'  \
                                              -e 'mach-views.json'       \
                                              -e 'prof.json'             \
                                              -e 'tracefreq.json'
@@ -526,6 +553,12 @@ EOF
         ;;
 
     prepare | prep )
+        if [[ $storage -eq 1 ]]
+        then analyse prepare-db   "$@"
+        else analyse prepare-file "$@"
+        fi;;
+
+    prepare-file | prep-file )
         local usage="USAGE: wb analyse $op [[IDENT:]RUN-NAME=current].."
 
         local runspec=${1:-current}; if test $# != 0; then shift; fi
@@ -542,18 +575,7 @@ EOF
         local adir=$dir/analysis
         mkdir -p "$adir"/{cdf,png}
 
-        ## 0. ask locli what it cares about
-        local keyfile="$adir"/substring-keys
-        local key_old=$(sha256sum 2>/dev/null "$keyfile" | cut -d' ' -f1)
-        local tracing_backend=$(jq '.node.tracing_backend // "iohk-monitoring"' --raw-output $dir/profile.json)
-        case "$tracing_backend" in
-             trace-dispatcher ) locli 'list-logobject-keys'        --keys        "$keyfile";;
-             iohk-monitoring  ) locli 'list-logobject-keys-legacy' --keys-legacy "$keyfile";;
-             * ) fail "Unknown tracing backend:  $tracing_backend"
-        esac
-        local key_new=$(sha256sum "$keyfile" | cut -d' ' -f1)
-
-        ## 1. unless already done, filter logs according to locli's requirements
+        ## unless already done, filter logs to contain trace objects only
         local logdirs=($(ls -d "$dir"/node-*/ 2>/dev/null))
         local run_logs=$adir/log-manifest.json
 
@@ -564,13 +586,14 @@ EOF
         if   test -z "$(ls 2>/dev/null $dir/node-*/*.json)"
         then remanifest_reasons+=("$(blue consolidated logs missing)")
         elif test ! -f "$run_logs"
-        then remanifest_reasons+=("$(green logs-modified-after-manifest)")
-        elif test "$(ls 2>/dev/null --sort=time $dir/node-*/*.json analysis/log-manifest.json | head -n1)" != "$run_logs"
-        then remanifest_reasons+=("$(red logs-modified-after-manifest)")
+        then remanifest_reasons+=("$(green missing $run_logs)")
+        # with workbench runs, a node's log files are just called 'stdout'
+        elif test "$(ls 2>/dev/null --sort=time $dir/node-*/*.json $dir/node-*/stdout $run_logs | head -n1)" != "$run_logs"
+        then remanifest_reasons+=("$(red logs modified after manifest)")
         fi
 
         if test ${#remanifest_reasons[*]} = 0
-        then progress "analyse" "log manifest exist and is up to date"
+        then progress "analyse" "log manifest up to date for raw logs"
         else progress "analyse" "assembling log manifest:  ${remanifest_reasons[*]}"
              echo '{}' > $run_logs
              time {
@@ -584,27 +607,18 @@ EOF
                     local  out="$adir"/logs-$mach
                     cat ${logfiles[*]} | grep '^{'        > "$out".flt.json       &
                     trace_frequencies_json ${logfiles[*]} > "$out".tracefreq.json &
-                    { cat ${logfiles[*]} |
-                      sha256sum |
-                      cut -d' ' -f1 |
-                      xargs echo -n
-                    } > "$out".sha256 &
-
                     jq_fmutate "$run_logs" '
                       .rlHostLogs["'"$mach"'"] =
                         { hlRawLogfiles:    ["'"$(echo ${logfiles[*]} |
                                                   sed 's/ /", "/')"'"]
                         , hlRawLines:       '"$(cat ${logfiles[*]} | wc -l)"'
-                        , hlRawSha256:      ""
                         , hlRawTraceFreqs:  {}
                         , hlLogs:           ["'"$adir/logs-$mach.flt.json"'", null]
-                        , hlFilteredSha256: ""
                         , hlProfile:        []
                         }
                      | .rlFilterDate = ('$(if test -z "$without_datever_meta"
                                            then echo -n now
                                            else echo -n 0; fi)' | todate)
-                     | .rlFilterKeys = []
                      '
 
                     local ghc_rts_prof=$d/cardano-node.prof
@@ -618,38 +632,116 @@ EOF
 
                  done
                  wait
+
+                 # in case consolidated logs have to be truncated, we document the actual timestamps from the raw logs
+                 for mach in $(jq_tolist '.rlHostLogs | keys' $run_logs)
+                 do jq_fmutate "$run_logs" '
+                      .rlHostLogs["'"$mach"'"].hlRawFirstAt = '"$(cat $adir/logs-$mach.flt.json | head -n1 | jq .at)"'
+                    | .rlHostLogs["'"$mach"'"].hlRawLastAt  = '"$(cat $adir/logs-$mach.flt.json | tail -n1 | jq .at)"'
+                    '
+                 done
              }
         fi
 
+        progress "analyse" "log manifest updating for consolidated logs"
         for mach in $(jq_tolist '.rlHostLogs | keys' $run_logs)
         do jq_fmutate "$run_logs" '
-             .rlHostLogs[$mach].hlRawSha256      = $raw_sha256
-           | .rlHostLogs[$mach].hlRawTraceFreqs  = $freqs[0]
-
-           | ($freqs[0] | keys | map (split(":"))) as $keypairs
-           | .rlHostLogs[$mach].hlMissingTraces  =
-              (($keys | split("\n"))
-               - ($keypairs | map (.[0]))    # new tracing namespace entries
-               - ($keypairs | map (.[1]))    # old tracing .kinds
-               - ["", "unknown0", "unknown1"]
-               | unique)
-           | .rlHostLogs[$mach].hlFilteredSha256 = $filtered_sha256
+             .rlHostLogs[$mach].hlRawTraceFreqs  = $freqs[0]
            ' --sort-keys                                                         \
-             --arg                mach         $mach                             \
-             --rawfile      raw_sha256 "$adir"/logs-$mach.sha256                 \
-             --arg     filtered_sha256 $(sha256sum < $adir/logs-$mach.flt.json | \
-                                          cut -d' ' -f1 | xargs echo -n)         \
-             --slurpfile         freqs "$adir"/logs-$mach.tracefreq.json         \
-             --rawfile            keys $keyfile
+             --arg               mach          $mach                             \
+             --slurpfile         freqs "$adir"/logs-$mach.tracefreq.json
         done
 
-        jq_fmutate "$run_logs" '
-          .rlMissingTraces =
-             ( .rlHostLogs
-             | map(.hlMissingTraces)
-             | add
-             | unique
-             )';;
+        local ht_json=$adir/hash-timeline.json
+        if test "$(ls 2>/dev/null --sort=time $adir/logs-*.flt.json $ht_json | head -n1)" = "$ht_json"
+        then progress "analyse" "hash timeline up to date"
+        else progress "analyse" "building hash timeline"
+          grep -h 'TraceForgedBlock\|DownloadedHeader' $adir/logs-*.flt.json | sort > $ht_json
+        fi;;
+
+    prepare-db | prep-db )
+        local usage="USAGE: wb analyse $op [--force] [[IDENT:]RUN-NAME=current].."
+
+        local remanifest_reasons=()
+        while test $# -gt 0; do
+          case "$1" in
+            --force ) remanifest_reasons+=("$(blue the --force was used)");;
+            * )       break;;
+          esac
+          shift
+        done
+
+        local runspec=${1:-current}; if test $# != 0; then shift; fi
+
+        ## Parse 'runspec' into either IDENT:RUN or RUN
+        local nrun=$(runspec_normalise $runspec)
+        local run=$(runspec_run $nrun)
+        local dir=$(run get "$run")
+        test -n "$dir" || fail "malformed run: $run"
+
+        progress "analyse(db)" "preparing run for analysis:  $(white $run)"
+
+        run trim "$run"
+        local adir=$dir/analysis
+        mkdir -p "$adir"/{cdf,png}
+
+        ## unless already done, filter logs to contain trace objects only
+        local logdirs=($(ls -d "$dir"/node-*/ 2>/dev/null))
+        local run_logs=$adir/log-manifest-db.json
+
+        test ${#logdirs[*]} -gt 0 ||
+            fail "Missing node-* subdirs in:  $dir"
+
+        if   test ! -f "$run_logs"
+        then remanifest_reasons+=("$(green missing $run_logs)")
+        fi
+
+        if test ${#remanifest_reasons[*]} = 0
+        then progress "analyse(db)" "log manifest up to date for raw logs"
+        else progress "analyse(db)" "assembling log manifest:  ${remanifest_reasons[*]}"
+             echo '{}' > $run_logs
+             # with useCabalRun we have to make sure the binary is built before launching off shell job spawns
+             local dummy=($(locli 2>/dev/null))
+             time {
+                 for d in "${logdirs[@]}"
+                 do throttle_shell_job_spawns
+                    local logfiles=($(ls --reverse -t "$d"stdout* "$d"node-[0-9]*.json \
+                                         2>/dev/null))
+                    if test -z "${logfiles[*]}"
+                    then msg "no logs in $d, skipping.."; fi
+                    local mach=$(basename "$d")
+                    local  out="$adir"/logs-$mach
+                    call_locli "silent" "serial" \
+                        prepare-db \
+                        --mach "$mach" \
+                        --db "$adir/logs-$mach.sqlite3" \
+                        ${logfiles[*]/#/--log } & 
+                    jq_fmutate "$run_logs" '
+                      .rlHostLogs["'"$mach"'"] =
+                        { hlRawLogfiles:    ["'"$(echo ${logfiles[*]} |
+                                                  sed 's/ /", "/')"'"]
+                        , hlRawLines:       0
+                        , hlRawTraceFreqs:  {}
+                        , hlLogs:           ["'"$adir/logs-$mach.sqlite3"'", null]
+                        , hlProfile:        []
+                        }
+                     | .rlFilterDate = ('$(if test -z "$without_datever_meta"
+                                           then echo -n now
+                                           else echo -n 0; fi)' | todate)
+                     '
+
+                    local ghc_rts_prof=$d/cardano-node.prof
+                    if test -f "$ghc_rts_prof"
+                    then progress "analyse(db) | profiling" "processing cardano-node.prof for $mach"
+                         ghc_rts_minusp_tojson "$ghc_rts_prof"           > "$out".flt.prof.json
+                         jq_fmutate "$run_logs" '
+                           .rlHostLogs["'"$mach"'"] += { hlProfile: $profile }
+                         ' --slurpfile profile "$out".flt.prof.json
+                    fi
+                 done
+                 wait
+             }
+        fi;;    
 
     trace-frequencies | trace-freq | freq | tf )
         local new_only= sargs=()
@@ -697,10 +789,16 @@ EOF
 }
 
 call_locli() {
+    local silent=
+    while test $# -gt 0
+    do case "$1" in
+            silent ) silent='silent';;
+            * ) break;; esac; shift; done    
+    
     local rtsmode="${1:-hipar}"; shift
     local args=("$@")
 
-    echo "{ \"rtsmode\": \"$rtsmode\" }"
+    test "$silent" = "silent" || echo "{ \"rtsmode\": \"$rtsmode\" }"
     case "$rtsmode" in
         serial )locli_args+=(+RTS -N1 -A128M -RTS);;
         lomem ) locli_args+=(+RTS -N3 -A8M -RTS);;
@@ -709,12 +807,14 @@ call_locli() {
     esac
 
     verbose "analysis | locli" "$(with_color reset ${locli_args[@]}) $(colorise ${args[*]})"
-    time locli "${locli_args[@]}" "${args[@]}"
+    if test "$silent" = "silent"
+    then      locli "${locli_args[@]}" "${args[@]}"
+    else time locli "${locli_args[@]}" "${args[@]}"
+    fi
 }
 
 num_jobs="\j"
-num_threads=$({ grep processor /proc/cpuinfo 2>/dev/null || echo -e '\n\n\n';
-              } | wc -l)
+num_threads=$((grep -c processor /proc/cpuinfo 2>/dev/null || systctl -n hw.ncpu 2>/dev/null || echo 0) | awk '{print ($1<6) ? 6 : $1}')
 
 throttle_shell_job_spawns() {
     sleep 0.5s

@@ -36,27 +36,18 @@ module Cardano.Node.Queries
   , fromSMaybe
   ) where
 
-import           Control.Monad.STM (atomically)
-import           Data.ByteString (ByteString)
-import           Data.IORef (IORef, newIORef, readIORef, writeIORef)
-import qualified Data.Map.Strict as Map
-import           Data.SOP.Strict
-import           Data.Word (Word64)
-
 import qualified Cardano.Chain.Block as Byron
 import qualified Cardano.Chain.UTxO as Byron
 import qualified Cardano.Crypto.Hash as Crypto
 import qualified Cardano.Crypto.Hashing as Byron.Crypto
 import           Cardano.Crypto.KES.Class (Period)
-import           Cardano.Protocol.TPraos.OCert (KESPeriod (..))
-
 import           Cardano.Ledger.BaseTypes (StrictMaybe (..), fromSMaybe)
 import qualified Cardano.Ledger.SafeHash as Ledger
 import qualified Cardano.Ledger.Shelley.LedgerState as Shelley
 import qualified Cardano.Ledger.Shelley.UTxO as Shelley
 import qualified Cardano.Ledger.TxIn as Ledger
 import qualified Cardano.Ledger.UMap as UM
-
+import           Cardano.Protocol.TPraos.OCert (KESPeriod (..))
 import           Ouroboros.Consensus.Block (ForgeStateInfo, ForgeStateUpdateError)
 import           Ouroboros.Consensus.Byron.Ledger.Block (ByronBlock)
 import qualified Ouroboros.Consensus.Byron.Ledger.Block as Byron
@@ -79,10 +70,16 @@ import           Ouroboros.Consensus.Shelley.Node ()
 import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
 import           Ouroboros.Consensus.TypeFamilyWrappers
 import           Ouroboros.Consensus.Util.Orphans ()
-
 import qualified Ouroboros.Network.AnchoredFragment as AF
 import           Ouroboros.Network.NodeToClient (LocalConnectionId)
-import           Ouroboros.Network.NodeToNode (RemoteConnectionId, RemoteAddress)
+import           Ouroboros.Network.NodeToNode (RemoteAddress, RemoteConnectionId)
+
+import           Control.Monad.STM (atomically)
+import           Data.ByteString (ByteString)
+import           Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import qualified Data.Map.Strict as Map
+import           Data.SOP
+import           Data.Word (Word64)
 
 --
 -- * TxId -> ByteString projection
@@ -234,10 +231,14 @@ instance All GetKESInfo xs => GetKESInfo (HardForkBlock xs) where
 class LedgerQueries blk where
   ledgerUtxoSize     :: LedgerState blk -> Int
   ledgerDelegMapSize :: LedgerState blk -> Int
+  ledgerDRepCount    :: LedgerState blk -> Int
+  ledgerDRepMapSize  :: LedgerState blk -> Int
 
 instance LedgerQueries Byron.ByronBlock where
   ledgerUtxoSize = Map.size . Byron.unUTxO . Byron.cvsUtxo . Byron.byronLedgerState
   ledgerDelegMapSize _ = 0
+  ledgerDRepCount    _ = 0
+  ledgerDRepMapSize  _ = 0
 
 instance LedgerQueries (Shelley.ShelleyBlock protocol era) where
   ledgerUtxoSize =
@@ -249,7 +250,24 @@ instance LedgerQueries (Shelley.ShelleyBlock protocol era) where
     . Shelley.shelleyLedgerState
   ledgerDelegMapSize =
       UM.size
-    . UM.Delegations
+    . UM.SPoolUView
+    . Shelley.dsUnified
+    . Shelley.certDState
+    . Shelley.lsCertState
+    . Shelley.esLState
+    . Shelley.nesEs
+    . Shelley.shelleyLedgerState
+  ledgerDRepCount =
+      Map.size
+    . Shelley.vsDReps
+    . Shelley.certVState
+    . Shelley.lsCertState
+    . Shelley.esLState
+    . Shelley.nesEs
+    . Shelley.shelleyLedgerState
+  ledgerDRepMapSize =
+      UM.size
+    . UM.DRepUView
     . Shelley.dsUnified
     . Shelley.certDState
     . Shelley.lsCertState
@@ -259,8 +277,10 @@ instance LedgerQueries (Shelley.ShelleyBlock protocol era) where
 
 instance (LedgerQueries x, NoHardForks x)
       => LedgerQueries (HardForkBlock '[x]) where
-  ledgerUtxoSize = ledgerUtxoSize . project
+  ledgerUtxoSize     = ledgerUtxoSize     . project
   ledgerDelegMapSize = ledgerDelegMapSize . project
+  ledgerDRepCount    = ledgerDRepCount    . project
+  ledgerDRepMapSize  = ledgerDRepMapSize  . project
 
 instance LedgerQueries (Cardano.CardanoBlock c) where
   ledgerUtxoSize = \case
@@ -279,6 +299,22 @@ instance LedgerQueries (Cardano.CardanoBlock c) where
     Cardano.LedgerStateAlonzo  ledgerAlonzo  -> ledgerDelegMapSize ledgerAlonzo
     Cardano.LedgerStateBabbage ledgerBabbage -> ledgerDelegMapSize ledgerBabbage
     Cardano.LedgerStateConway  ledgerConway  -> ledgerDelegMapSize ledgerConway
+  ledgerDRepCount = \case
+    Cardano.LedgerStateByron   ledgerByron   -> ledgerDRepCount ledgerByron
+    Cardano.LedgerStateShelley ledgerShelley -> ledgerDRepCount ledgerShelley
+    Cardano.LedgerStateAllegra ledgerAllegra -> ledgerDRepCount ledgerAllegra
+    Cardano.LedgerStateMary    ledgerMary    -> ledgerDRepCount ledgerMary
+    Cardano.LedgerStateAlonzo  ledgerAlonzo  -> ledgerDRepCount ledgerAlonzo
+    Cardano.LedgerStateBabbage ledgerBabbage -> ledgerDRepCount ledgerBabbage
+    Cardano.LedgerStateConway  ledgerConway  -> ledgerDRepCount ledgerConway
+  ledgerDRepMapSize = \case
+    Cardano.LedgerStateByron   ledgerByron   -> ledgerDRepMapSize ledgerByron
+    Cardano.LedgerStateShelley ledgerShelley -> ledgerDRepMapSize ledgerShelley
+    Cardano.LedgerStateAllegra ledgerAllegra -> ledgerDRepMapSize ledgerAllegra
+    Cardano.LedgerStateMary    ledgerMary    -> ledgerDRepMapSize ledgerMary
+    Cardano.LedgerStateAlonzo  ledgerAlonzo  -> ledgerDRepMapSize ledgerAlonzo
+    Cardano.LedgerStateBabbage ledgerBabbage -> ledgerDRepMapSize ledgerBabbage
+    Cardano.LedgerStateConway  ledgerConway  -> ledgerDRepMapSize ledgerConway
 
 --
 -- * Node kernel

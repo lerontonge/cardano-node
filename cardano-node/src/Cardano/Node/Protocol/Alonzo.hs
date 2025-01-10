@@ -9,28 +9,32 @@ module Cardano.Node.Protocol.Alonzo
   ) where
 
 import           Cardano.Api
+import           Cardano.Api.Shelley
 
 import qualified Cardano.Ledger.Alonzo.Genesis as Alonzo
-
 import           Cardano.Node.Orphans ()
+import           Cardano.Node.Protocol.Shelley (GenesisReadError (..), checkExpectedGenesisHash)
 import           Cardano.Node.Types
-
 import           Cardano.Tracing.OrphanInstances.HardFork ()
 import           Cardano.Tracing.OrphanInstances.Shelley ()
 
-import           Cardano.Node.Protocol.Shelley (GenesisReadError, readGenesisAny)
+import qualified Data.ByteString.Lazy as LBS
 
-import           Control.Monad.Except (ExceptT)
 
 --
 -- Alonzo genesis
 --
 
-readGenesis :: GenesisFile
+readGenesis :: Maybe (CardanoEra era)
+            -> GenesisFile
             -> Maybe GenesisHash
             -> ExceptT GenesisReadError IO
                        (Alonzo.AlonzoGenesis, GenesisHash)
-readGenesis = readGenesisAny
+readGenesis mEra (GenesisFile file) mGenesisHash = do
+  content <- handleIOExceptT (GenesisReadFileError file) $ LBS.readFile file
+  genesisHash <- checkExpectedGenesisHash (LBS.toStrict content) mGenesisHash
+  genesis <- modifyError (GenesisDecodeError file) $ decodeAlonzoGenesis mEra content
+  pure (genesis, genesisHash)
 
 validateGenesis :: Alonzo.AlonzoGenesis
                 -> ExceptT AlonzoProtocolInstantiationError IO ()
@@ -44,12 +48,11 @@ data AlonzoProtocolInstantiationError
   deriving Show
 
 instance Error AlonzoProtocolInstantiationError where
-  displayError (InvalidCostModelError fp) =
-    "Invalid cost model: " <> show fp
-  displayError (CostModelExtractionError fp) =
-    "Error extracting the cost model at: " <> show fp
-  displayError (AlonzoCostModelFileError err) =
-    displayError err
-  displayError (AlonzoCostModelDecodeError fp err) =
-    "Error decoding cost model at: " <> show fp <> " Error: " <> err
-
+  prettyError (InvalidCostModelError fp) =
+    "Invalid cost model: " <> pshow fp
+  prettyError (CostModelExtractionError fp) =
+    "Error extracting the cost model at: " <> pshow fp
+  prettyError (AlonzoCostModelFileError err) =
+    prettyError err
+  prettyError (AlonzoCostModelDecodeError fp err) =
+    "Error decoding cost model at: " <> pshow fp <> " Error: " <> pshow err

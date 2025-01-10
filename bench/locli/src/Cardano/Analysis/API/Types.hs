@@ -1,8 +1,8 @@
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
 {-# LANGUAGE QuantifiedConstraints #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE TypeInType #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# OPTIONS_GHC -Wno-name-shadowing -Wno-orphans #-}
 module Cardano.Analysis.API.Types (module Cardano.Analysis.API.Types) where
@@ -50,7 +50,6 @@ data Summary f where
     , sumDomainBlocks        :: !(DataDomain f BlockNo)
     , sumProfilingData       :: !(Maybe (ProfilingData (CDF I)))
 
-    , cdfLogLinesEmitted     :: !(CDF f Int)
     , cdfLogObjectsEmitted   :: !(CDF f Int)
     , cdfLogObjects          :: !(CDF f Int)
     , cdfRuntime             :: !(CDF f NominalDiffTime)
@@ -443,8 +442,8 @@ testSlotStats :: Genesis -> SlotStats a -> SlotCond -> Bool
 testSlotStats g SlotStats{..} = \case
   SlotGEq  s -> slSlot >= s
   SlotLEq  s -> slSlot <= s
-  EpochGEq s -> fromIntegral (unEpochNo slEpoch) >= s
-  EpochLEq s -> fromIntegral (unEpochNo slEpoch) <= s
+  EpochGEq s -> slEpoch >= s
+  EpochLEq s -> slEpoch <= s
   SlotHasLeaders -> slCountLeads > 0
   EpochSafeIntGEq i -> slEpochSafeInt >= i
   EpochSafeIntLEq i -> slEpochSafeInt <= i

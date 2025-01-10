@@ -3,27 +3,22 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Cardano.Node.Startup where
 
 import qualified Cardano.Api as Api
-import           Prelude
 
-import           Data.Aeson (FromJSON, ToJSON)
-import           Data.Map.Strict (Map)
-import           Data.Monoid (Last (..), getLast)
-import           Data.Text (Text, pack)
-import           Data.Time.Clock (NominalDiffTime, UTCTime)
-import           Data.Version (showVersion)
-import           Data.Word (Word64)
-import           GHC.Generics (Generic)
-
-import           Network.HostName (getHostName)
-import qualified Network.Socket as Socket
-
+import           Cardano.Git.Rev (gitRev)
 import           Cardano.Ledger.Shelley.Genesis (sgSystemStart)
-
+import           Cardano.Logging
+import           Cardano.Node.Configuration.POM (NodeConfiguration (..), ncProtocol)
+import           Cardano.Node.Configuration.Socket
+import           Cardano.Node.Protocol (ProtocolInstantiationError)
+import           Cardano.Node.Protocol.Types (SomeConsensusProtocol (..))
 import qualified Ouroboros.Consensus.BlockchainTime.WallClock.Types as WCT
 import           Ouroboros.Consensus.Cardano.Block
 import           Ouroboros.Consensus.Cardano.CanHardFork (shelleyLedgerConfig)
@@ -34,22 +29,31 @@ import           Ouroboros.Consensus.Node (pInfoConfig)
 import           Ouroboros.Consensus.Node.NetworkProtocolVersion (BlockNodeToClientVersion,
                    BlockNodeToNodeVersion)
 import           Ouroboros.Consensus.Shelley.Ledger.Ledger (shelleyLedgerGenesis)
-
 import           Ouroboros.Network.Magic (NetworkMagic (..))
 import           Ouroboros.Network.NodeToClient (LocalAddress (..), LocalSocket,
                    NodeToClientVersion)
 import           Ouroboros.Network.NodeToNode (DiffusionMode (..), NodeToNodeVersion, PeerAdvertise)
-import           Ouroboros.Network.PeerSelection.LedgerPeers (UseLedgerAfter (..))
+import           Ouroboros.Network.PeerSelection.LedgerPeers.Type (UseLedgerPeers)
+import           Ouroboros.Network.PeerSelection.PeerTrustable (PeerTrustable)
 import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPoint)
+import           Ouroboros.Network.PeerSelection.State.LocalRootPeers (HotValency, WarmValency)
 import           Ouroboros.Network.Subscription.Dns (DnsSubscriptionTarget (..))
 import           Ouroboros.Network.Subscription.Ip (IPSubscriptionTarget (..))
 
-import           Cardano.Logging
-import           Cardano.Node.Configuration.POM (NodeConfiguration (..), ncProtocol)
-import           Cardano.Node.Configuration.Socket
-import           Cardano.Node.Protocol.Types (SomeConsensusProtocol (..))
+import           Prelude
 
-import           Cardano.Git.Rev (gitRev)
+import           Control.DeepSeq (NFData)
+import           Data.Aeson (FromJSON, ToJSON)
+import           Data.Map.Strict (Map)
+import           Data.Monoid (Last (..), getLast)
+import           Data.Text (Text, pack)
+import           Data.Time.Clock (NominalDiffTime, UTCTime)
+import           Data.Version (showVersion)
+import           Data.Word (Word64)
+import           GHC.Generics (Generic)
+import           Network.HostName (getHostName)
+import qualified Network.Socket as Socket
+
 import           Paths_cardano_node (version)
 
 data StartupTrace blk =
@@ -76,6 +80,17 @@ data StartupTrace blk =
 
   | StartupDBValidation
 
+  -- | Log that the block forging is being updated
+  | BlockForgingUpdate EnabledBlockForging
+
+  -- | Protocol instantiation error when updating block forging
+  | BlockForgingUpdateError ProtocolInstantiationError
+
+  -- | Mismatched block type
+  | BlockForgingBlockTypeMismatch
+       Api.SomeBlockType -- ^ expected
+       Api.SomeBlockType -- ^ provided
+
   -- | Log that the network configuration is being updated.
   --
   | NetworkConfigUpdate
@@ -88,22 +103,15 @@ data StartupTrace blk =
   --
   | NetworkConfigUpdateError Text
 
-  -- | Legacy topology file format is used.
-  --
-  | NetworkConfigLegacy
-
   -- | Log peer-to-peer network configuration, either on startup or when its
   -- updated.
   --
-  | NetworkConfig [(Int, Map RelayAccessPoint PeerAdvertise)]
+  | NetworkConfig [(HotValency, WarmValency, Map RelayAccessPoint (PeerAdvertise, PeerTrustable))]
                   (Map RelayAccessPoint PeerAdvertise)
-                  UseLedgerAfter
+                  UseLedgerPeers
 
-  -- | Warn when 'EnableP2P' is set.
-  | P2PWarning
-
-  -- | Warn when 'EnableP2P' is set.
-  | PeerSharingWarning
+  -- | Warn when 'DisabledP2P' is set.
+  | NonP2PWarning
 
   -- | Warn when 'ExperimentalProtocolsEnabled' is set and affects
   -- node-to-node protocol.
@@ -120,7 +128,13 @@ data StartupTrace blk =
   | BIByron BasicInfoByron
   | BINetwork BasicInfoNetwork
 
-
+data EnabledBlockForging = EnabledBlockForging
+                         | DisabledBlockForging
+                         | NotEffective
+                         -- ^ one needs to send `SIGHUP` after consensus
+                         -- initialised itself (especially after replying all
+                         -- blocks).
+                         deriving (Eq, Show)
 
 data BasicInfoCommon = BasicInfoCommon {
     biConfigPath    :: FilePath
@@ -161,6 +175,8 @@ data NodeInfo = NodeInfo
   , niSystemStartTime :: UTCTime
   } deriving (Eq, Generic, ToJSON, FromJSON, Show)
 
+deriving instance (NFData NodeInfo)
+
 instance MetaTrace NodeInfo where
   namespaceFor NodeInfo {}  =
     Namespace [] ["NodeInfo"]
@@ -194,12 +210,12 @@ prepareNodeInfo nc (SomeConsensusProtocol whichP pForInfo) tc nodeStartTime = do
     { niName            = nodeName
     , niProtocol        = pack . show . ncProtocol $ nc
     , niVersion         = pack . showVersion $ version
-    , niCommit          = gitRev
+    , niCommit          = $(gitRev)
     , niStartTime       = nodeStartTime
     , niSystemStartTime = systemStartTime
     }
  where
-  cfg = pInfoConfig $ Api.protocolInfo pForInfo
+  cfg = pInfoConfig $ fst $ Api.protocolInfo @IO pForInfo
 
   systemStartTime :: UTCTime
   systemStartTime =
@@ -244,6 +260,8 @@ data NodeStartupInfo = NodeStartupInfo {
   , suiEpochLength       :: Word64
   , suiSlotsPerKESPeriod :: Word64
   } deriving (Eq, Generic, ToJSON, FromJSON, Show)
+
+deriving instance (NFData NodeStartupInfo)
 
 instance MetaTrace NodeStartupInfo where
   namespaceFor NodeStartupInfo {}  =

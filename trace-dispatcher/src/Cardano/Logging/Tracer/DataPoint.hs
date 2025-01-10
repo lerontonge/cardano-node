@@ -9,18 +9,17 @@ module Cardano.Logging.Tracer.DataPoint
   , mkDataPointTracer
   ) where
 
-import           Control.Monad.IO.Class
-import           Data.Aeson.Types (ToJSON)
-import           Data.List (intersperse)
-import           Data.Text (Text)
-import           Data.Text.Lazy (toStrict)
-import           Data.Text.Lazy.Builder (fromText, singleton, toLazyText)
-
-import qualified Control.Tracer as NT
-import           Trace.Forward.Utils.DataPoint (DataPoint (..), DataPointStore, writeToStore)
-
+import           Cardano.Logging.DocuGenerator
 import           Cardano.Logging.Trace
 import           Cardano.Logging.Types
+
+import           Control.DeepSeq (NFData)
+import           Control.Monad.IO.Class
+import qualified Control.Tracer as NT
+import           Data.Aeson.Types (ToJSON)
+import           Data.Text (Text, intercalate)
+
+import           Trace.Forward.Utils.DataPoint (DataPoint (..), DataPointStore, writeToStore)
 
 ---------------------------------------------------------------------------
 
@@ -36,20 +35,17 @@ dataPointTracer dataPointStore =
       -> m ()
     output LoggingContext {..} (Right val) =
       liftIO $ writeToStore dataPointStore (nameSpaceToText (lcNSPrefix ++ lcNSInner)) val
-    output LoggingContext {} (Left Reset) = liftIO $ do
+    output LoggingContext {} (Left TCReset) = liftIO $ do
       pure ()
-    output _lk (Left _c@TCDocument {}) = do
-      pure ()
-      -- TODO docIt DataPoint (lk, Just c, val)
+    output lk (Left c@TCDocument {}) = do
+      docIt DatapointBackend (lk, Left c)
     output LoggingContext {} _  = pure ()
 
     nameSpaceToText :: [Text] -> Text
-    nameSpaceToText namespace = toStrict $ toLazyText $
-      mconcat (intersperse (singleton '.')
-        (map fromText namespace))
+    nameSpaceToText = intercalate "."
 
 -- A simple dataPointTracer which supports building a namespace.
-mkDataPointTracer :: forall dp. (ToJSON dp, MetaTrace dp)
+mkDataPointTracer :: forall dp. (ToJSON dp, MetaTrace dp, NFData dp)
   => Trace IO DataPoint
   -> IO (Trace IO dp)
 mkDataPointTracer trDataPoint = do

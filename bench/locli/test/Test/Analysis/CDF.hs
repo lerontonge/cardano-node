@@ -1,5 +1,6 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# OPTIONS_GHC -Wno-missing-signatures #-}
+
 module Test.Analysis.CDF where
 
 import Cardano.Prelude hiding (handle, head)

@@ -4,23 +4,34 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PackageImports #-}
 
-module Cardano.Node.Tracing.Tracers.Peer where
---   ( PeerT (..)
---   , startPeerTracer
---   , namesForPeers
---   , severityPeers
---   , docPeers
---   , ppPeer
---   ) where
+module Cardano.Node.Tracing.Tracers.Peer
+  ( PeerT (..)
+  , startPeerTracer
+  , ppPeer
+  ) where
 
+import           Cardano.Logging hiding (traceWith)
 import           Cardano.Node.Orphans ()
-
-import qualified Control.Concurrent.Class.MonadSTM.Strict as STM
-import           "contra-tracer" Control.Tracer
+import           Cardano.Node.Queries
+import           Ouroboros.Consensus.Block (Header)
+import           Ouroboros.Consensus.MiniProtocol.ChainSync.Client (ChainSyncClientHandle,
+                   csCandidate, viewChainSyncState)
+import           Ouroboros.Consensus.Util.NormalForm.StrictTVar (StrictTVar)
+import           Ouroboros.Consensus.Util.Orphans ()
+import qualified Ouroboros.Network.AnchoredFragment as Net
+import           Ouroboros.Network.Block (unSlotNo)
+import qualified Ouroboros.Network.Block as Net
+import qualified Ouroboros.Network.BlockFetch.ClientRegistry as Net
+import           Ouroboros.Network.BlockFetch.ClientState (PeerFetchInFlight (..),
+                   PeerFetchStatus (..), readFetchClientState)
+import           Ouroboros.Network.ConnectionId (remoteAddress)
+import           Ouroboros.Network.NodeToNode (RemoteAddress)
 
 import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async
+import qualified Control.Concurrent.Class.MonadSTM.Strict as STM
 import           Control.Monad (forever)
+import           "contra-tracer" Control.Tracer
 import           Data.Aeson (ToJSON (..), Value (..), toJSON, (.=))
 import           Data.Functor ((<&>))
 import qualified Data.List as List
@@ -30,21 +41,6 @@ import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Text.Printf (printf)
-
-import           Ouroboros.Consensus.Block (Header)
-import           Ouroboros.Consensus.Util.Orphans ()
-import           Ouroboros.Network.ConnectionId (remoteAddress)
-
-import qualified Ouroboros.Network.AnchoredFragment as Net
-import           Ouroboros.Network.Block (unSlotNo)
-import qualified Ouroboros.Network.Block as Net
-import qualified Ouroboros.Network.BlockFetch.ClientRegistry as Net
-import           Ouroboros.Network.BlockFetch.ClientState (PeerFetchInFlight (..),
-                   PeerFetchStatus (..), readFetchClientState)
-import           Ouroboros.Network.NodeToNode (RemoteAddress)
-
-import           Cardano.Logging hiding (traceWith)
-import           Cardano.Node.Queries
 
 {- HLINT ignore "Use =<<" -}
 {- HLINT ignore "Use <=<" -}
@@ -108,9 +104,9 @@ getCurrentPeers nkd = mapNodeKernelDataIO extractPeers nkd
   tuple3pop (a, b, _) = (a, b)
 
   getCandidates
-    :: STM.StrictTVar IO (Map peer (STM.StrictTVar IO (Net.AnchoredFragment (Header blk))))
+    :: StrictTVar IO (Map peer (ChainSyncClientHandle IO blk))
     -> STM.STM IO (Map peer (Net.AnchoredFragment (Header blk)))
-  getCandidates var = STM.readTVar var >>= traverse STM.readTVar
+  getCandidates handle = viewChainSyncState handle csCandidate
 
   extractPeers :: NodeKernel IO RemoteAddress LocalConnectionId blk
                 -> IO [PeerT blk]
@@ -120,7 +116,7 @@ getCurrentPeers nkd = mapNodeKernelDataIO extractPeers nkd
                                        . Net.readFetchClientsStateVars
                                        . getFetchClientRegistry $ kernel
                                      )
-    candidates <- STM.atomically . getCandidates . getNodeCandidates $ kernel
+    candidates <- STM.atomically . getCandidates . getChainSyncHandles $ kernel
 
     let peers = flip Map.mapMaybeWithKey candidates $ \cid af ->
                   maybe Nothing
@@ -138,7 +134,7 @@ instance LogFormatting [PeerT blk] where
     [ "peers" .= toJSON (List.foldl' (\acc x -> forMachine dtal x : acc) [] xs)
     ]
   forHuman peers = Text.concat $ List.intersperse ", " (map ppPeer peers)
-  asMetrics peers = [IntM "Net.PeersFromNodeKernel" (fromIntegral (length peers))]
+  asMetrics peers = [IntM "peersFromNodeKernel" (fromIntegral (length peers))]
 
 instance LogFormatting (PeerT blk) where
   forMachine _dtal (PeerT cid _af status inflight) =
@@ -164,6 +160,6 @@ instance MetaTrace [PeerT blk] where
   documentFor _ns =
     Nothing
   metricsDocFor (Namespace _ ["PeersFromNodeKernel"]) =
-    [("Net.PeersFromNodeKernel","")]
+    [("peersFromNodeKernel","")]
   metricsDocFor _ns = []
   allNamespaces = [ Namespace [] ["PeersFromNodeKernel"]]

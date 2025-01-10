@@ -5,8 +5,8 @@ Licence     : Apache-2.0
 Maintainer  : aovieth@gmail.com
 -}
 
-{-# LANGUAGE GADTs        #-}
-{-# LANGUAGE RankNTypes   #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
 
 module Control.Tracer.Arrow
   ( TracerA (..)
@@ -18,9 +18,10 @@ module Control.Tracer.Arrow
   , nat
   ) where
 
-import Prelude hiding ((.), id)
-import Control.Arrow
-import Control.Category
+import           Prelude hiding (id, (.))
+
+import           Control.Arrow
+import           Control.Category
 
 -- | Formal representation of a tracer arrow as a Kleisli arrow over some
 -- monad, but tagged so that we know whether it has any effects which will emit
@@ -36,6 +37,7 @@ data TracerA m a b where
 
 -- | The resulting Kleisli arrow includes all of the effects required to do
 -- the emitting part.
+{-# INLINE runTracerA #-}
 runTracerA :: Monad m => TracerA m a () -> Kleisli m a ()
 runTracerA (Emitting emits _noEmits) = emits >>> arr (const ())
 runTracerA (Squelching     _       ) =           arr (const ())
@@ -47,15 +49,18 @@ squelch = compute (const ())
 
 -- | Do an emitting effect. Contrast with 'effect' which does not make the
 -- tracer an emitting tracer.
+{-# INLINE emit #-}
 emit :: Applicative m => (a -> m ()) -> TracerA m a ()
 emit f = Emitting (Kleisli f) (Kleisli (const (pure ())))
 
 -- | Do a non-emitting effect. This effect will only be run if some part of
 -- the tracer downstream emits (see 'emit').
+{-# INLINE effect #-}
 effect :: (a -> m b) -> TracerA m a b
 effect = Squelching . Kleisli
 
 -- | Pure computation in a tracer: no side effects or emits.
+{-# INLINE compute #-}
 compute :: Applicative m => (a -> b) -> TracerA m a b
 compute f = effect (pure . f)
 

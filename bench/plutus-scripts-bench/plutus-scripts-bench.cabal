@@ -1,6 +1,6 @@
 cabal-version:          3.0
 name:                   plutus-scripts-bench
-version:                1.0.0.0
+version:                1.0.4.2
 synopsis:               Plutus scripts used for benchmarking
 description:            Plutus scripts used for benchmarking.
 category:               Cardano,
@@ -10,6 +10,7 @@ maintainer:             operations@iohk.io
 license:                Apache-2.0
 license-files:          LICENSE
                         NOTICE
+copyright:              2023 Input Output Global Inc (IOG), 2023-2024 Intersect.
 build-type:             Simple
 
 flag unexpected_thunks
@@ -27,24 +28,29 @@ common project-config
   if os(windows)
     buildable: False
 
-  if impl(ghc < 9)
+  -- This echoes the ghc range in the plutus-tx-plugin cabal file.
+  if (impl(ghc <9.6) || impl(ghc >=9.7))
     buildable: False
 
-
 common common-definitions
-  build-depends:      base >= 4.14 && < 4.17
+  build-depends:      base >= 4.14 && < 5
   default-language:   Haskell2010
   default-extensions:
     NoImplicitPrelude
     ImportQualifiedPost
     OverloadedStrings
 
-  -- See Plutus Tx readme for why we need the following flags:
-  -- -fobject-code -fno-ignore-interface-pragmas and -fno-omit-interface-pragmas
   ghc-options:
     -Wall -Wcompat -Wincomplete-record-updates
     -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
-    -fobject-code -fno-ignore-interface-pragmas -fno-omit-interface-pragmas
+    -Widentities -Wnoncanonical-monad-instances
+
+  -- See Plutus Tx readme for why we need the following flags:
+  ghc-options:
+    -fno-specialise -fno-spec-constr -fno-strictness
+    -fno-ignore-interface-pragmas -fno-omit-interface-pragmas
+    -fno-unbox-strict-fields -fno-unbox-small-strict-fields
+    -fobject-code -fno-full-laziness
 
   if flag(defer-plugin-errors)
     ghc-options: -fplugin-opt PlutusTx.Plugin:defer-errors
@@ -65,17 +71,21 @@ library
   other-modules:
     Cardano.Benchmarking.PlutusScripts.CustomCall
     Cardano.Benchmarking.PlutusScripts.EcdsaSecp256k1Loop
-    Cardano.Benchmarking.PlutusScripts.Loop
+    Cardano.Benchmarking.PlutusScripts.HashOntoG2AndAdd
+    Cardano.Benchmarking.PlutusScripts.Loop2024
+    Cardano.Benchmarking.PlutusScripts.LoopV3
+    Cardano.Benchmarking.PlutusScripts.Ripemd160
     Cardano.Benchmarking.PlutusScripts.SchnorrSecp256k1Loop
+    Cardano.Benchmarking.PlutusScripts.SupplementalDatum
 
   --------------------------
   -- IOG dependencies
   --------------------------
   build-depends:
-    , cardano-api ^>= 8.2
-    , plutus-ledger-api       >=1.0.0
-    , plutus-tx               >=1.0.0
-    , plutus-tx-plugin        >=1.0.0
+    , cardano-api             ^>=10.1
+    , plutus-ledger-api       ^>=1.36
+    , plutus-tx               ^>=1.36
+    , plutus-tx-plugin        ^>=1.36
 
   ------------------------
   -- Non-IOG dependencies
@@ -83,7 +93,6 @@ library
   build-depends:
     , filepath
     , bytestring
-    , serialise
     , template-haskell
     , text
 
@@ -97,7 +106,7 @@ executable gen-plutus
                         -rtsopts
                         "-with-rtsopts=-T"
 
-  build-depends:        base >=4.12 && <5
+  build-depends:        base
                       , bytestring
                       , filepath
                       , optparse-applicative

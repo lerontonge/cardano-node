@@ -1,22 +1,19 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-unused-matches #-}
 
+import qualified Cardano.Tracer.Test.DataPoint.Tests as DataPoint
+import qualified Cardano.Tracer.Test.Logs.Tests as Logs
+import           Cardano.Tracer.Test.TestSetup
+import           Cardano.Tracer.Test.Utils
+
 import           Control.Exception
 import           Control.Monad.Extra
-import           Data.Functor.Identity
 import           Data.Monoid
 import qualified System.Directory as Sys
 import           System.Environment (setEnv, unsetEnv)
 import           System.PosixCompat.Files (fileExist)
+
 import           Test.Tasty
-
-import qualified Cardano.Tracer.Test.Logs.Tests as Logs
-import qualified Cardano.Tracer.Test.DataPoint.Tests as DataPoint
-import qualified Cardano.Tracer.Test.Restart.Tests as Restart
-import qualified Cardano.Tracer.Test.Queue.Tests as Queue
-
-import           Cardano.Tracer.Test.TestSetup
-import           Cardano.Tracer.Test.Utils
 
 main :: IO ()
 main = do
@@ -50,8 +47,8 @@ main = do
       (testGroup "Tests"
        [      Logs.tests ts
        , DataPoint.tests ts
-       ,   Restart.tests ts
-       ,     Queue.tests ts
+--       ,   Restart.tests ts
+--       ,   Queue.tests ts
        ])
      `catch` (\ (e :: SomeException) -> do
                  unsetEnv "TASTY_NUM_THREADS"

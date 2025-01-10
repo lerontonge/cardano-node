@@ -10,6 +10,11 @@ module Cardano.Node.Tracing.Tracers.ForgingThreadStats
   ) where
 
 import           Cardano.Logging
+import           Cardano.Node.Tracing.Tracers.StartLeadershipCheck (ForgeTracerType)
+import           Cardano.Slotting.Slot (SlotNo (..))
+import           Ouroboros.Consensus.Node.Tracers
+import qualified Ouroboros.Consensus.Node.Tracers as Consensus
+import           Ouroboros.Consensus.Shelley.Node ()
 
 import           Control.Concurrent (ThreadId, myThreadId)
 import           Control.Monad.IO.Class (MonadIO (..))
@@ -17,12 +22,6 @@ import           Data.Aeson (Value (..), (.=))
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe)
-
-import           Cardano.Node.Tracing.Tracers.StartLeadershipCheck (ForgeTracerType)
-import           Cardano.Slotting.Slot (SlotNo (..))
-import           Ouroboros.Consensus.Node.Tracers
-import qualified Ouroboros.Consensus.Node.Tracers as Consensus
-import           Ouroboros.Consensus.Shelley.Node ()
 
 --------------------------------------------------------------------------------
 -- ForgeThreadStats Tracer
@@ -53,20 +52,38 @@ instance LogFormatting ForgeThreadStats where
     <> " last slot "      <> showT ftsLastSlot
   forMachine _dtal ForgeThreadStats {..} =
     mconcat [ "kind" .= String "ForgeThreadStats"
-             , "nodeCannotForgeNum" .= String (showT ftsNodeCannotForgeNum)
-             , "nodeIsLeaderNum"    .= String (showT ftsNodeIsLeaderNum)
-             , "blocksForgedNum"    .= String (showT ftsBlocksForgedNum)
+             , "nodeCannotForge" .= String (showT ftsNodeCannotForgeNum)
+             , "nodeIsLeader"    .= String (showT ftsNodeIsLeaderNum)
+             , "blocksForged"    .= String (showT ftsBlocksForgedNum)
              , "slotsMissed"        .= String (showT ftsSlotsMissedNum)
              , "lastSlot"           .= String (showT ftsLastSlot)
              ]
   asMetrics ForgeThreadStats {..} =
-    [ IntM "Forge.NodeCannotForgeNum" (fromIntegral ftsNodeCannotForgeNum)
-    , IntM "Forge.NodeIsLeaderNum"    (fromIntegral ftsNodeIsLeaderNum)
-    , IntM "Forge.BlocksForgedNum"    (fromIntegral ftsBlocksForgedNum)
-    , IntM "Forge.SlotsMissed"        (fromIntegral ftsSlotsMissedNum)
-    , IntM "Forge.LastSlot"           (fromIntegral ftsLastSlot)
+    [ IntM "nodeCannotForge" (fromIntegral ftsNodeCannotForgeNum)
+    , IntM "nodeIsLeader"    (fromIntegral ftsNodeIsLeaderNum)
+    , IntM "blocksForged"    (fromIntegral ftsBlocksForgedNum)
+    , IntM "slotsMissed"     (fromIntegral ftsSlotsMissedNum)
     ]
 
+instance MetaTrace ForgeThreadStats where
+    namespaceFor ForgeThreadStats {} = Namespace [] ["ForgeThreadStats"]
+
+    severityFor _ _ = Just Info
+
+    documentFor _ = Just ""
+
+    metricsDocFor _ =
+      [("nodeCannotForge",
+        "How many times was this node unable to forge [a block]?")
+      ,("nodeIsLeader",
+        "How many times was this node slot leader?")
+      ,("blocksForged",
+        "How many blocks did this node forge?")
+      ,("slotsMissed",
+        "How many slots did this node miss?")
+      ]
+
+    allNamespaces = [Namespace [] ["ForgeThreadStats"]]
 
 emptyForgeThreadStats :: ForgeThreadStats
 emptyForgeThreadStats = ForgeThreadStats 0 0 0 0 0
@@ -95,16 +112,16 @@ instance LogFormatting ForgingStats where
     <> " slots missed "   <> showT fsSlotsMissedNum
   forMachine _dtal ForgingStats {..} =
     mconcat [ "kind" .= String "ForgingStats"
-             , "nodeCannotForgeNum" .= String (showT fsNodeCannotForgeNum)
-             , "nodeIsLeaderNum"    .= String (showT fsNodeIsLeaderNum)
-             , "blocksForgedNum"    .= String (showT fsBlocksForgedNum)
+             , "nodeCannotForge" .= String (showT fsNodeCannotForgeNum)
+             , "nodeIsLeader"    .= String (showT fsNodeIsLeaderNum)
+             , "blocksForged"    .= String (showT fsBlocksForgedNum)
              , "slotsMissed"        .= String (showT fsSlotsMissedNum)
              ]
   asMetrics ForgingStats {..} =
-    [ IntM "Forge.NodeCannotForgeNum" (fromIntegral fsNodeCannotForgeNum)
-    , IntM "Forge.NodeIsLeaderNum"    (fromIntegral fsNodeIsLeaderNum)
-    , IntM "Forge.BlocksForgedNum"    (fromIntegral fsBlocksForgedNum)
-    , IntM "Forge.SlotsMissed"        (fromIntegral fsSlotsMissedNum)
+    [ IntM "nodeCannotForge" (fromIntegral fsNodeCannotForgeNum)
+    , IntM "nodeIsLeader"    (fromIntegral fsNodeIsLeaderNum)
+    , IntM "blocksForged"    (fromIntegral fsBlocksForgedNum)
+    , IntM "slotsMissed"     (fromIntegral fsSlotsMissedNum)
     ]
 
 instance MetaTrace ForgingStats where
@@ -119,15 +136,15 @@ instance MetaTrace ForgingStats where
       \\nslotsMissed shows how many slots were missed in this node."
 
     metricsDocFor _ =
-      [("Forge.NodeCannotForgeNum",
-        "How many times this node could not forge?")
-      ,("Forge.NodeIsLeaderNum",
-        "How many times this node was leader?")
-      ,("Forge.BlocksForgedNum",
-        "How many blocks did forge in this node?")
-      ,("Forge.SlotsMissed",
-        "How many slots were missed in this node?")
-      ,("Forge.LastSlot",
+      [("nodeCannotForge",
+        "How many times was this node unable to forge [a block]?")
+      ,("nodeIsLeader",
+        "How many times was this node slot leader?")
+      ,("blocksForged",
+        "How many blocks did this node forge?")
+      ,("slotsMissed",
+        "How many slots did this node miss?")
+      ,("lastSlot",
         "")
       ]
 
@@ -141,7 +158,7 @@ forgeThreadStats :: Trace IO ForgingStats
   -> IO (Trace IO (ForgeTracerType blk))
 forgeThreadStats tr =
   let tr' = contramap unfold tr
-  in foldMCondTraceM calculateThreadStats emptyForgingStats
+  in foldCondTraceM calculateThreadStats emptyForgingStats
       (\case
           Left Consensus.TraceStartLeadershipCheck{} -> True
           Left _ -> False

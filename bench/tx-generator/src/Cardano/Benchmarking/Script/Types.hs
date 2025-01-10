@@ -38,20 +38,21 @@ module Cardano.Benchmarking.Script.Types (
         , TxList(..)
 ) where
 
-import           GHC.Generics
+import           Cardano.Api
+import qualified Cardano.Api.Ledger as L
+import           Cardano.Api.Shelley
+
+import           Cardano.Benchmarking.OuroborosImports (SigningKeyFile)
+import           Cardano.Node.Configuration.NodeAddress (NodeIPv4Address)
+import           Cardano.TxGenerator.Setup.NixService (NodeDescription)
+import           Cardano.TxGenerator.Types
+
 import           Prelude
 
 import           Data.Function (on)
 import           Data.List.NonEmpty
 import           Data.Text (Text)
-
-import           Cardano.Api
-import           Cardano.Api.Shelley
-
-import           Cardano.Benchmarking.OuroborosImports (SigningKeyFile)
-import           Cardano.Node.Configuration.NodeAddress (NodeIPv4Address)
-
-import           Cardano.TxGenerator.Types
+import           GHC.Generics
 
 
 -- FIXME: temporary workaround instance until Action ADT is refactored
@@ -95,11 +96,11 @@ data Action where
   -- 'Cardano.Benchmarking.Wallet.walletRefInsertFund' which in turn
   -- is just 'Control.Concurrent.modifyMVar' around
   -- 'Cardano.TxGenerator.FundQueue.insert'.
-  AddFund            :: !AnyCardanoEra -> !String -> !TxIn -> !Lovelace -> !String -> Action
+  AddFund            :: !AnyCardanoEra -> !String -> !TxIn -> !L.Coin -> !String -> Action
   -- | 'WaitBenchmark' signifies a 'Control.Concurrent.Async.waitCatch'
   -- on the 'Cardano.Benchmarking.GeneratorTx.AsyncBenchmarkControl'
-  -- associated with the ID and also folds tracers into the completion. 
-  WaitBenchmark      :: !String -> Action
+  -- for the environment and also folds tracers into the completion.
+  WaitBenchmark      :: Action
   -- | 'Submit' mostly wraps
   -- 'Cardano.Benchamrking.Script.Core.benchmarkTxStream'
   -- which in turn wraps
@@ -108,10 +109,10 @@ data Action where
   -- 'Cardano.Benchmarking.GeneratorTx.SubmissionClient.txSubmissionClient'
   -- and functions local to that like @requestTxs@.
   Submit             :: !AnyCardanoEra -> !SubmitMode -> !TxGenTxParams -> !Generator -> Action
-  -- | 'CancelBenchmark' wraps a callback from the 
+  -- | 'CancelBenchmark' wraps a callback from the
   -- 'Cardano.Benchmarking.GeneratorTx.AsyncBenchmarkControl' type,
   -- which is a shutdown action.
-  CancelBenchmark    :: !String -> Action
+  CancelBenchmark    :: Action
   -- | 'Reserved' just emits an error and is a placeholder that helps
   -- with testing and quick fixes.
   Reserved           :: [String] -> Action
@@ -138,7 +139,7 @@ data Generator where
   -- | 'Split' makes payments with change depending on the pay mode.
   -- The splitting is from potentially sending the change to a
   -- different place.
-  Split :: !String -> !PayMode -> !PayMode -> [ Lovelace ] -> Generator
+  Split :: !String -> !PayMode -> !PayMode -> [ L.Coin ] -> Generator
   -- | 'SplitN' divides the funds by N and divides them up into that
   -- many transactions in a finite sequence. The handling starts from
   -- a case in 'Cardano.Benchmarking.Script.Core.evalGenerator' and
@@ -177,11 +178,11 @@ data ProtocolParametersSource where
   deriving (Show, Eq)
 deriving instance Generic ProtocolParametersSource
 
-type TargetNodes = NonEmpty NodeIPv4Address
+type TargetNodes = NonEmpty NodeDescription
 
 data SubmitMode where
   LocalSocket :: SubmitMode
-  Benchmark   :: !TargetNodes -> !String -> !TPSRate -> !NumberOfTxs -> SubmitMode
+  Benchmark   :: !TargetNodes -> !TPSRate -> !NumberOfTxs -> SubmitMode
   DumpToFile  :: !FilePath -> SubmitMode
   DiscardTX   :: SubmitMode
   NodeToNode  :: NonEmpty NodeIPv4Address -> SubmitMode --deprecated

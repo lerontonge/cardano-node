@@ -12,6 +12,7 @@ module Cardano.Node.Configuration.POM
   , NetworkP2PMode (..)
   , SomeNetworkP2PMode (..)
   , PartialNodeConfiguration(..)
+  , TimeoutOverride (..)
   , defaultPartialNodeConfiguration
   , lastOption
   , makeNodeConfiguration
@@ -20,6 +21,24 @@ module Cardano.Node.Configuration.POM
   , ncProtocol
   )
 where
+
+import           Cardano.Crypto (RequiresNetworkMagic (..))
+import           Cardano.Logging.Types
+import           Cardano.Node.Configuration.NodeAddress (SocketPath)
+import           Cardano.Node.Configuration.Socket (SocketConfig (..))
+import           Cardano.Node.Handlers.Shutdown
+import           Cardano.Node.Protocol.Types (Protocol (..))
+import           Cardano.Node.Types
+import           Cardano.Tracing.Config
+import           Cardano.Tracing.OrphanInstances.Network ()
+import           Ouroboros.Consensus.Ledger.SupportsMempool
+import           Ouroboros.Consensus.Mempool (MempoolCapacityBytesOverride (..))
+import           Ouroboros.Consensus.Node (NodeDatabasePaths (..))
+import qualified Ouroboros.Consensus.Node as Consensus (NetworkP2PMode (..))
+import           Ouroboros.Consensus.Storage.LedgerDB.DiskPolicy (NumOfDiskSnapshots (..),
+                   SnapshotInterval (..))
+import           Ouroboros.Network.NodeToNode (AcceptedConnectionsLimit (..), DiffusionMode (..))
+import           Ouroboros.Network.PeerSelection.PeerSharing (PeerSharing (..))
 
 import           Control.Monad (when)
 import           Data.Aeson
@@ -31,26 +50,12 @@ import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Time.Clock (DiffTime)
 import           Data.Yaml (decodeFileThrow)
-import           Generic.Data (gmappend)
-import           Generic.Data.Orphans ()
 import           GHC.Generics (Generic)
 import           Options.Applicative
 import           System.FilePath (takeDirectory, (</>))
 
-import           Cardano.Crypto (RequiresNetworkMagic (..))
-import           Cardano.Logging.Types
-import           Cardano.Node.Configuration.NodeAddress (SocketPath)
-import           Cardano.Node.Configuration.Socket (SocketConfig (..))
-import           Cardano.Node.Handlers.Shutdown
-import           Cardano.Node.Protocol.Types (Protocol (..))
-import           Cardano.Node.Types
-import           Cardano.Tracing.Config
-import           Ouroboros.Consensus.Mempool (MempoolCapacityBytes (..),
-                   MempoolCapacityBytesOverride (..))
-import qualified Ouroboros.Consensus.Node as Consensus (NetworkP2PMode (..))
-import           Ouroboros.Consensus.Storage.LedgerDB.DiskPolicy (SnapshotInterval (..))
-import           Ouroboros.Network.NodeToNode (AcceptedConnectionsLimit (..), DiffusionMode (..))
-import           Ouroboros.Network.PeerSelection.PeerSharing (PeerSharing (..))
+import           Generic.Data (gmappend)
+import           Generic.Data.Orphans ()
 
 data NetworkP2PMode = EnabledP2PMode | DisabledP2PMode
   deriving (Eq, Show, Generic)
@@ -74,6 +79,11 @@ instance Show SomeNetworkP2PMode where
     show (SomeNetworkP2PMode mode@Consensus.EnabledP2PMode)  = show mode
     show (SomeNetworkP2PMode mode@Consensus.DisabledP2PMode) = show mode
 
+-- | Isomorphic to a `Maybe DiffTime`, but expresses what `Nothing` means, in
+-- this case that we want to /NOT/ override the default timeout.
+data TimeoutOverride = NoTimeoutOverride | TimeoutOverride DiffTime
+  deriving (Eq, Show)
+
 data NodeConfiguration
   = NodeConfiguration
       {  ncSocketConfig    :: !SocketConfig
@@ -82,17 +92,20 @@ data NodeConfiguration
           -- (logging, tracing, protocol, slot length etc)
        , ncConfigFile      :: !ConfigYamlFilePath
        , ncTopologyFile    :: !TopologyFile
-       , ncDatabaseFile    :: !DbFile
+       , ncDatabaseFile    :: !NodeDatabasePaths
        , ncProtocolFiles   :: !ProtocolFilepaths
        , ncValidateDB      :: !Bool
        , ncShutdownConfig  :: !ShutdownConfig
+
+       , ncStartAsNonProducingNode :: !Bool
 
         -- Protocol-specific parameters:
        , ncProtocolConfig :: !NodeProtocolConfiguration
 
          -- Node parameters, not protocol-specific:
-       , ncDiffusionMode    :: !DiffusionMode
-       , ncSnapshotInterval :: !SnapshotInterval
+       , ncDiffusionMode      :: !DiffusionMode
+       , ncNumOfDiskSnapshots :: !NumOfDiskSnapshots
+       , ncSnapshotInterval   :: !SnapshotInterval
 
          -- | During the development and integration of new network protocols
          -- (node-to-node and node-to-client) we wish to be able to test them
@@ -129,6 +142,10 @@ data NodeConfiguration
          --
        , ncTimeWaitTimeout       :: DiffTime
 
+         -- | Timeout override for ChainSync, see
+         -- 'Ouroboros.Network.Protocol.ChainSync.Codec.ChainSyncTimeout'
+       , ncChainSyncIdleTimeout :: TimeoutOverride
+
          -- | Node AcceptedConnectionsLimit
        , ncAcceptedConnectionsLimit :: !AcceptedConnectionsLimit
 
@@ -137,6 +154,9 @@ data NodeConfiguration
        , ncTargetNumberOfKnownPeers       :: Int
        , ncTargetNumberOfEstablishedPeers :: Int
        , ncTargetNumberOfActivePeers      :: Int
+       , ncTargetNumberOfKnownBigLedgerPeers       :: Int
+       , ncTargetNumberOfEstablishedBigLedgerPeers :: Int
+       , ncTargetNumberOfActiveBigLedgerPeers      :: Int
 
          -- Enable experimental P2P mode
        , ncEnableP2P :: SomeNetworkP2PMode
@@ -154,17 +174,20 @@ data PartialNodeConfiguration
          -- (logging, tracing, protocol, slot length etc)
        , pncConfigFile      :: !(Last ConfigYamlFilePath)
        , pncTopologyFile    :: !(Last TopologyFile)
-       , pncDatabaseFile    :: !(Last DbFile)
+       , pncDatabaseFile    :: !(Last NodeDatabasePaths)
        , pncProtocolFiles   :: !(Last ProtocolFilepaths)
        , pncValidateDB      :: !(Last Bool)
        , pncShutdownConfig  :: !(Last ShutdownConfig)
+
+       , pncStartAsNonProducingNode :: !(Last Bool)
 
          -- Protocol-specific parameters:
        , pncProtocolConfig :: !(Last NodeProtocolConfiguration)
 
          -- Node parameters, not protocol-specific:
-       , pncDiffusionMode    :: !(Last DiffusionMode)
-       , pncSnapshotInterval :: !(Last SnapshotInterval)
+       , pncDiffusionMode      :: !(Last DiffusionMode  )
+       , pncNumOfDiskSnapshots :: !(Last NumOfDiskSnapshots)
+       , pncSnapshotInterval   :: !(Last SnapshotInterval)
        , pncExperimentalProtocolsEnabled :: !(Last Bool)
 
          -- BlockFetch configuration
@@ -184,6 +207,8 @@ data PartialNodeConfiguration
        , pncProtocolIdleTimeout   :: !(Last DiffTime)
        , pncTimeWaitTimeout       :: !(Last DiffTime)
 
+       , pncChainSyncIdleTimeout      :: !(Last DiffTime)
+
          -- AcceptedConnectionsLimit
        , pncAcceptedConnectionsLimit :: !(Last AcceptedConnectionsLimit)
 
@@ -192,6 +217,9 @@ data PartialNodeConfiguration
        , pncTargetNumberOfKnownPeers       :: !(Last Int)
        , pncTargetNumberOfEstablishedPeers :: !(Last Int)
        , pncTargetNumberOfActivePeers      :: !(Last Int)
+       , pncTargetNumberOfKnownBigLedgerPeers       :: !(Last Int)
+       , pncTargetNumberOfEstablishedBigLedgerPeers :: !(Last Int)
+       , pncTargetNumberOfActiveBigLedgerPeers      :: !(Last Int)
 
          -- Enable experimental P2P mode
        , pncEnableP2P :: !(Last NetworkP2PMode)
@@ -215,8 +243,11 @@ instance FromJSON PartialNodeConfiguration where
 
       -- Node parameters, not protocol-specific
       pncSocketPath <- Last <$> v .:? "SocketPath"
+      pncDatabaseFile <- Last <$> v .:? "DatabasePath"
       pncDiffusionMode
         <- Last . fmap getDiffusionMode <$> v .:? "DiffusionMode"
+      pncNumOfDiskSnapshots
+        <- Last . fmap RequestedNumOfDiskSnapshots <$> v .:? "NumOfDiskSnapshots"
       pncSnapshotInterval
         <- Last . fmap RequestedSnapshotInterval <$> v .:? "SnapshotInterval"
       pncExperimentalProtocolsEnabled <- fmap Last $ do
@@ -247,21 +278,17 @@ instance FromJSON PartialNodeConfiguration where
                              else return $ Last $ Just PartialTracingOff
 
       -- Protocol parameters
-      protocol <-  v .:? "Protocol" .!= ByronProtocol
+      protocol <-  v .:? "Protocol" .!= CardanoProtocol
       pncProtocolConfig <-
         case protocol of
-          ByronProtocol ->
-            Last . Just . NodeProtocolConfigurationByron <$> parseByronProtocol v
-
-          ShelleyProtocol ->
-            Last . Just . NodeProtocolConfigurationShelley <$> parseShelleyProtocol v
-
           CardanoProtocol ->
-            Last . Just  <$> (NodeProtocolConfigurationCardano <$> parseByronProtocol v
-                                                               <*> parseShelleyProtocol v
-                                                               <*> parseAlonzoProtocol v
-                                                               <*> parseConwayProtocol v
-                                                               <*> parseHardForkProtocol v)
+            fmap (Last . Just) $
+              NodeProtocolConfigurationCardano
+                <$> parseByronProtocol v
+                <*> parseShelleyProtocol v
+                <*> parseAlonzoProtocol v
+                <*> parseConwayProtocol v
+                <*> parseHardForkProtocol v
       pncMaybeMempoolCapacityOverride <- Last <$> parseMempoolCapacityBytesOverride v
 
       -- Network timeouts
@@ -278,6 +305,11 @@ instance FromJSON PartialNodeConfiguration where
       pncTargetNumberOfKnownPeers       <- Last <$> v .:? "TargetNumberOfKnownPeers"
       pncTargetNumberOfEstablishedPeers <- Last <$> v .:? "TargetNumberOfEstablishedPeers"
       pncTargetNumberOfActivePeers      <- Last <$> v .:? "TargetNumberOfActivePeers"
+      pncTargetNumberOfKnownBigLedgerPeers       <- Last <$> v .:? "TargetNumberOfKnownBigLedgerPeers"
+      pncTargetNumberOfEstablishedBigLedgerPeers <- Last <$> v .:? "TargetNumberOfEstablishedBigLedgerPeers"
+      pncTargetNumberOfActiveBigLedgerPeers      <- Last <$> v .:? "TargetNumberOfActiveBigLedgerPeers"
+
+      pncChainSyncIdleTimeout      <- Last <$> v .:? "ChainSyncIdleTimeout"
 
       -- Enable P2P switch
       p2pSwitch <- v .:? "EnableP2P" .!= Just False
@@ -289,12 +321,13 @@ instance FromJSON PartialNodeConfiguration where
 
       -- Peer Sharing
       -- DISABLED BY DEFAULT
-      pncPeerSharing <- Last <$> v .:? "PeerSharing" .!= Just NoPeerSharing
+      pncPeerSharing <- Last <$> v .:? "PeerSharing" .!= Just PeerSharingDisabled
 
       pure PartialNodeConfiguration {
              pncProtocolConfig
            , pncSocketConfig = Last . Just $ SocketConfig mempty mempty mempty pncSocketPath
            , pncDiffusionMode
+           , pncNumOfDiskSnapshots
            , pncSnapshotInterval
            , pncExperimentalProtocolsEnabled
            , pncMaxConcurrencyBulkSync
@@ -305,25 +338,30 @@ instance FromJSON PartialNodeConfiguration where
            , pncTraceForwardSocket = mempty
            , pncConfigFile = mempty
            , pncTopologyFile = mempty
-           , pncDatabaseFile = mempty
+           , pncDatabaseFile
            , pncProtocolFiles = mempty
            , pncValidateDB = mempty
            , pncShutdownConfig = mempty
+           , pncStartAsNonProducingNode = Last $ Just False
            , pncMaybeMempoolCapacityOverride
            , pncProtocolIdleTimeout
            , pncTimeWaitTimeout
+           , pncChainSyncIdleTimeout
            , pncAcceptedConnectionsLimit
            , pncTargetNumberOfRootPeers
            , pncTargetNumberOfKnownPeers
            , pncTargetNumberOfEstablishedPeers
            , pncTargetNumberOfActivePeers
+           , pncTargetNumberOfKnownBigLedgerPeers
+           , pncTargetNumberOfEstablishedBigLedgerPeers
+           , pncTargetNumberOfActiveBigLedgerPeers
            , pncEnableP2P
            , pncPeerSharing
            }
     where
       parseMempoolCapacityBytesOverride v = parseNoOverride <|> parseOverride
         where
-          parseNoOverride = fmap (MempoolCapacityBytesOverride . MempoolCapacityBytes) <$> v .:? "MempoolCapacityBytesOverride"
+          parseNoOverride = fmap (MempoolCapacityBytesOverride . ByteSize32) <$> v .:? "MempoolCapacityBytesOverride"
           parseOverride = do
             maybeString :: Maybe String <- v .:? "MempoolCapacityBytesOverride"
             case maybeString of
@@ -456,16 +494,18 @@ defaultPartialNodeConfiguration :: PartialNodeConfiguration
 defaultPartialNodeConfiguration =
   PartialNodeConfiguration
     { pncConfigFile = Last . Just $ ConfigYamlFilePath "configuration/cardano/mainnet-config.json"
-    , pncDatabaseFile = Last . Just $ DbFile "mainnet/db/"
+    , pncDatabaseFile = Last . Just $ OnePathForAllDbs "mainnet/db/"
     , pncLoggingSwitch = Last $ Just True
     , pncSocketConfig = Last . Just $ SocketConfig mempty mempty mempty mempty
     , pncDiffusionMode = Last $ Just InitiatorAndResponderDiffusionMode
+    , pncNumOfDiskSnapshots = Last $ Just DefaultNumOfDiskSnapshots
     , pncSnapshotInterval = Last $ Just DefaultSnapshotInterval
     , pncExperimentalProtocolsEnabled = Last $ Just False
     , pncTopologyFile = Last . Just $ TopologyFile "configuration/cardano/mainnet-topology.json"
     , pncProtocolFiles = mempty
     , pncValidateDB = Last $ Just False
     , pncShutdownConfig = Last . Just $ ShutdownConfig Nothing Nothing
+    , pncStartAsNonProducingNode = Last $ Just False
     , pncProtocolConfig = mempty
     , pncMaxConcurrencyBulkSync = mempty
     , pncMaxConcurrencyDeadline = mempty
@@ -483,12 +523,16 @@ defaultPartialNodeConfiguration =
         , acceptedConnectionsSoftLimit = 384
         , acceptedConnectionsDelay     = 5
         }
-    , pncTargetNumberOfRootPeers        = Last (Just 100)
-    , pncTargetNumberOfKnownPeers       = Last (Just 100)
-    , pncTargetNumberOfEstablishedPeers = Last (Just 50)
-    , pncTargetNumberOfActivePeers      = Last (Just 20)
-    , pncEnableP2P                      = Last (Just DisabledP2PMode)
-    , pncPeerSharing                    = Last (Just NoPeerSharing)
+    , pncTargetNumberOfRootPeers        = Last (Just 85)
+    , pncTargetNumberOfKnownPeers       = Last (Just 85)
+    , pncTargetNumberOfEstablishedPeers = Last (Just 40)
+    , pncTargetNumberOfActivePeers      = Last (Just 15)
+    , pncChainSyncIdleTimeout           = mempty
+    , pncTargetNumberOfKnownBigLedgerPeers       = Last (Just 15)
+    , pncTargetNumberOfEstablishedBigLedgerPeers = Last (Just 10)
+    , pncTargetNumberOfActiveBigLedgerPeers      = Last (Just 5)
+    , pncEnableP2P                      = Last (Just EnabledP2PMode)
+    , pncPeerSharing                    = Last (Just PeerSharingDisabled)
     }
 
 lastOption :: Parser a -> Parser (Last a)
@@ -500,11 +544,13 @@ makeNodeConfiguration pnc = do
   topologyFile <- lastToEither "Missing TopologyFile" $ pncTopologyFile pnc
   databaseFile <- lastToEither "Missing DatabaseFile" $ pncDatabaseFile pnc
   validateDB <- lastToEither "Missing ValidateDB" $ pncValidateDB pnc
+  startAsNonProducingNode <- lastToEither "Missing StartAsNonProducingNode" $ pncStartAsNonProducingNode pnc
   protocolConfig <- lastToEither "Missing ProtocolConfig" $ pncProtocolConfig pnc
   loggingSwitch <- lastToEither "Missing LoggingSwitch" $ pncLoggingSwitch pnc
   logMetrics <- lastToEither "Missing LogMetrics" $ pncLogMetrics pnc
   traceConfig <- first Text.unpack $ partialTraceSelectionToEither $ pncTraceConfig pnc
   diffusionMode <- lastToEither "Missing DiffusionMode" $ pncDiffusionMode pnc
+  numOfDiskSnapshots <- lastToEither "Missing NumOfDiskSnapshots" $ pncNumOfDiskSnapshots pnc
   snapshotInterval <- lastToEither "Missing SnapshotInterval" $ pncSnapshotInterval pnc
   shutdownConfig <- lastToEither "Missing ShutdownConfig" $ pncShutdownConfig pnc
   socketConfig <- lastToEither "Missing SocketConfig" $ pncSocketConfig pnc
@@ -521,6 +567,15 @@ makeNodeConfiguration pnc = do
   ncTargetNumberOfActivePeers <-
     lastToEither "Missing TargetNumberOfActivePeers"
     $ pncTargetNumberOfActivePeers pnc
+  ncTargetNumberOfKnownBigLedgerPeers <-
+    lastToEither "Missing TargetNumberOfKnownBigLedgerPeers"
+    $ pncTargetNumberOfKnownBigLedgerPeers pnc
+  ncTargetNumberOfEstablishedBigLedgerPeers <-
+    lastToEither "Missing TargetNumberOfEstablishedBigLedgerPeers"
+    $ pncTargetNumberOfEstablishedBigLedgerPeers pnc
+  ncTargetNumberOfActiveBigLedgerPeers <-
+    lastToEither "Missing TargetNumberOfActiveBigLedgerPeers"
+    $ pncTargetNumberOfActiveBigLedgerPeers pnc
   ncProtocolIdleTimeout <-
     lastToEither "Missing ProtocolIdleTimeout"
     $ pncProtocolIdleTimeout pnc
@@ -533,6 +588,11 @@ makeNodeConfiguration pnc = do
   enableP2P <-
     lastToEither "Missing EnableP2P"
     $ pncEnableP2P pnc
+  ncChainSyncIdleTimeout <-
+    Right
+    $ maybe NoTimeoutOverride TimeoutOverride
+    $ getLast
+    $ pncChainSyncIdleTimeout pnc
 
   ncPeerSharing <-
     lastToEither "Missing PeerSharing"
@@ -555,9 +615,11 @@ makeNodeConfiguration pnc = do
                    Nothing -> ProtocolFilepaths Nothing Nothing Nothing Nothing Nothing Nothing
              , ncValidateDB = validateDB
              , ncShutdownConfig = shutdownConfig
+             , ncStartAsNonProducingNode = startAsNonProducingNode
              , ncProtocolConfig = protocolConfig
              , ncSocketConfig = socketConfig
              , ncDiffusionMode = diffusionMode
+             , ncNumOfDiskSnapshots = numOfDiskSnapshots
              , ncSnapshotInterval = snapshotInterval
              , ncExperimentalProtocolsEnabled = experimentalProtocols
              , ncMaxConcurrencyBulkSync = getLast $ pncMaxConcurrencyBulkSync pnc
@@ -570,11 +632,15 @@ makeNodeConfiguration pnc = do
              , ncMaybeMempoolCapacityOverride = getLast $ pncMaybeMempoolCapacityOverride pnc
              , ncProtocolIdleTimeout
              , ncTimeWaitTimeout
+             , ncChainSyncIdleTimeout
              , ncAcceptedConnectionsLimit
              , ncTargetNumberOfRootPeers
              , ncTargetNumberOfKnownPeers
              , ncTargetNumberOfEstablishedPeers
              , ncTargetNumberOfActivePeers
+             , ncTargetNumberOfKnownBigLedgerPeers
+             , ncTargetNumberOfEstablishedBigLedgerPeers
+             , ncTargetNumberOfActiveBigLedgerPeers
              , ncEnableP2P = case enableP2P of
                  EnabledP2PMode  -> SomeNetworkP2PMode Consensus.EnabledP2PMode
                  DisabledP2PMode -> SomeNetworkP2PMode Consensus.DisabledP2PMode
@@ -584,16 +650,14 @@ makeNodeConfiguration pnc = do
 ncProtocol :: NodeConfiguration -> Protocol
 ncProtocol nc =
   case ncProtocolConfig nc of
-    NodeProtocolConfigurationByron{}   -> ByronProtocol
-    NodeProtocolConfigurationShelley{} -> ShelleyProtocol
+    -- NodeProtocolConfigurationByron{}   -> ByronProtocol -- jky delete me
+    -- NodeProtocolConfigurationShelley{} -> ShelleyProtocol -- jky delete me
     NodeProtocolConfigurationCardano{} -> CardanoProtocol
 
 pncProtocol :: PartialNodeConfiguration -> Either Text Protocol
 pncProtocol pnc =
   case pncProtocolConfig pnc of
     Last Nothing -> Left "Node protocol configuration not found"
-    Last (Just NodeProtocolConfigurationByron{})   -> Right ByronProtocol
-    Last (Just NodeProtocolConfigurationShelley{}) -> Right ShelleyProtocol
     Last (Just NodeProtocolConfigurationCardano{}) -> Right CardanoProtocol
 
 parseNodeConfigurationFP :: Maybe ConfigYamlFilePath -> IO PartialNodeConfiguration

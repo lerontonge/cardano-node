@@ -1,8 +1,11 @@
+{-# LANGUAGE ScopedTypeVariables #-}
 module Parsers.Help
   ( HelpOptions(..)
   , cmdHelp
   , runHelpOptions
   ) where
+
+import           Cardano.CLI.EraBased.Options.Common
 
 import           Control.Monad (forM_)
 import qualified Data.List as List
@@ -11,8 +14,6 @@ import           Options.Applicative.Help.Core
 import           Options.Applicative.Help.Types (renderHelp)
 import           Options.Applicative.Types (OptReader (..), Option (..), Parser (..))
 import qualified System.IO as IO
-
-import           Cardano.CLI.Common.Parsers
 
 data HelpOptions = HelpOptions
   deriving (Eq, Show)
@@ -30,10 +31,9 @@ helpAll pprefs progn rnames parserInfo = do
     go p = case p of
       NilP _ -> return ()
       OptP optP -> case optMain optP of
-        CmdReader _ cs f -> do
-          forM_ cs $ \c ->
-            forM_ (f c) $ \subParserInfo ->
-              helpAll pprefs progn (c:rnames) subParserInfo
+        CmdReader _ cs -> do
+          forM_ cs $ \(c, subParserInfo) ->
+            helpAll pprefs progn (c:rnames) subParserInfo
         _ -> return ()
       AltP pa pb -> go pa >> go pb
       MultP pf px -> go pf >> go px

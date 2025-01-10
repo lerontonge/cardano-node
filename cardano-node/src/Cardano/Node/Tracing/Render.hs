@@ -1,6 +1,9 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
-
+{-# LANGUAGE TypeOperators #-}
 
 module Cardano.Node.Tracing.Render
   ( renderChunkNo
@@ -22,14 +25,22 @@ module Cardano.Node.Tracing.Render
   , renderTxId
   , renderTxIdForDetails
   , renderWithOrigin
+  , renderScriptHash
+  , renderScriptIntegrityHash
+  , renderScriptPurpose
+  , renderMissingRedeemers
   ) where
 
-import qualified Data.ByteString.Base16 as B16
-import           Data.Proxy (Proxy (..))
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
+import qualified Cardano.Api.Shelley as Api
 
+import qualified Cardano.Crypto.Hash.Class as Crypto
+import           Cardano.Ledger.Alonzo.Scripts (AlonzoPlutusPurpose (..), AsItem (..),
+                   PlutusPurpose)
+import qualified Cardano.Ledger.Alonzo.Tx as Alonzo
+import           Cardano.Ledger.Conway.Scripts (ConwayPlutusPurpose (..))
+import qualified Cardano.Ledger.Core as Ledger
+import           Cardano.Ledger.Crypto (StandardCrypto)
+import qualified Cardano.Ledger.SafeHash as SafeHash
 import           Cardano.Logging
 import           Cardano.Node.Queries (ConvertTxId (..))
 import           Cardano.Slotting.Slot (SlotNo (..), WithOrigin (..))
@@ -41,6 +52,16 @@ import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal (ChunkN
 import           Ouroboros.Consensus.Util.Condense (Condense, condense)
 import           Ouroboros.Network.Block (ChainHash (..), HeaderHash, StandardHash, Tip,
                    getTipPoint)
+
+import           Data.Aeson ((.=))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Aeson
+import qualified Data.Aeson.Types as Aeson
+import qualified Data.ByteString.Base16 as B16
+import           Data.Proxy (Proxy (..))
+import           Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 
 condenseT :: Condense a => a -> Text
 condenseT = Text.pack . condense
@@ -156,3 +177,69 @@ trimHashTextForDetails dtal =
   case dtal of
     DMinimal  -> Text.take 7
     _         -> id
+
+renderScriptIntegrityHash :: Maybe (Alonzo.ScriptIntegrityHash StandardCrypto) -> Aeson.Value
+renderScriptIntegrityHash (Just witPPDataHash) =
+  Aeson.String . Crypto.hashToTextAsHex $ SafeHash.extractHash witPPDataHash
+renderScriptIntegrityHash Nothing = Aeson.Null
+
+
+renderMissingRedeemers :: forall era. ()
+  => Api.ShelleyBasedEra era
+  -> [(PlutusPurpose AsItem (Api.ShelleyLedgerEra era), Ledger.ScriptHash StandardCrypto)]
+  -> Aeson.Value
+renderMissingRedeemers sbe scripts = Aeson.object $ map renderTuple  scripts
+  where
+    renderTuple :: ()
+      => (PlutusPurpose AsItem (Api.ShelleyLedgerEra era), Ledger.ScriptHash StandardCrypto)
+      -> Aeson.Pair
+    renderTuple (scriptPurpose, sHash) =
+      Aeson.fromText (renderScriptHash sHash) .= renderScriptPurpose sbe scriptPurpose
+
+renderScriptHash :: Ledger.ScriptHash StandardCrypto -> Text
+renderScriptHash = Api.serialiseToRawBytesHexText . Api.fromShelleyScriptHash
+
+renderScriptPurpose :: ()
+  => Api.ShelleyBasedEra era
+  -> PlutusPurpose AsItem (Api.ShelleyLedgerEra era)
+  -> Aeson.Value
+renderScriptPurpose =
+  Api.caseShelleyToMaryOrAlonzoEraOnwards
+    (const (const Aeson.Null))
+    (\case
+      Api.AlonzoEraOnwardsAlonzo -> renderAlonzoPlutusPurpose
+      Api.AlonzoEraOnwardsBabbage -> renderAlonzoPlutusPurpose
+      Api.AlonzoEraOnwardsConway -> renderConwayPlutusPurpose
+    )
+
+renderAlonzoPlutusPurpose :: ()
+  => (Ledger.EraCrypto era ~ StandardCrypto, Aeson.ToJSON (Ledger.TxCert era))
+  => AlonzoPlutusPurpose AsItem era
+  -> Aeson.Value
+renderAlonzoPlutusPurpose = \case
+  AlonzoSpending (AsItem txin) ->
+    Aeson.object ["spending" .= Api.fromShelleyTxIn txin]
+  AlonzoMinting pid ->
+    Aeson.object ["minting" .= Aeson.toJSON pid]
+  AlonzoRewarding (AsItem rwdAcct) ->
+    Aeson.object ["rewarding" .= Aeson.String (Api.serialiseAddress $ Api.fromShelleyStakeAddr rwdAcct)]
+  AlonzoCertifying cert ->
+    Aeson.object ["certifying" .= Aeson.toJSON cert]
+
+renderConwayPlutusPurpose :: ()
+  => (Ledger.EraCrypto era ~ StandardCrypto, Ledger.EraPParams era, Aeson.ToJSON (Ledger.TxCert era))
+  => ConwayPlutusPurpose AsItem era
+  -> Aeson.Value
+renderConwayPlutusPurpose = \case
+  ConwaySpending (AsItem txin) ->
+    Aeson.object ["spending" .= Api.fromShelleyTxIn txin]
+  ConwayMinting pid ->
+    Aeson.object ["minting" .= Aeson.toJSON pid]
+  ConwayRewarding (AsItem rwdAcct) ->
+    Aeson.object ["rewarding" .= Aeson.String (Api.serialiseAddress $ Api.fromShelleyStakeAddr rwdAcct)]
+  ConwayCertifying cert ->
+    Aeson.object ["certifying" .= Aeson.toJSON cert]
+  ConwayVoting voter ->
+    Aeson.object ["voting" .= Aeson.toJSON voter]
+  ConwayProposing proposal ->
+    Aeson.object ["proposing" .= Aeson.toJSON proposal]

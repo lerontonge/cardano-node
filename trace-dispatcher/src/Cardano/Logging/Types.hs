@@ -3,7 +3,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 {-# OPTIONS_GHC -Wno-partial-fields  #-}
@@ -12,6 +11,7 @@ module Cardano.Logging.Types (
     Trace(..)
   , LogFormatting(..)
   , Metric(..)
+  , getMetricName
   , emptyObject
   , Documented(..)
   , DocMsg(..)
@@ -22,9 +22,10 @@ module Cardano.Logging.Types (
   , nsReplaceInner
   , nsCast
   , nsPrependInner
-  , nsGetPrefix
-  , nsGetInner
   , nsGetComplete
+  , nsGetTuple
+  , nsRawToText
+  , nsToText
   , MetaTrace(..)
   , DetailLevel(..)
   , Privacy(..)
@@ -54,28 +55,25 @@ module Cardano.Logging.Types (
 ) where
 
 
+import           Ouroboros.Network.Util.ShowProxy (ShowProxy (..))
+
 import           Codec.Serialise (Serialise (..))
 import qualified Control.Tracer as T
-import           Data.Aeson ((.=))
 import qualified Data.Aeson as AE
-import qualified Data.Aeson.Text as AE
-import           Data.Set (Set)
-import qualified Data.Set as Set
+import qualified Data.Aeson.Encoding as AE
+import qualified Data.Aeson.KeyMap as AE
 import qualified Data.HashMap.Strict as HM
-
 import           Data.IORef
 import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-
-
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import           Data.Text (Text, intercalate, pack, singleton, unpack)
 import           Data.Text.Lazy (toStrict)
+import           Data.Text.Lazy.Encoding (decodeUtf8)
 import           Data.Time (UTCTime)
 import           GHC.Generics
 import           Network.HostName (HostName)
-
-import           Ouroboros.Network.Util.ShowProxy (ShowProxy (..))
-
 
 
 -- | The Trace carries the underlying tracer Tracer from the contra-tracer package.
@@ -104,38 +102,42 @@ instance Monad m => Monoid (Trace m a) where
 -- or more prefixes, in this moment it is a NamespaceOuter is used
 data Namespace a = Namespace {
     nsPrefix :: [Text]
-  , nsInner :: [Text]}
+  , nsInner  :: [Text]}
   deriving Eq
 
 instance Show (Namespace a) where
   show (Namespace [] []) = "emptyNS"
-  show (Namespace [] nsInner) =
-    unpack $ intercalate (singleton '.') nsInner
-  show (Namespace nsPrefix nsInner) =
-    unpack $ intercalate (singleton '.') (nsPrefix ++ nsInner)
+  show (Namespace [] nsInner') =
+    unpack $ intercalate (singleton '.') nsInner'
+  show (Namespace nsPrefix' nsInner') =
+    unpack $ intercalate (singleton '.') (nsPrefix' ++ nsInner')
 
-nsReplacePrefix :: Namespace a -> [Text] -> Namespace a
-nsReplacePrefix (Namespace _ i) tl =  Namespace tl i
+nsReplacePrefix :: [Text] -> Namespace a -> Namespace a
+nsReplacePrefix o (Namespace _ i) =  Namespace o i
 
-nsReplaceInner :: Namespace a -> [Text] -> Namespace a
-nsReplaceInner (Namespace o _) =  Namespace o
+nsReplaceInner :: [Text] -> Namespace a -> Namespace a
+nsReplaceInner i (Namespace o _) =  Namespace o i
+
 
 nsPrependInner :: Text -> Namespace a -> Namespace b
 nsPrependInner t (Namespace o i) =  Namespace o (t : i)
 
+{-# INLINE nsCast #-}
 nsCast :: Namespace a -> Namespace b
 nsCast (Namespace o i) =  Namespace o i
-
-nsGetInner :: Namespace a -> [Text]
-nsGetInner = nsInner
-
-nsGetPrefix :: Namespace a -> [Text]
-nsGetPrefix = nsPrefix
 
 nsGetComplete :: Namespace a -> [Text]
 nsGetComplete (Namespace [] i) = i
 nsGetComplete (Namespace o i)  = o ++ i
 
+nsGetTuple :: Namespace a -> ([Text],[Text])
+nsGetTuple (Namespace o i)  = (o,i)
+
+nsRawToText :: ([Text], [Text]) -> Text
+nsRawToText (ns1, ns2) = intercalate "." (ns1 ++ ns2)
+
+nsToText :: Namespace a -> Text
+nsToText (Namespace ns1 ns2) = intercalate "." (ns1 ++ ns2)
 
 -- | Every message needs this to define how to represent itself
 class LogFormatting a where
@@ -148,7 +150,14 @@ class LogFormatting a where
   -- No human representation is represented by the empty text
   -- The default implementation returns no human representation
   forHuman :: a -> Text
-  forHuman v = toStrict (AE.encodeToLazyText (forMachine DNormal v))
+  forHuman _v = ""
+
+  forHumanOrMachine :: a -> Text
+  forHumanOrMachine v =
+    case forHuman v of
+      "" -> toStrict . decodeUtf8 . AE.encodingToLazyByteString $
+              AE.toEncoding $ forMachine DNormal v
+      s  -> s
 
   -- | Metrics representation.
   -- No metrics by default
@@ -179,7 +188,23 @@ data Metric
   -- | A counter metric.
   -- Text is used to name the metric
     | CounterM Text (Maybe Int)
+  -- | A prometheus metric with key label pairs.
+  -- Text is used to name the metric
+  -- [(Text, Text)] is used to represent the key label pairs
+  -- The value of the metric will always be "1"
+  -- e.g. if you have a prometheus metric with the name "prometheus_metric"
+  -- and the key label pairs [("key1", "value1"), ("key2", "value2")]
+  -- the metric will be represented as "prometheus_metric{key1=\"value1\",key2=\"value2\"} 1"
+
+    | PrometheusM Text [(Text, Text)]
   deriving (Show, Eq)
+
+
+getMetricName :: Metric -> Text
+getMetricName (IntM name _) = name
+getMetricName (DoubleM name _) = name
+getMetricName (CounterM name _) = name
+getMetricName (PrometheusM name _) = name
 
 
 -- | A helper function for creating an empty |Object|.
@@ -248,7 +273,7 @@ data SeverityS
     | Critical                -- ^ Severe situations
     | Alert                   -- ^ Take immediate action
     | Emergency               -- ^ System is unusable
-  deriving (Show, Eq, Ord, Bounded, Enum, Read, AE.ToJSON, Generic, Serialise)
+  deriving (Show, Eq, Ord, Bounded, Enum, Read, AE.ToJSON, AE.FromJSON, Generic, Serialise)
 
 -- | Severity for a filter
 -- Nothing means don't show anything (Silence)
@@ -289,29 +314,23 @@ instance Show SeverityF where
   show (SeverityF (Just s)) = show s
   show (SeverityF Nothing)  = "Silence"
 
--- | Used as interface object for ForwarderTracer
-data TraceObject = TraceObject {
-    toHuman     :: Maybe Text
-  , toMachine   :: Maybe Text
-  , toNamespace :: [Text]
-  , toSeverity  :: SeverityS
-  , toDetails   :: DetailLevel
-  , toTimestamp :: UTCTime
-  , toHostname  :: HostName
-  , toThreadId  :: Text
-} deriving (Eq, Show)
 
 ----------------------------------------------------------------
 -- Configuration
 
 -- |
-data ConfigReflection = ConfigReflection (IORef (Set [Text])) (IORef (Set [Text]))
+data ConfigReflection = ConfigReflection {
+    crSilent          :: IORef (Set [Text])
+  , crNoMetrics       :: IORef (Set [Text])
+  , crAllTracers      :: IORef (Set [Text])
+  }
 
 emptyConfigReflection :: IO ConfigReflection
 emptyConfigReflection  = do
-    silence <- newIORef Set.empty
-    hasMetrics <- newIORef Set.empty
-    pure $ ConfigReflection silence hasMetrics
+    silence     <- newIORef Set.empty
+    hasMetrics  <- newIORef Set.empty
+    allTracers  <- newIORef Set.empty
+    pure $ ConfigReflection silence hasMetrics allTracers
 
 data FormattedMessage =
       FormattedHuman Bool Text
@@ -321,6 +340,29 @@ data FormattedMessage =
     | FormattedForwarder TraceObject
   deriving (Eq, Show)
 
+
+data PreFormatted a = PreFormatted {
+    pfMessage    :: !a
+  , pfForHuman   :: !(Maybe Text)
+  , pfForMachine :: !(AE.KeyMap AE.Value)
+  , pfNamespace  :: ![Text]
+  , pfTimestamp  :: !Text
+  , pfTime       :: !UTCTime
+  , pfHostname   :: !HostName
+  , pfThreadId   :: !Text
+}
+
+-- | Used as interface object for ForwarderTracer
+data TraceObject = TraceObject {
+    toHuman     :: !(Maybe Text)
+  , toMachine   :: !Text
+  , toNamespace :: ![Text]
+  , toSeverity  :: !SeverityS
+  , toDetails   :: !DetailLevel
+  , toTimestamp :: !UTCTime
+  , toHostname  :: !HostName
+  , toThreadId  :: !Text
+} deriving (Eq, Show)
 
 -- |
 data BackendConfig =
@@ -361,15 +403,12 @@ data ConfigOption =
     -- | Detail level (default is DNormal)
   | ConfDetail {detail :: DetailLevel}
   -- | To which backend to pass
-  --   Default is [EKGBackend, Forwarder, Stdout HumanFormatColoured]
+  --   Default is [EKGBackend, Forwarder, Stdout MachineFormat]
   | ConfBackend {backends :: [BackendConfig]}
-  -- | Construct a limiter with name (Text) and limiting to the Double,
+  -- | Construct a limiter with limiting to the Double,
   -- which represents frequency in number of messages per second
   | ConfLimiter {maxFrequency :: Double}
   deriving (Eq, Ord, Show, Generic)
-
-instance AE.FromJSON ConfigOption where
-  parseJSON = AE.genericParseJSON AE.defaultOptions{AE.sumEncoding = AE.UntaggedValue}
 
 newtype ForwarderAddr
   = LocalSocket FilePath
@@ -432,9 +471,11 @@ data TraceConfig = TraceConfig {
      -- | Options specific to a certain namespace
     tcOptions   :: Map.Map [Text] [ConfigOption]
      -- | Options for the forwarder
-  , tcForwarder :: TraceOptionForwarder
+  , tcForwarder :: Maybe TraceOptionForwarder
     -- | Optional human-readable name of the node.
   , tcNodeName  :: Maybe Text
+    -- | Optional prefix for metrics.
+  , tcMetricsPrefix :: Maybe Text
     -- | Optional peer trace frequency in milliseconds.
   , tcPeerFrequency  :: Maybe Int
     -- | Optional resource trace frequency in milliseconds.
@@ -442,11 +483,13 @@ data TraceConfig = TraceConfig {
 }
   deriving (Eq, Ord, Show)
 
+
 emptyTraceConfig :: TraceConfig
 emptyTraceConfig = TraceConfig {
     tcOptions = Map.empty
-  , tcForwarder = defaultForwarder
+  , tcForwarder = Nothing
   , tcNodeName = Nothing
+  , tcMetricsPrefix = Nothing
   , tcPeerFrequency = Just 2000 -- Every 2 seconds
   , tcResourceFrequency = Just 5000 -- Every five seconds
   }
@@ -455,14 +498,13 @@ emptyTraceConfig = TraceConfig {
 -- Control and Documentation
 
 -- | When configuring a net of tracers, it should be run with Config on all
--- entry points first, and then with Optimize. When reconfiguring it needs to
--- run Reset followed by Config followed by Optimize
+-- entry points first, and then with TCOptimize. When reconfiguring it needs to
+-- run TCReset followed by Config followed by TCOptimize
 data TraceControl where
-    Reset     :: TraceControl
-    Config    :: TraceConfig -> TraceControl
-    Optimize  :: IORef (Set [Text]) -> IORef (Set [Text]) -> TraceControl
-    TCDocument  :: Int  -> DocCollector -> TraceControl
-
+    TCReset       :: TraceControl
+    TCConfig      :: TraceConfig -> TraceControl
+    TCOptimize    :: ConfigReflection -> TraceControl
+    TCDocument    :: Int -> DocCollector -> TraceControl
 
 newtype DocCollector = DocCollector (IORef (Map Int LogDoc))
 
@@ -483,50 +525,16 @@ data LogDoc = LogDoc {
 emptyLogDoc :: Text -> [(Text, Text)] -> LogDoc
 emptyLogDoc d m = LogDoc d (Map.fromList m) [] Nothing Nothing Nothing [] [] [] [] False
 
--- | Type for the functions foldTraceM and foldMTraceM from module
--- Cardano/Logging/Trace
+-- | Type for the function foldTraceM from module Cardano/Logging/Trace
 newtype Folding a b = Folding b
 
 unfold :: Folding a b -> b
 unfold (Folding b) = b
 
-data PreFormatted a = PreFormatted {
-    pfMessage    :: a
-  , pfForHuman   :: Maybe Text
-  , pfForMachine :: Maybe AE.Object
-  }
-
-instance LogFormatting a => LogFormatting (PreFormatted a) where
-  forMachine dtal PreFormatted {..} =  case pfForMachine of
-                                          Nothing -> forMachine dtal pfMessage
-                                          Just obj -> obj
-  forHuman PreFormatted {..}        =  case pfForHuman of
-                                          Nothing  -> forHuman pfMessage
-                                          Just txt -> txt
-  asMetrics PreFormatted {..}       =  asMetrics pfMessage
-
----------------------------------------------------------------------------
--- LogFormatting instances
-
 instance LogFormatting b => LogFormatting (Folding a b) where
   forMachine v (Folding b) =  forMachine v b
   forHuman (Folding b)     =  forHuman b
   asMetrics (Folding b)    =  asMetrics b
-
-instance LogFormatting Double where
-  forMachine _dtal d = "val" .= AE.String ((pack . show) d)
-  forHuman           = pack . show
-  asMetrics d        = [DoubleM "" d]
-
-instance LogFormatting Int where
-  forMachine _dtal i = "val" .= AE.String ((pack . show) i)
-  forHuman           = pack . show
-  asMetrics i        = [IntM "" (fromIntegral i)]
-
-instance LogFormatting Integer where
-  forMachine _dtal i = "val" .= AE.String ((pack . show) i)
-  forHuman           = pack . show
-  asMetrics i        = [IntM "" i]
 
 ---------------------------------------------------------------------------
 -- Instances for 'TraceObject' to forward it using 'trace-forward' library.

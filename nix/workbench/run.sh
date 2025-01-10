@@ -5,15 +5,15 @@ usage_run() {
     usage "run" "Managing cluster runs" <<EOF
     $(helpcmd list-runs)              List local runs
      $(blk runs lsr)
-    $(helpcmd list-remote)            List AWS runs
+    $(helpcmd list-remote)            List remote runs
      $(blk remote lsrr)
     $(helpcmd list-verbose)           List local runs, verbosely
      $(blk verb lsrv)
-    $(helpcmd list-verbose-remote)    List AWS runs, verbosely
+    $(helpcmd list-verbose-remote)    List remote runs, verbosely
      $(blk rverb lsrvr)
     $(helpcmd list-sets)              List local run sets
      $(blk sets lss)
-    $(helpcmd list-sets-remote)       List AWS cluster run sets
+    $(helpcmd list-sets-remote)       List remote cluster run sets
      $(blk rsets lssr)
     $(helpcmd set-add SETNAME RUN...)
      $(blk add sa)                  Add runs to the named run set
@@ -21,11 +21,13 @@ usage_run() {
      $(blk ros)
     $(helpcmd list-pattern)           List local runs
      $(blk lspat lsrp)
+    $(helpcmd as-remote)            Helper to modify remote environment in $(blue \$WB_REMOTE)
+     $(blk asr)
 
     $(helpcmd describe RUN)
 
     $(helpcmd fix-legacy-run-structure RUN)
-     $(blk flrs fix-legacy)      Update legacy (AWS) meta.json to mostly match
+     $(blk flrs fix-legacy)      Update legacy (cardano-ops) meta.json to mostly match
                             the workbench
 
     $(helpcmd allocate BATCH-NAME PROFILE-NAME [ENV-CONFIG-OPTS..])
@@ -35,11 +37,11 @@ usage_run() {
                           A unique name would be allocated for this run,
                             and a run alias $(green current) will be created for it.
 
-    $(helpcmd fetch-run RUN)        Fetch an AWS run
+    $(helpcmd fetch-run RUN)        Fetch a remote run
      $(blk fr fetch)
     $(helpcmd fetch-analysis RUN..)
-     $(blk fa)                   Fetch analyses of AWS runs
-    $(helpcmd analyse-aws RUN..)     Run analyses of AWS runs, remotely
+     $(blk fa)                   Fetch analyses of remote runs
+    $(helpcmd analyse-remote RUN..)  Run analyses of runs, remotely
 
     $(helpcmd start [--scenario NAME] [--idle] [--analyse] RUN)
                           Start the named run.
@@ -75,16 +77,19 @@ else global_rundir=$global_rundir_def
      mkdir "$global_rundir"
 fi
 
+if test -v "WB_REMOTE"
+then remote=$WB_REMOTE
+else remote='{"env":"deployer","depl":"nomad-1"}'            # nomad/nomad-1 as fallback default
+fi
+
 local sargs=()
-local remote='{ "env":  "bench"
-              , "depl": "bench-1"
-              }'
-run_aws_get_args=()
+
+run_remote_get_args=()
 while test $# -gt 0
 do case "$1" in
        --remote )      sargs+=($1 $2); remote=$2; shift;;
        --rundir )      sargs+=($1 $2); global_rundir=$2; shift;;
-       --clean | -c )  sargs+=($1);    run_aws_get_args+=($1);;
+       --clean | -c )  sargs+=($1);    run_remote_get_args+=($1);;
        * ) break;; esac; shift; done
 
 local op=${1:-$run_default_op}; test $# -gt 0 && shift
@@ -92,6 +97,20 @@ local op=${1:-$run_default_op}; test $# -gt 0 && shift
 case "$op" in
     get-global-rundir )
         realpath --relative-to "$(pwd)" "$global_rundir";;
+
+    as-remote | asr )
+        local usage="USAGE: wb run $op <environment> <deployment> [rundir]"
+        if [[ -z ${1+x} || -z ${2+x} ]]
+        then
+            echo $usage
+            echo "where: <environment> is a Host from your '~/.ssh/config' or a literal like 'user@1.2.3.4'"
+            echo "        <deployment> is a cardano-node or cardano-ops checkout in the environment user's home dir"
+            echo "            [rundir] subdirectory containing runs; necessary only when differing from default 'run'"
+        else
+            remote=$(jq -cn --arg env $1 --arg depl $2 --arg dir ${3:-''} '{env: $env, depl: $depl} | if $dir=="" then . else . * {dir: $dir} end')
+            echo "to modify remote in current shell environment, please execute:"
+            echo $(yellow "export WB_REMOTE='$remote'")
+        fi;;
 
     list-runs | runs | lsr )
         local usage="USAGE: wb run $op [--remote | -r]"
@@ -104,9 +123,13 @@ case "$op" in
 
         if test -z "$on_remote"
         then (eval "$(run_ls_cmd "$global_rundir")")
-        else local r=${1:-$remote}
-             ssh $(jq <<<$r .env -r) -- \
-                 sh -c "'$(run_ls_cmd $(jq <<<$r .depl)/runs)'"
+        else
+            local r=${1:-$remote}
+            local env=$( jq <<<$r '.env' -r)
+            local depl=$(jq <<<$r '.depl' -r)
+            local dir=$( jq <<<$r '.dir // "run"' -r)
+            ssh $env \
+                sh -c "'$(run_ls_cmd $depl/$dir)'"
         fi;;
 
     list-remote | remote | lsrr ) ## Convenience alias for 'list'
@@ -124,9 +147,13 @@ case "$op" in
 
         if test -z "$on_remote"
         then (eval "$(run_ls_tabulated_cmd "$global_rundir" $limit)")
-        else local r=${1:-$remote}
-             ssh $(jq <<<$r .env -r) -- \
-                 sh -c "'$(run_ls_tabulated_cmd $(jq <<<$r .depl)/runs $limit)'"
+        else
+            local r=${1:-$remote}
+            local env=$( jq <<<$r '.env' -r)
+            local depl=$(jq <<<$r '.depl' -r)
+            local dir=$( jq <<<$r '.dir // "run"' -r)
+            ssh $env \
+                sh -c "'$(run_ls_tabulated_cmd $depl/$dir $limit)'"
         fi;;
 
     list-verbose-remote | rverb | lsrvr ) ## Convenience alias for 'list-verbose'
@@ -143,9 +170,13 @@ case "$op" in
 
         if test -z "$on_remote"
         then (eval "$(run_ls_sets_cmd "$global_rundir")")
-        else local r=${1:-$remote}
-             ssh $(jq <<<$r .env -r) -- \
-                 sh -c "'$(run_ls_sets_cmd $(jq <<<$r .depl)/runs)'"
+        else
+            local r=${1:-$remote}
+            local env=$( jq <<<$r '.env' -r)
+            local depl=$(jq <<<$r '.depl' -r)
+            local dir=$( jq <<<$r '.dir // "run"' -r)
+            ssh $env \
+                sh -c "'$(run_ls_sets_cmd $depl/$dir)'"
         fi;;
 
     list-sets-remote | rsets | lssr ) ## Convenience alias for 'list-sets'
@@ -174,17 +205,18 @@ case "$op" in
                * ) break;; esac; shift; done
 
         local name=${1:?$usage}
-        local env=$( jq <<<$remote  .env -r)
-        local depl=$(jq <<<$remote .depl -r)
+        local env=$( jq <<<$remote '.env' -r)
+        local depl=$(jq <<<$remote '.depl' -r)
+        local dir=$( jq <<<$remote '.dir // "run"' -r)
         if   test -n "$on_remote"
-        then if test -n "$(ssh $env -- sh -c "'$(run_ls_sets_cmd $depl/runs)'" |
+        then if test -n "$(ssh $env -- sh -c "'$(run_ls_sets_cmd $depl/$dir)'" |
                                        grep $name || true)"
              then rsync -Wa --delete-after \
-                      $env:$depl/runs/.sets/$name ../cardano-node/run/.sets
+                      $env:$depl/$dir/.sets/$name ../cardano-node/run/.sets
                   ssh $env -- \
-                      sh -c "'cd $depl/runs/.sets/$name && find . -type l | cut -d/ -f2'"
+                      sh -c "'cd $depl/$dir/.sets/$name && find . -type l | cut -d/ -f2'"
              else ssh $env -- \
-                      sh -c "'if test -f $depl/runs/$name/meta.json;
+                      sh -c "'if test -f $depl/$dir/$name/meta.json;
                               then echo $name;
                               else echo \"$(red run-or-set on $env/$depl:)  missing run or set $(white $name)\"
                               exit 1;
@@ -436,9 +468,12 @@ EOF
         ##    NOTE: The tag time is different from the genesis time
         local hash=$(jq '."cardano-node".commit | .[:5]' -r <<<$manifest)
         local date_pref=$(date --utc +'%Y-%m-%d'-'%H-%M')
-        local batch_inf=$(test "${batch}" != 'plain' && echo -n -${batch})
+        if [[ "$batch" == "undefined" ]]
+        then batch=$(get_most_significant_git_tag)
+        fi
+        local batch_inf=$(echo -n ${batch} | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z^0-9]//g')
         local prof_suf=$(test -v "WB_PROFILING" && test -n "$WB_PROFILING" -a "$WB_PROFILING" != 'none' && echo '-prof')
-        local run="${date_pref}-${hash}-${profile_name}-${backend_name::3}${prof_suf}"
+        local run="${date_pref}-${hash}-${batch_inf::12}-${profile_name}-${backend_name::3}${prof_suf}"
         progress "run | tag" "allocated run identifier (tag):  $(with_color white $run)"
 
         ## 3. create directory:
@@ -470,18 +505,29 @@ EOF
             fail "Mode no longer supported:  operation without profile/ directory."
         fi
 
+        local ghc_version=$(get_node_ghc_version)
+
         progress "run | topology" \
                  "$(white $(jq -r .composition.topology "$dir"/profile.json))"
         ln -s "$profile_data"/topology.json        "$dir"
         ln -s "$profile_data"/topology.dot         "$dir"
 
-        if test "${WB_BACKEND:0:5}" != 'nomad' # Doesn't start with "nomad"
-        then run_instantiate_rundir_profile_services "$dir"; fi
-
-        ## 5. populate the directory with backend specifics:
+        ## 5. backend specifics allocations:
         backend allocate-run "$dir" "${backend_args[@]}"
 
-        ## 6. allocate genesis time
+        ## 6. to be able to deploy the genesis the cluster must be started
+        #     because Nomad uses `nomad exec wget`
+        # FIXME: the problem is that supervisor uses "run/current" in its
+        #        configuration and a "meta.json" is needed to pass `run check`
+        #        that is called by `run set-current`. This error is only showing
+        #        a "FATAL" message and not exiting by pure chance (bash error
+        #        supression because of a command called inside `local`). So
+        #        we ignore it as a temporary solution because all the bash
+        #        cleaup needed to fix this will take too long.
+        run set-current "$run" 2>/dev/null || true
+        backend start-cluster "$dir"
+
+        ## 7. allocate genesis time
         ##    NOTE: The genesis time is different from the tag time.
         progress "run | time" "allocating time:"
         local timing=$(profile allocate-time "$dir"/profile.json)
@@ -491,6 +537,7 @@ EOF
             --arg       run              "$run"
             --arg       batch            "$batch"
             --arg       profile_name     "$profile_name"
+            --arg       ghc_version      "$ghc_version"
             --argjson   timing           "$timing"
             --slurpfile profile_content  "$dir"/profile.json
             --argjson   manifest         "$manifest"
@@ -500,6 +547,7 @@ EOF
              { tag:              $run
              , batch:            $batch
              , profile:          $profile_name
+             , node_ghc_version: $ghc_version
              , timing:           $timing
              , manifest:         $manifest
              , profile_overlay:  $profile_content[0].overlay
@@ -521,13 +569,23 @@ EOF
         cp "$dir"/genesis/genesis-shelley.json "$dir"/genesis-shelley.json
         cp "$dir"/genesis/genesis.alonzo.json  "$dir"/genesis.alonzo.json
         echo >&2
-        progress "run | genesis" "deploying.."
-        backend deploy-genesis "$dir"
+        ## Add global_basedir Voltaire Plutus guardrails script
+        cp "$global_basedir"/genesis/guardrails-script.plutus "$dir"/genesis/
 
+        ## 8. deploy genesis
+        progress "run | genesis" "deploying.."
+        (
+          # This step is resource intensive so we use a lockfile to avoid
+          # running it in parallel to a benchmark.
+          acquire_lock
+          backend deploy-genesis "$dir"
+        )
+
+        ## 9. everything needed to start-[tracers|nodes|generator] should be
+        ##    ready
         progress "run" "allocated $(with_color white $run) @ $dir"
         run     describe "$run"
         profile describe "$dir"/profile.json
-        run  set-current "$run"
         ;;
 
     allocate-from-machine-run-slice | alloc-from-mrs )
@@ -592,15 +650,18 @@ EOF
         echo $dir;;
 
     fetch-run | fetch | fr )
-        local usage="USAGE: wb run $op RUN [MACHINE] [DEPLOYMENT=bench-1] [ENV=bench]"
+        local usage="USAGE: wb run $op RUN [MACHINE]"
         local run=${1:?$usage}
         local mach=${2:-all-hosts}
-        local depl=${3:-bench-1}
-        local env=${4:-bench}
+
+        local env=$( jq <<<$remote '.env' -r)
+        local depl=$(jq <<<$remote '.depl' -r)
+        local dir=$( jq <<<$remote '.dir // "run"' -r)
 
         local args=(
             "$env"
             "$depl"
+            "$dir"
             "$run"
             'for f in ${files[*]};
              do fp=${f/%/.tar.zst};
@@ -615,7 +676,7 @@ EOF
             common-run-files
             $mach
         )
-        run_aws_get "${args[@]}";;
+        run_remote_get "${args[@]}";;
 
     fetch-analysis | fa )
         local usage="USAGE: wb run $op RUN.."
@@ -625,45 +686,48 @@ EOF
         done
         if test $# = 0; then runs=(current); fi
 
-        local env='bench'
-        local depl='bench-1'
+        local env=$( jq <<<$remote '.env' -r)
+        local depl=$(jq <<<$remote '.depl' -r)
+        local dir=$( jq <<<$remote '.dir // "run"' -r)
 
-        progress "run | aws" "trying to fetch analyses:  $(white ${runs[*]})"
+        progress "run | remote" "trying to fetch analyses:  $(white ${runs[*]})"
         for run in ${runs[*]}
-        do if   test "$(ssh $env -- sh -c "'ls -ld $depl/runs/$run          | wc -l'")" = 0
-           then fail "fetch-analysis:  run does not exist on AWS: $(white $run)"
-           elif test "$(ssh $env -- sh -c "'ls -ld $depl/runs/$run/analysis | wc -l'")" = 0
-           then fail "fetch-analysis:  run has not been analysed on AWS: $(white $run)"
+        do if   test "$(ssh $env -- sh -c "'ls -ld $depl/$dir/$run          | wc -l'")" = 0
+           then fail "fetch-analysis:  run does not exist on remote: $(white $run)"
+           elif test "$(ssh $env -- sh -c "'ls -ld $depl/$dir/$run/analysis | wc -l'")" = 0
+           then fail "fetch-analysis:  run has not been analysed on remote: $(white $run)"
            else local analysis_files=(
                    $(ssh $env -- \
-                     sh -c "'cd $depl/runs/$run && ls analysis/{cdf/*.cdf,*.{json,org,txt}} | fgrep -v -e flt.json -e flt.logobjs.json -e flt.perf-stats.json'" \
+                     sh -c "'cd $depl/$dir/$run && ls analysis/{cdf/*.cdf,*.{json,org,txt}} | fgrep -v -e flt.json -e flt.logobjs.json -e flt.perf-stats.json'" \
                      2>/dev/null)
                 )
                 local args=(
-                   "${run_aws_get_args[@]}"
+                   "${run_remote_get_args[@]}"
                    "$env"
                    "$depl"
+                   "$dir"
                    "$run"
                    'tar c ${files[*]} --zstd;'
 
                    common-run-files
                    ${analysis_files[*]}
                 )
-                run_aws_get "${args[@]}"
+                run_remote_get "${args[@]}"
            fi
         done
         ;;
 
-    analyse-aws )
-        local usage="USAGE: wb run $op RUN [MACHINE] [DEPLOYMENT=bench-1] [ENV=bench]"
+    analyse-remote )
+        local usage="USAGE: wb run $op RUN"
         local run=${1:?$usage}
-        local mach=${2:-}
-        local depl=${3:-bench-1}
-        local env=${4:-bench}
 
-        if   test "$(ssh $env -- sh -c "'ls -ld $depl/runs/$run          | wc -l'")" = 0
-        then fail "analyse-aws:  run does not exist on AWS: $(white $run)"
-        else ssh $env -- sh -c "'export WB_RUNDIR=../$depl/runs && cd cardano-node && echo env: $(yellow $env), rundir: $(color blue)\$WB_RUNDIR$(color reset), workbench: $(color yellow)\$(git log -n1)$(color reset) && make analyse RUN=$run'"
+        local env=$( jq <<<$remote '.env' -r)
+        local depl=$(jq <<<$remote '.depl' -r)
+        local dir=$( jq <<<$remote '.dir // "run"' -r)
+
+        if   test "$(ssh $env -- sh -c "'ls -ld $depl/$dir/$run          | wc -l'")" = 0
+        then fail "analyse-remote:  run does not exist on remote: $(white $run)"
+        else ssh $env -- sh -c "'export WB_RUNDIR=../$depl/$dir && cd cardano-node && echo env: $(yellow $env), rundir: $(color blue)\$WB_RUNDIR$(color reset), workbench: $(color yellow)\$(git log -n1)$(color reset) && make analyse RUN=$run'"
         fi
         ;;
 
@@ -675,36 +739,6 @@ EOF
         if test -f "$dir"/node-specs.json
         then jq             'keys | .[]' -r "$dir"/node-specs.json
         else jq '.hostname | keys | .[]' -r "$dir"/meta.json; fi;;
-
-    remote-machine-run-slice-list | rmrsl )
-        local usage="USAGE: wb run $op ENV DEPL [HOST=DEPL]"
-        local env=${1:?$usage}
-        local depl=${2:?$usage}
-        local host=${3:-$2}
-
-        local nixops_ssh_cmd="ls /var/lib/cardano-node/logs/node-*.json"
-        local nixops_cmd="nixops ssh -d $depl $host -- $nixops_ssh_cmd"
-        ssh $env -- \
-            sh -c "cd $depl && nix-shell -p nixops --run ${nixops_cmd@Q}" |
-            sed 's_/var/lib/cardano-node/logs/node-\(.*\).json_\1_'
-        ;;
-
-    remote-machine-run-slice-fetch | rmrsf )
-        local usage="USAGE: wb run $op ENV DEPL MACHINE SLICE"
-        local env=${1:?$usage}
-        local depl=${2:?$usage}
-        local mach=${3:?$usage}
-        local slice=${4:?$usage}
-
-        local dir=$(run allocate-from-machine-run-slice \
-                        $mach $slice 'mainnet')
-        local nixops_cmd="nixops scp -d $depl --from $mach /var/lib/cardano-node/logs/node-$slice.json $depl/node-$slice.json"
-        ssh $env -- \
-            sh -c "cd $depl && nix-shell -p nixops --run ${nixops_cmd@Q}"
-        ssh $env -- \
-            sh -c "cd $depl && tar c $depl/node-$slice.json --zstd" |
-            (cd $dir; tar x --zstd)
-        ;;
 
     trim )
         local usage="USAGE: wb run $op RUN"
@@ -787,6 +821,14 @@ EOF
         local scenario=${scenario_override:-$(jq -r .scenario "$dir"/profile.json)}
         scenario "$scenario" "$dir"
 
+        (
+          # This step is resource intensive so we use a lockfile to avoid
+          # running it in parallel to a benchmark.
+          acquire_lock
+          backend fetch-logs     "$dir"
+        )
+        backend stop-cluster   "$dir"
+
         run compat-meta-fixups "$run"
         ;;
 
@@ -817,7 +859,7 @@ EOF
           } * .
         '
         backend cleanup-cluster "$dir"
-        run start          "$@" "$run"
+        run start-cluster  "$@" "$run"
 
         msg "cluster re-started in the same run directory: $dir"
         ;;
@@ -825,8 +867,8 @@ EOF
     * ) usage_run;; esac
 }
 
-run_aws_get() {
-    local usage='USAGE: run_aws_get ENV DEPLOYMENT RUN REMOTE-TAR-CMD OBJ..'
+run_remote_get() {
+    local usage='USAGE: run_remote_get ENV DEPLOYMENT RUN REMOTE-TAR-CMD OBJ..'
     local clean=
     while test $# -gt 0
     do case "$1" in
@@ -837,21 +879,22 @@ run_aws_get() {
 
     local env=${1:?$usage}; shift
     local depl=${1:?$usage}; shift
+    local rdir=${1:?$usage}; shift
     local run=${1:?$usage}; shift
     local remote_tar_cmd=${1:?$usage}; shift
     local objects=($*)
 
-    progress "run_aws_get" "env $(yellow $env) depl $(yellow $depl) run $(white $run)"
-    progress "run_aws_get" "tar $(green $remote_tar_cmd)"
+    progress "run_remote_get" "env $(yellow $env) depl $(yellow $depl) run $(white $run)"
+    progress "run_remote_get" "tar $(green $remote_tar_cmd)"
 
-    local meta=$(ssh $env -- sh -c "'jq . $depl/runs/$run/meta.json'")
+    local meta=$(ssh $env -- sh -c "'jq . $depl/$rdir/$run/meta.json'")
     if ! jq . <<<$meta >/dev/null
-    then fail "run_aws_get:  malformed $(yellow meta.json) in $(white $run) on $(white $depl)@$(white env)"; fi
+    then fail "run_remote_get:  malformed $(yellow meta.json) in $(white $run) on $(white $depl)@$(white env)"; fi
 
     ## Minor validation passed, create & populate run with remote data:
     local dir=$global_rundir/$run
     if test -z "$run" -o -z "$global_rundir"
-    then fail "run_aws_get: run=$run global_rundir=$global_rundir"
+    then fail "run_remote_get: run=$run global_rundir=$global_rundir"
     elif test -n "$clean"
     then rm -rf "$dir"
     fi
@@ -879,10 +922,10 @@ run_aws_get() {
        {
            local lbatch=(${batch[*]})
            ssh $env -- \
-               sh -c "'files=(${lbatch[*]}); cd $depl/runs/$run && { ${remote_tar_cmd} }'" |
+               sh -c "'files=(${lbatch[*]}); cd $depl/$rdir/$run && { ${remote_tar_cmd} }'" |
                (cd $dir
                 tar x --zstd --ignore-zeros ||
-                    progress "fetch error" "'files=(${lbatch[*]}); cd $depl/runs/$run && ${remote_tar_cmd}'"
+                    progress "fetch error" "'files=(${lbatch[*]}); cd $depl/$rdir/$run && ${remote_tar_cmd}'"
                )
            progress "run | fetch $(white $run)" "batch done:  $(yellow ${batch[*]})"
        } &
@@ -1001,12 +1044,13 @@ run_ls_cmd() {
           { find . -mindepth 2 -maxdepth 2 -type f -name meta.json -exec dirname \{\} \; |
             grep -v "current\$\|deploy-logs\$" &&
             find . -mindepth 3 -maxdepth 3 -type f -name *.ede -exec dirname \{\} \; |
-            xargs dirname
+            xargs -r dirname
           } |
           cut -c3- |
           sort || true'
 }
 
+# Will need to support new manifest format in a backwards compatible manner
 run_ls_tabulated_cmd() {
     local rundir=$1 limit=$2
 
@@ -1039,33 +1083,28 @@ run_ls_sets_cmd() {
           sort -u || true'
 }
 
-run_instantiate_rundir_profile_services() {
-    local dir=${1:?run_instantiate_rundir_profile_services arg1: expects a run directory}; shift
+get_node_ghc_version(){
+    local node_executable
 
-    local svcs=$dir/profile/node-services.json
-    local gtor=$dir/profile/generator-service.json
-    local trac=$dir/profile/tracer-service.json
+    if [[ $WB_BACKEND == nomad* ]]
+    then
+       node_executable=$(jq --raw-output '.containerPkgs."cardano-node"."nix-store-path"' $WB_BACKEND_DATA/container-specs.json)
+       node_executable="$node_executable/bin/cardano-node"
+    else
+       node_executable=cardano-node
+    fi
 
-    for node in $(jq_tolist 'keys' "$dir"/node-specs.json)
-    do local node_dir="$dir"/$node
-       mkdir -p                                          "$node_dir"
-       jq      '."'"$node"'"' "$dir"/node-specs.json   > "$node_dir"/node-spec.json
-       cp $(jq '."'"$node"'"."config"'         -r $svcs) "$node_dir"/config.json
-       cp $(jq '."'"$node"'"."service-config"' -r $svcs) "$node_dir"/service-config.json
-       cp $(jq '."'"$node"'"."start"'          -r $svcs) "$node_dir"/start.sh
-       cp $(jq '."'"$node"'"."topology"'       -r $svcs) "$node_dir"/topology.json
-    done
+    if [[ -x $node_executable ]]
+    then
+        $node_executable +RTS --info | grep 'GHC version' | grep -E -o "([0-9]{1,2}[\.]){2}[0-9]{1,2}"
+    else
+        echo "unknown"
+    fi
+}
 
-    local gen_dir="$dir"/generator
-    mkdir -p                                              "$gen_dir"
-    cp $(jq '."run-script"'                    -r $gtor)  "$gen_dir"/run-script.json
-    cp $(jq '."service-config"'                -r $gtor)  "$gen_dir"/service-config.json
-    cp $(jq '."start"'                         -r $gtor)  "$gen_dir"/start.sh
-
-    local trac_dir="$dir"/tracer
-    mkdir -p                                    "$trac_dir"
-    cp $(jq '."tracer-config"'                 -r $trac) "$trac_dir"/tracer-config.json
-    cp $(jq '."service-config"'                -r $trac) "$trac_dir"/service-config.json
-    cp $(jq '."config"'                        -r $trac) "$trac_dir"/config.json
-    cp $(jq '."start"'                         -r $trac) "$trac_dir"/start.sh
+get_most_significant_git_tag(){
+    local lasttag=$(git describe --tags --abbrev=0)
+    local commhash=$(git rev-list -n 1 $lasttag)
+    local oldesttag=$(git tag --sort=creatordate --points-at $commhash | head -n1)
+    echo $oldesttag
 }

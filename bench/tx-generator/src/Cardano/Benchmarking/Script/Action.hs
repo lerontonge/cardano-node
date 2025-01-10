@@ -3,8 +3,8 @@
 Module      : Cardano.Benchmarking.Script.Action
 Description : Convert an 'Action' to a monadic 'ActionM'.
 
-This is just exporting 'action' in order to avoid circular
-module dependencies.
+This is just exporting 'action', and 'liftToAction' is tough
+to use because of the risk of circular imports.
 -}
 
 module Cardano.Benchmarking.Script.Action
@@ -13,16 +13,17 @@ module Cardano.Benchmarking.Script.Action
        )
        where
 
-import qualified Data.Text as Text (unpack)
-
-import           Control.Monad.IO.Class
-
 import           Cardano.Benchmarking.OuroborosImports as Core (protocolToNetworkId)
 import           Cardano.Benchmarking.Script.Core
 import           Cardano.Benchmarking.Script.Env
 import           Cardano.Benchmarking.Script.Types
 import           Cardano.Benchmarking.Tracer
 import           Cardano.TxGenerator.Setup.NodeConfig
+import           Cardano.TxGenerator.Types (TxGenError)
+
+import           Control.Monad.IO.Class
+import           Control.Monad.Trans.Except.Extra
+import qualified Data.Text as Text (unpack)
 
 
 -- | 'action' has as its sole callers
@@ -45,11 +46,17 @@ action a = case a of
   AddFund era wallet txIn lovelace keyName -> addFund era wallet txIn lovelace keyName
   Delay t -> delay t
   Submit era submitMode txParams generator -> submitAction era submitMode generator txParams
-  WaitBenchmark thread -> waitBenchmark thread
-  CancelBenchmark thread -> cancelBenchmark thread
+  WaitBenchmark -> waitBenchmark
+  CancelBenchmark -> cancelBenchmark
   WaitForEra era -> waitForEra era
   LogMsg txt -> traceDebug $ Text.unpack txt
   Reserved options -> reserved options
+
+-- | 'liftToAction' first lifts from IO, then converts an 'Either'
+-- to an 'Control.Monad.Trans.Except.ExceptT' and then transforms
+-- the error type to 'Cardano.Benchmarking.Script.Env.Error'.
+liftToAction :: IO (Either TxGenError a) -> ActionM a
+liftToAction = firstExceptT TxGenError . newExceptT . liftIO
 
 -- | 'startProtocol' sets up the protocol for the transaction
 -- generator from the first argument, @configFile@ and optionally

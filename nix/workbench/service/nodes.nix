@@ -1,6 +1,6 @@
 { pkgs
-, runJq
-, runWorkbench
+, workbenchNix
+, jsonFilePretty
 
 ## The cardano-node config used as baseline:
 , baseNodeConfig
@@ -13,9 +13,14 @@
 }:
 
 with pkgs.lib;
-with (import ../lib.nix pkgs.lib);
 
 let
+  readJSONMay = fp:
+    let fv = __tryEval (__readFile fp);
+    in if fv.success
+       then __fromJSON fv.value
+       else {};
+
   profileName = profile.name;
 
   eras = [ ## This defines the order of eras -- which is important.
@@ -54,11 +59,20 @@ let
     { name, i, kind, port, isProducer, ... }@nodeSpec:
     {
       inherit isProducer port;
+      inherit (profile.node) rts_flags_override;
 
       nodeId         = i;
+      databasePath   = "db";
       socketPath     = "node.socket";
       topology       = "topology.json";
       nodeConfigFile = "config.json";
+
+      # Allow for local clusters to have multiple LMDB directories in the same physical ssd_directory
+      withUtxoHdLmdb   = profile.node.utxo_lmdb;
+      lmdbDatabasePath =
+          if (profile.cluster ? "ssd_directory" && profile.cluster.ssd_directory != null)
+          then "${profile.cluster.ssd_directory}/lmdb-node-${toString i}"
+          else null;
 
       ## Combine:
       ##   0. baseNodeConfig (coming cardanoLib's testnet environ)
@@ -88,16 +102,17 @@ let
                   ExperimentalProtocolsEnabled = true;
                   TurnOnLogMetrics             = true;
                   SnapshotInterval             = 4230;
+                  ChainSyncIdleTimeout         = 0;
 
                   ByronGenesisFile             = "../genesis/byron/genesis.json";
                   ShelleyGenesisFile           = "../genesis/genesis-shelley.json";
                   AlonzoGenesisFile            = "../genesis/genesis.alonzo.json";
                   ConwayGenesisFile            = "../genesis/genesis.conway.json";
                 })
-              (if __hasAttr "preset" profile
+              (if __hasAttr "preset" profile && profile.preset != null
                ## It's either an undisturbed preset,
                ## or a hardforked setup.
-               then readJSONMay (./presets + "/${profile.preset}/config.json")
+               then readJSONMay (../profile/presets + "/${profile.preset}/config.json")
                else configHardforksIntoEra profile.era))
             profile.node.verbatim);
 
@@ -160,6 +175,7 @@ let
       systemd.sockets = mkOption {};
       users = mkOption {};
       assertions = mkOption {};
+      environment = mkOption {};
     };
     eval = let
       extra = {
@@ -185,54 +201,30 @@ let
       serviceConfig = nodeServiceConfig nodeSpec;
       service       = evalServiceConfigToService serviceConfig;
     in {
-      nodeSpec = {
-        value = nodeSpec;
-        JSON  = runJq "node-spec-${name + modeIdSuffix}.json"
-                  ''--null-input --sort-keys
-                    --argjson x '${__toJSON nodeSpec}'
-                  '' "$x";
-      };
-
-      serviceConfig = {
-        value = serviceConfig;
-        JSON  = runJq "node-service-config-${name + modeIdSuffix}.json"
-                  ''--null-input --sort-keys
-                    --argjson x '${__toJSON serviceConfig}'
-                  '' "$x";
-      };
-
-      service = {
-        value = service;
-        JSON  = runJq "node-service-${name + modeIdSuffix}.json"
-                  ''--null-input --sort-keys
-                    --argjson x '${__toJSON service}'
-                  '' "$x";
-      };
-
-      nodeConfig = {
-        value = service.nodeConfig;
-        JSON  = runJq "node-config-${name + modeIdSuffix}.json"
-                  ''--null-input --sort-keys
-                    --argjson x '${__toJSON service.nodeConfig}'
-                  '' "$x";
-      };
-
-      topology =
-        rec {
-          JSON  = runWorkbench
-                    "topology-${name}.json"
-                    "topology projection-for local-${nodeSpec.kind} ${toString i} ${profileName} ${topologyFiles} ${toString backend.basePort}";
-          value = __fromJSON (__readFile JSON);
-        };
-
-      startupScript = rec {
-        JSON = pkgs.writeScript "startup-${name}.sh" value;
+      start = rec {
         value = ''
           #!${pkgs.stdenv.shell}
 
           ${service.script}
           '';
+        JSON = pkgs.writeScript "startup-${name}.sh" value;
       };
+
+      config = {
+        value = service.nodeConfig;
+        JSON  = jsonFilePretty
+                  "node-config-${name + modeIdSuffix}.json"
+                  (__toJSON service.nodeConfig)
+        ;
+      };
+
+      topology =
+        rec {
+          JSON  = workbenchNix.runWorkbench
+                    "topology-${name}.json"
+                    "topology projection-for local-${nodeSpec.kind} ${toString i} ${profileName} ${topologyFiles} ${toString backend.basePort}";
+          value = __fromJSON (__readFile JSON);
+        };
     };
 
   ##

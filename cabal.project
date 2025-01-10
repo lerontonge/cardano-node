@@ -1,6 +1,6 @@
 -- Custom repository for cardano haskell packages, see CONTRIBUTING for more
 repository cardano-haskell-packages
-  url: https://input-output-hk.github.io/cardano-haskell-packages
+  url: https://chap.intersectmbo.org/
   secure: True
   root-keys:
     3e0cce471cf09815f930210f7827266fd09045445d65923e6d0238a6cd15126f
@@ -13,18 +13,17 @@ repository cardano-haskell-packages
 -- See CONTRIBUTING for information about these, including some Nix commands
 -- you need to run if you change them
 index-state:
-  , hackage.haskell.org 2023-05-10T10:34:57Z
-  , cardano-haskell-packages 2023-06-15T12:05:43Z
+  , hackage.haskell.org 2024-10-10T00:52:24Z
+  , cardano-haskell-packages 2025-01-04T13:50:25Z
 
 packages:
-  cardano-client-demo
-  cardano-git-rev
   cardano-node
   cardano-node-capi
   cardano-node-chairman
   cardano-submit-api
   cardano-testnet
   cardano-tracer
+  bench/cardano-profile
   bench/cardano-topology
   bench/locli
   bench/plutus-scripts-bench
@@ -33,77 +32,38 @@ packages:
   trace-resources
   trace-forward
 
-extra-packages:
-  cardano-cli
+extra-packages: Cabal
 
-package cardano-api
+program-options
   ghc-options: -Werror
-
-package cardano-cli
-  ghc-options: -Werror
-
-package cardano-client-demo
-  ghc-options: -Werror
-
-package cardano-git-rev
-  ghc-options: -Werror
-
-package cardano-node-capi
-  ghc-options: -Werror
-
-package cardano-node-chairman
-  ghc-options: -Werror
-
-package cardano-node
-  ghc-options: -Werror
-
-package cardano-submit-api
-  ghc-options: -Werror
-
-package cardano-testnet
-  ghc-options: -Werror
-
-package cardano-topology
-  ghc-options: -Werror
-
-package cardano-tracer
-  ghc-options: -Werror
-
-package locli
-  ghc-options: -Werror
-
-package plutus-scripts-bench
-  ghc-options: -Werror
-
-package trace-analyzer
-  ghc-options: -Werror
-
-package trace-dispatcher
-  ghc-options: -Werror
-
-package trace-forward
-  ghc-options: -Werror
-
-package trace-resources
-  ghc-options: -Werror
-
-package tx-generator
-  ghc-options: -Werror
-
-package cryptonite
-  -- Using RDRAND instead of /dev/urandom as an entropy source for key
-  -- generation is dubious. Set the flag so we use /dev/urandom by default.
-  flags: -support_rdrand
-
-tests: True
 
 test-show-details: direct
 
 -- Always write GHC env files, because they are needed for ghci.
 write-ghc-environment-files: always
 
+package cryptonite
+  -- Using RDRAND instead of /dev/urandom as an entropy source for key
+  -- generation is dubious. Set the flag so we use /dev/urandom by default.
+  flags: -support_rdrand
+
 package snap-server
-  flags: +openssl
+  flags: -openssl
+
+package bitvec
+  flags: -simd
+
+-- required for haddocks to build successfully
+package plutus-scripts-bench
+  haddock-options: "--optghc=-fplugin-opt PlutusTx.Plugin:defer-errors"
+
+constraints:
+  , wai-extra < 3.1.15
+  , Cabal < 3.14
+
+allow-newer:
+  , katip:Win32
+  , ekg-wai:time
 
 -- IMPORTANT
 -- Do NOT add more source-repository-package stanzas here unless they are strictly

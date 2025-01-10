@@ -1,14 +1,53 @@
 # Changelog for cardano-node
 
-## 8.1.0
+## Next version
 
--
+- Use p2p network stack by default, warn when using the legacy network stack.
+- Deprecate some CLI flags corresponding to low-level consensus options. They are
+  still accepted but a warning is emitted on startup on stderr suggesting to set
+  them in the configuration file instead:
+  - `--mempool-capacity-override` and `--no-mempool-capacity-override` can be set in the configuration file via the key `MempoolCapacityBytesOverride`.
+  - `--snapshot-interval` can be set in the configuration file via the key `SnapshotInterval`.
+  - `--num-of-disk-snapshots` can be set in the configuration file via the key `NumOfDiskSnapshots`.
+
+- Use metric names of old-tracing in new-tracing as well, and fix some metrics in new tracing.
+
+## 8.2.1 -- August 2023
+
+- prevent SIGHUP from killing node during ledger replay
+- upgrade cardano-cli to 8.4.1.0
+- upgrade cardano-api to 8.10.2.0
+
+## 8.2.0 -- July 2023
+
+### node changes
+
+- Turned on by default the following traces: `TraceLocalConnectionManager`,
+  `TraceLocalHandshake`, `TraceLocalInboundGovernor`, `TraceLocalServer` and
+  `TraceServer`.
+
+- Added `hotValency` optional to P2P Topology files, keeping the backwards compatible
+  `valency` flag.
+- Added `warmValency` optional to P2P Topology files.
+
+## 8.1.2 -- July 2023
+
+- Update plutus interpreter
+
+## 8.1.1 -- June 2023
+
+- Address P2P Topology bug with non-DNS names in networking
+
+## 8.1.0 -- June 2023
+
+- Support Conway Era when ExperimentalHardForks enabled
+- `TickF` changes to improve epoch boundary
 
 ## 8.0.0 -- May 2023
 
 - In JSON logging, `"ExtraRedeemers"` object contents are machine readable rather than
   difficult-to-parse user-friendly-string.
-  [PR 5168](https://github.com/input-output-hk/cardano-node/pull/5168)
+  [PR 5168](https://github.com/intersectmbo/cardano-node/pull/5168)
 
 ### node changes
 
@@ -74,15 +113,15 @@ None
 - Fixed a tight loop when demoting a peer from hot to warm timeouts
   (input-output-hk/ouroboros-network#4357).
 
-[#4563]: https://github.com/input-output-hk/cardano-node/issues/4563
-[understanding-config-files]: https://github.com/input-output-hk/cardano-node/blob/master/doc/getting-started/understanding-config-files.md
+[#4563]: https://github.com/intersectmbo/cardano-node/issues/4563
+[understanding-config-files]: https://github.com/input-output-hk/cardano-node-wiki/wiki/understanding-config-files
 
 ## 1.35.5 -- November 2022
 
 ### node changes
 
 - **Breaking change** - Less verbose node-to-client and node-to-node version logging
-  ([PR4911](https://github.com/input-output-hk/cardano-node/pull/4911))
+  ([PR4911](https://github.com/intersectmbo/cardano-node/pull/4911))
 
 ### consensus changes
 
@@ -99,8 +138,8 @@ None
   format will be supported for next two major releases of the node (the last
   supported major version will be `1.37`). (#4563)
 
-[#4559]: https://github.com/input-output-hk/cardano-node/issues/4559
-[understanding-config-files]: https://github.com/input-output-hk/cardano-node/blob/master/doc/getting-started/understanding-config-files.md
+[#4559]: https://github.com/intersectmbo/cardano-node/issues/4559
+[understanding-config-files]: https://github.com/intersectmbo/cardano-node/blob/master/doc/getting-started/understanding-config-files.md
 
 ### ledger changes
 
@@ -1867,7 +1906,7 @@ No changes in the node. There were changes in the cardano-api and cardano-cli.
 - API improvements for the local node IPC protocol (#1950, #1959, #1962)
 - DNS error handling improvements during temporary network outages (#1961)
 - Add timeouts on message sends, rather than just receive (#1953)
-- Unified library API docs https://input-output-hk.github.io/ouroboros-network/
+- Unified library API docs https://ouroboros-network.cardano.intersectmbo.org/
 
 ## 1.10.1 -- April 2020
 

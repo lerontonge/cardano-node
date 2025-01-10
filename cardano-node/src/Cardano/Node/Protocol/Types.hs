@@ -13,24 +13,21 @@ module Cardano.Node.Protocol.Types
 
 import qualified Cardano.Api as Api
 
-import           Control.DeepSeq (NFData)
-import           Data.Aeson
-import           GHC.Generics (Generic)
-import           NoThunks.Class (NoThunks)
-
 import           Cardano.Node.Orphans ()
 import           Cardano.Node.Queries (HasKESInfo, HasKESMetricsData)
 import           Cardano.Node.TraceConstraints (TraceConstraints)
 
+import           Control.DeepSeq (NFData)
+import           Data.Aeson
+import           GHC.Generics (Generic)
 
-data Protocol = ByronProtocol
-              | ShelleyProtocol
-              | CardanoProtocol
+import           NoThunks.Class (NoThunks)
+
+
+data Protocol = CardanoProtocol
   deriving (Eq, Generic)
 
 instance Show Protocol where
-  show ByronProtocol = "Byron"
-  show ShelleyProtocol = "Shelley"
   show CardanoProtocol = "Byron; Shelley"
 
 deriving instance NFData Protocol
@@ -39,18 +36,8 @@ deriving instance NoThunks Protocol
 instance FromJSON Protocol where
   parseJSON =
     withText "Protocol" $ \str -> case str of
-
-      -- The new names
-      "Byron" -> pure ByronProtocol
-      "Shelley" -> pure ShelleyProtocol
       "Cardano" -> pure CardanoProtocol
-
-      -- The old names
-      "RealPBFT" -> pure ByronProtocol
-      "TPraos" -> pure ShelleyProtocol
-
-      _ -> fail $ "Parsing of Protocol failed. "
-                <> show str <> " is not a valid protocol"
+      _ -> fail $ "Parsing of Protocol failed. " <> show str <> " is not a valid protocol"
 
 data SomeConsensusProtocol where
 
@@ -60,5 +47,5 @@ data SomeConsensusProtocol where
                                           , TraceConstraints blk
                                           )
                            => Api.BlockType blk
-                           -> Api.ProtocolInfoArgs IO blk
+                           -> Api.ProtocolInfoArgs blk
                            -> SomeConsensusProtocol

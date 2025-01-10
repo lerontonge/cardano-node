@@ -6,6 +6,9 @@ module Trace.Forward.Run.DataPoint.Acceptor
   , acceptDataPointsResp
   ) where
 
+import           Ouroboros.Network.Driver.Simple (runPeer)
+import           Ouroboros.Network.Mux (MiniProtocolCb (..), MuxMode (..), RunMiniProtocol (..))
+
 import qualified Codec.Serialise as CBOR
 import           Control.Concurrent.STM.TMVar (putTMVar)
 import           Control.Concurrent.STM.TVar (modifyTVar', readTVar, readTVarIO)
@@ -15,8 +18,6 @@ import           Control.Monad.Extra (ifM)
 import           Control.Monad.STM (atomically, check)
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Void (Void)
-import           Ouroboros.Network.Driver.Simple (runPeer)
-import           Ouroboros.Network.Mux (MuxMode (..), MuxPeer (..), RunMiniProtocol (..))
 
 import           Trace.Forward.Configuration.DataPoint (AcceptorConfiguration (..))
 import qualified Trace.Forward.Protocol.DataPoint.Acceptor as Acceptor
@@ -26,35 +27,35 @@ import           Trace.Forward.Utils.DataPoint (DataPointRequestor (..))
 
 acceptDataPointsInit
   :: AcceptorConfiguration
-  -> IO DataPointRequestor
-  -> IO ()
-  -> RunMiniProtocol 'InitiatorMode LBS.ByteString IO () Void
+  -> (initiatorCtx -> IO DataPointRequestor)
+  -> (initiatorCtx -> IO ())
+  -> RunMiniProtocol 'InitiatorMode initiatorCtx responderCtx LBS.ByteString IO () Void
 acceptDataPointsInit config mkDPRequestor peerErrorHandler =
   InitiatorProtocolOnly $ runPeerWithRequestor config mkDPRequestor peerErrorHandler
 
 acceptDataPointsResp
   :: AcceptorConfiguration
-  -> IO DataPointRequestor
-  -> IO ()
-  -> RunMiniProtocol 'ResponderMode LBS.ByteString IO Void ()
+  -> (responderCtx -> IO DataPointRequestor)
+  -> (responderCtx -> IO ())
+  -> RunMiniProtocol 'ResponderMode initiatorCtx responderCtx LBS.ByteString IO Void ()
 acceptDataPointsResp config mkDPRequestor peerErrorHandler =
   ResponderProtocolOnly $ runPeerWithRequestor config mkDPRequestor peerErrorHandler
 
 runPeerWithRequestor
   :: AcceptorConfiguration
-  -> IO DataPointRequestor
-  -> IO ()
-  -> MuxPeer LBS.ByteString IO ()
+  -> (ctx -> IO DataPointRequestor)
+  -> (ctx -> IO ())
+  -> MiniProtocolCb ctx LBS.ByteString IO ()
 runPeerWithRequestor config mkDPRequestor peerErrorHandler =
-  MuxPeerRaw $ \channel -> do
-    dpRequestor <- mkDPRequestor
+  MiniProtocolCb $ \ctx channel -> do
+    dpRequestor <- mkDPRequestor ctx
     runPeer
       (acceptorTracer config)
       (Acceptor.codecDataPointForward CBOR.encode CBOR.decode
                                       CBOR.encode CBOR.decode)
       channel
       (Acceptor.dataPointAcceptorPeer $ acceptorActions config dpRequestor [])
-    `finally` peerErrorHandler
+    `finally` peerErrorHandler ctx
 
 acceptorActions
   :: AcceptorConfiguration

@@ -9,14 +9,15 @@ module  Cardano.TxGenerator.UTxO
 import           Cardano.Api
 import           Cardano.Api.Shelley (ReferenceScript (..))
 
+import qualified Cardano.Ledger.Coin as L
 import           Cardano.TxGenerator.Fund (Fund (..), FundInEra (..))
 import           Cardano.TxGenerator.Utils (keyAddress)
 
-type ToUTxO era = Lovelace -> (TxOut CtxTx era, TxIx -> TxId -> Fund)
+type ToUTxO era = L.Coin -> (TxOut CtxTx era, TxIx -> TxId -> Fund)
 type ToUTxOList era split = split -> ([TxOut CtxTx era], TxId -> [Fund])
 
 
-makeToUTxOList :: [ ToUTxO era ] -> ToUTxOList era [ Lovelace ]
+makeToUTxOList :: [ ToUTxO era ] -> ToUTxOList era [ L.Coin ]
 makeToUTxOList fkts values
   = (outs, \txId -> map (\f -> f txId) fs)
   where
@@ -34,13 +35,13 @@ mkUTxOVariant networkId key value
     , mkNewFund value
     )
  where
-  mkTxOut v = TxOut (keyAddress @era networkId key) (lovelaceToTxOutValue v) TxOutDatumNone ReferenceScriptNone
+  mkTxOut v = TxOut (keyAddress @era networkId key) (lovelaceToTxOutValue (shelleyBasedEra @era) v) TxOutDatumNone ReferenceScriptNone
 
-  mkNewFund :: Lovelace -> TxIx -> TxId -> Fund
+  mkNewFund :: L.Coin -> TxIx -> TxId -> Fund
   mkNewFund val txIx txId = Fund $ InAnyCardanoEra (cardanoEra @era) $ FundInEra {
       _fundTxIn = TxIn txId txIx
     , _fundWitness = KeyWitness KeyWitnessForSpending
-    , _fundVal = lovelaceToTxOutValue val
+    , _fundVal = lovelaceToTxOutValue (shelleyBasedEra @era ) val
     , _fundSigningKey = Just key
     }
 
@@ -58,25 +59,26 @@ mkUTxOScript networkId (script, txOutDatum) witness value
  where
   plutusScriptAddr = case script of
     ScriptInAnyLang lang script' ->
-      case scriptLanguageSupportedInEra (cardanoEra @era) lang of
+      case scriptLanguageSupportedInEra (shelleyBasedEra @era) lang of
         Nothing -> error "mkUtxOScript: scriptLanguageSupportedInEra==Nothing"
         Just{} -> makeShelleyAddressInEra
+                       (shelleyBasedEra @era)
                        networkId
                        (PaymentCredentialByScript $ hashScript script')
                        NoStakeAddress
 
-  mkTxOut v = case scriptDataSupportedInEra (cardanoEra @era) of
+  mkTxOut v = case forEraMaybeEon (cardanoEra @era) of
     Nothing -> error "mkUtxOScript: scriptDataSupportedInEra==Nothing"
     Just tag -> TxOut
                   plutusScriptAddr
-                  (lovelaceToTxOutValue v)
+                  (lovelaceToTxOutValue (shelleyBasedEra @era) v)
                   (TxOutDatumHash tag $ hashScriptDataBytes $ unsafeHashableScriptData txOutDatum)
                   ReferenceScriptNone
 
-  mkNewFund :: Lovelace -> TxIx -> TxId -> Fund
+  mkNewFund :: L.Coin -> TxIx -> TxId -> Fund
   mkNewFund val txIx txId = Fund $ InAnyCardanoEra (cardanoEra @era) $ FundInEra {
       _fundTxIn = TxIn txId txIx
     , _fundWitness = witness
-    , _fundVal = lovelaceToTxOutValue val
+    , _fundVal = lovelaceToTxOutValue (shelleyBasedEra @era) val
     , _fundSigningKey = Nothing
     }

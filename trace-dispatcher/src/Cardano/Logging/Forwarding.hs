@@ -1,24 +1,22 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
+#if __GLASGOW_HASKELL__ >= 908
+{-# OPTIONS_GHC -Wno-x-partial #-}
+#endif
+
 module Cardano.Logging.Forwarding
   (
     initForwarding
   ) where
 
-import           Codec.CBOR.Term (Term)
-import           Control.Concurrent.Async (async, race_, wait)
-import           Control.Monad (void)
-import           Control.Monad.IO.Class
-
-import           "contra-tracer" Control.Tracer (Tracer, contramap, nullTracer, stdoutTracer)
-import qualified Data.ByteString.Lazy as LBS
-import           Data.Void (Void)
-import           Data.Word (Word16)
-
+import           Cardano.Logging.Types
+import           Cardano.Logging.Utils (runInLoop)
+import           Cardano.Logging.Version
 import           Ouroboros.Network.Driver.Limits (ProtocolTimeLimits)
 import           Ouroboros.Network.ErrorPolicy (nullErrorPolicies)
 import           Ouroboros.Network.IOManager (IOManager)
@@ -29,28 +27,34 @@ import           Ouroboros.Network.Mux (MiniProtocol (..), MiniProtocolLimits (.
 import           Ouroboros.Network.Protocol.Handshake.Codec (cborTermVersionDataCodec,
                    codecHandshake, noTimeLimitsHandshake)
 import           Ouroboros.Network.Protocol.Handshake.Type (Handshake)
-import           Ouroboros.Network.Protocol.Handshake.Version (acceptableVersion,
-                   queryVersion, simpleSingletonVersions)
-import           Ouroboros.Network.Snocket (Snocket, MakeBearer, localAddressFromPath, localSnocket,
+import           Ouroboros.Network.Protocol.Handshake.Version (acceptableVersion, queryVersion,
+                   simpleSingletonVersions)
+import           Ouroboros.Network.Snocket (MakeBearer, Snocket, localAddressFromPath, localSnocket,
                    makeLocalBearer)
 import           Ouroboros.Network.Socket (AcceptedConnectionsLimit (..), HandshakeCallbacks (..),
                    SomeResponderApplication (..), cleanNetworkMutableState, connectToNode,
                    newNetworkMutableState, nullNetworkConnectTracers, nullNetworkServerTracers,
                    withServerNode)
 
+import           Codec.CBOR.Term (Term)
+import           Control.Concurrent.Async (async, race_, wait)
+import           Control.Monad (void)
+import           Control.Monad.IO.Class
+import           "contra-tracer" Control.Tracer (Tracer, contramap, nullTracer, stdoutTracer)
+import qualified Data.ByteString.Lazy as LBS
+import           Data.Void (Void)
+import           Data.Word (Word16)
+import           System.IO (hPutStrLn, stderr)
 import qualified System.Metrics as EKG
 import qualified System.Metrics.Configuration as EKGF
 import           System.Metrics.Network.Forwarder
+
 import qualified Trace.Forward.Configuration.DataPoint as DPF
 import qualified Trace.Forward.Configuration.TraceObject as TF
 import           Trace.Forward.Run.DataPoint.Forwarder
 import           Trace.Forward.Run.TraceObject.Forwarder
 import           Trace.Forward.Utils.DataPoint
 import           Trace.Forward.Utils.TraceObject
-
-import           Cardano.Logging.Types
-import           Cardano.Logging.Utils (runInLoop)
-import           Cardano.Logging.Version
 
 initForwarding :: forall m. (MonadIO m)
   => IOManager
@@ -60,7 +64,7 @@ initForwarding :: forall m. (MonadIO m)
   -> Maybe (FilePath, ForwarderMode)
   -> m (ForwardSink TraceObject, DataPointStore)
 initForwarding iomgr config magic ekgStore tracerSocketMode = liftIO $ do
-  forwardSink <- initForwardSink tfConfig
+  forwardSink <- initForwardSink tfConfig handleOverflow
   dpStore <- initDataPointStore
   launchForwarders
     iomgr
@@ -107,6 +111,19 @@ initForwarding iomgr config magic ekgStore tracerSocketMode = liftIO $ do
   mkTracer :: Show a => Verbosity -> Tracer IO a
   mkTracer Maximum = contramap show stdoutTracer
   mkTracer Minimum = nullTracer
+
+-- | this function is called when the queue is full.
+--  It is called with the list of messages that were dropped.
+-- It writes an error message on stderr
+handleOverflow :: [TraceObject] -> IO ()
+handleOverflow [] = pure ()
+handleOverflow msgs =
+    let lengthM = length msgs
+        beginning = toTimestamp (head msgs)
+        end = toTimestamp (last msgs)
+        msg = "TraceObject queue overflowed. Dropped " <> show lengthM <>
+                " messages from " <> show beginning <> " to " <> show end
+    in hPutStrLn stderr msg
 
 launchForwarders
   :: IOManager
@@ -201,10 +218,10 @@ doConnectToAcceptor magic snocket makeBearer configureSocket address timeLimits
     address
  where
   forwarderApp
-    :: [(RunMiniProtocol 'InitiatorMode LBS.ByteString IO () Void, Word16)]
-    -> OuroborosApplication 'InitiatorMode addr LBS.ByteString IO () Void
+    :: [(RunMiniProtocol 'InitiatorMode initiatorCtx responderCtx LBS.ByteString IO () Void, Word16)]
+    -> OuroborosApplication 'InitiatorMode initiatorCtx responderCtx LBS.ByteString IO () Void
   forwarderApp protocols =
-    OuroborosApplication $ \_connectionId _shouldStopSTM ->
+    OuroborosApplication
       [ MiniProtocol
          { miniProtocolNum    = MiniProtocolNum num
          , miniProtocolLimits = MiniProtocolLimits { maximumIngressQueue = maxBound }
@@ -264,10 +281,10 @@ doListenToAcceptor magic snocket makeBearer configureSocket address timeLimits
               wait serverAsync -- Block until async exception.
  where
   forwarderApp
-    :: [(RunMiniProtocol 'ResponderMode LBS.ByteString IO Void (), Word16)]
-    -> OuroborosApplication 'ResponderMode addr LBS.ByteString IO Void ()
+    :: [(RunMiniProtocol 'ResponderMode initiatorCtx responderCtx LBS.ByteString IO Void (), Word16)]
+    -> OuroborosApplication 'ResponderMode initiatorCtx responderCtx LBS.ByteString IO Void ()
   forwarderApp protocols =
-    OuroborosApplication $ \_connectionId _shouldStopSTM ->
+    OuroborosApplication
       [ MiniProtocol
          { miniProtocolNum    = MiniProtocolNum num
          , miniProtocolLimits = MiniProtocolLimits { maximumIngressQueue = maxBound }

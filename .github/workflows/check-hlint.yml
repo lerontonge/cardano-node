@@ -1,7 +1,7 @@
 name: Check HLint
 
 on:
-  push:
+  pull_request: # Required for workflows to be able to be approved from forks
   merge_group:
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
     - name: 'Set up HLint'
       uses: rwe/actions-hlint-setup@v1
       with:
-        version: 3.3
+        version: 3.5
 
     - name: 'Run HLint'
       uses: rwe/actions-hlint-run@v2

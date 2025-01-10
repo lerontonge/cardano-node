@@ -6,10 +6,12 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 {-# OPTIONS_GHC -Wno-deprecations #-}
@@ -17,18 +19,9 @@
 
 module Cardano.Tracing.OrphanInstances.Consensus () where
 
+import           Cardano.Node.Tracing.Tracers.ConsensusStartupException
+                   (ConsensusStartupException (..))
 import           Cardano.Prelude (maximumDef)
-import           Data.Aeson (Value (..))
-import qualified Data.Aeson as Aeson
-import           Data.Data (Proxy (..))
-import           Data.Foldable (Foldable (..))
-import           Data.Text (Text, pack)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import           Data.Word (Word32)
-import           GHC.Generics (Generic)
-import           Numeric (showFFloat)
-
 import           Cardano.Slotting.Slot (fromWithOrigin)
 import           Cardano.Tracing.OrphanInstances.Common
 import           Cardano.Tracing.OrphanInstances.Network ()
@@ -36,58 +29,69 @@ import           Cardano.Tracing.Render (renderChainHash, renderChunkNo, renderH
                    renderHeaderHashForVerbosity, renderPoint, renderPointAsPhrase,
                    renderPointForVerbosity, renderRealPoint, renderRealPointAsPhrase,
                    renderTipBlockNo, renderTipHash, renderWithOrigin)
-
-import           Cardano.Node.Tracing.Tracers.ConsensusStartupException
-                   (ConsensusStartupException (..))
-
 import           Ouroboros.Consensus.Block (BlockProtocol, BlockSupportsProtocol, CannotForge,
-                   ConvertRawHash (..), ForgeStateUpdateError, Header, RealPoint, blockNo,
-                   blockPoint, blockPrevHash, getHeader, headerPoint, pointHash, realPointHash,
-                   realPointSlot)
+                   ConvertRawHash (..), ForgeStateUpdateError, GenesisWindow (..), GetHeader (..),
+                   Header, RealPoint, blockNo, blockPoint, blockPrevHash, getHeader, headerPoint,
+                   pointHash, realPointHash, realPointSlot, withOriginToMaybe)
+import           Ouroboros.Consensus.Block.SupportsSanityCheck
+import           Ouroboros.Consensus.Genesis.Governor (DensityBounds (..), GDDDebugInfo (..),
+                   TraceGDDEvent (..))
 import           Ouroboros.Consensus.HeaderValidation
 import           Ouroboros.Consensus.Ledger.Abstract
 import           Ouroboros.Consensus.Ledger.Extended
 import           Ouroboros.Consensus.Ledger.Inspect (InspectLedger, LedgerEvent (..), LedgerUpdate,
                    LedgerWarning)
-import           Ouroboros.Consensus.Ledger.SupportsMempool (ApplyTxErr, GenTx, GenTxId, HasTxId,
-                   LedgerSupportsMempool, TxId, txForgetValidated, txId)
+import           Ouroboros.Consensus.Ledger.SupportsMempool (ApplyTxErr, ByteSize32 (..), GenTx,
+                   GenTxId, HasTxId, LedgerSupportsMempool, TxId, txForgetValidated, txId)
 import           Ouroboros.Consensus.Ledger.SupportsProtocol (LedgerSupportsProtocol)
 import           Ouroboros.Consensus.Mempool (MempoolSize (..), TraceEventMempool (..))
 import           Ouroboros.Consensus.MiniProtocol.BlockFetch.Server
                    (TraceBlockFetchServerEvent (..))
 import           Ouroboros.Consensus.MiniProtocol.ChainSync.Client (TraceChainSyncClientEvent (..))
+import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.Jumping as ChainSync.Client
+import qualified Ouroboros.Consensus.MiniProtocol.ChainSync.Client.State as ChainSync.Client
 import           Ouroboros.Consensus.MiniProtocol.ChainSync.Server (BlockingType (..),
                    TraceChainSyncServerEvent (..))
 import           Ouroboros.Consensus.MiniProtocol.LocalTxSubmission.Server
                    (TraceLocalTxSubmissionServerEvent (..))
+import           Ouroboros.Consensus.Node.GSM
 import           Ouroboros.Consensus.Node.Run (RunNode, estimateBlockSize)
 import           Ouroboros.Consensus.Node.Tracers (TraceForgeEvent (..))
 import qualified Ouroboros.Consensus.Node.Tracers as Consensus
 import           Ouroboros.Consensus.Protocol.Abstract
 import qualified Ouroboros.Consensus.Protocol.BFT as BFT
 import qualified Ouroboros.Consensus.Protocol.PBFT as PBFT
+import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
+import qualified Ouroboros.Consensus.Storage.ImmutableDB.API as ImmDB
 import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal (ChunkNo (..),
                    chunkNoToInt)
-import           Ouroboros.Consensus.Storage.LedgerDB (PushGoal (..), Pushing (..), PushStart (..))
+import qualified Ouroboros.Consensus.Storage.ImmutableDB.Impl.Types as ImmDB
+import           Ouroboros.Consensus.Storage.LedgerDB (PushGoal (..), PushStart (..), Pushing (..),
+                   ReplayStart (..))
 import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB.Impl as VolDb
-import           Ouroboros.Network.BlockFetch.ClientState (TraceLabelPeer (..))
-
 import           Ouroboros.Consensus.Util.Condense
 import           Ouroboros.Consensus.Util.Enclose
 import           Ouroboros.Consensus.Util.Orphans ()
-
 import qualified Ouroboros.Network.AnchoredFragment as AF
 import           Ouroboros.Network.Block (BlockNo (..), ChainUpdate (..), SlotNo (..), StandardHash,
                    Tip (..), blockHash, pointSlot, tipFromHeader)
+import           Ouroboros.Network.BlockFetch.ClientState (TraceLabelPeer (..))
 import           Ouroboros.Network.Point (withOrigin)
 import           Ouroboros.Network.SizeInBytes (SizeInBytes (..))
 
-import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
--- TODO: 'TraceCacheEvent' should be exported by the 'Impl' module
+import           Control.Monad (guard)
+import           Data.Aeson (Value (..))
+import qualified Data.Aeson as Aeson
+import           Data.Data (Proxy (..))
+import           Data.Foldable (Foldable (..))
 import           Data.Function (on)
-import qualified Ouroboros.Consensus.Storage.ImmutableDB.API as ImmDB
-import qualified Ouroboros.Consensus.Storage.ImmutableDB.Impl.Types as ImmDB
+import           Data.Text (Text, pack)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import           Data.Word (Word32)
+import           GHC.Generics (Generic)
+import           Numeric (showFFloat)
 
 
 {- HLINT ignore "Use const" -}
@@ -106,6 +110,21 @@ instance HasSeverityAnnotation ConsensusStartupException where
 instance Transformable Text IO ConsensusStartupException where
   trTransformer = trStructured
 instance HasTextFormatter ConsensusStartupException where
+
+instance HasPrivacyAnnotation SanityCheckIssue
+instance HasSeverityAnnotation SanityCheckIssue where
+  getSeverityAnnotation _ = Error
+instance Transformable Text IO SanityCheckIssue where
+  trTransformer = trStructured
+
+instance ToObject SanityCheckIssue where
+  toObject _verb issue =
+    mconcat
+      [ "kind" .= String "SanityCheckIssue"
+      , "issue" .= toJSON issue
+      ]
+instance ToJSON SanityCheckIssue where
+  toJSON = Aeson.String . pack . show
 
 instance ConvertRawHash blk => ConvertRawHash (Header blk) where
   toShortRawHash _ = toShortRawHash (Proxy @blk)
@@ -144,6 +163,10 @@ instance HasSeverityAnnotation (ChainDB.TraceEvent blk) where
       ChainDB.UpdateLedgerDbTraceEvent {} -> Debug
     ChainDB.ChainSelectionForFutureBlock{} -> Debug
     ChainDB.PipeliningEvent {} -> Debug
+    ChainDB.AddedReprocessLoEBlocksToQueue -> Debug
+    ChainDB.PoppedReprocessLoEBlocksFromQueue -> Debug
+    ChainDB.ChainSelectionLoEDebug _ _ -> Debug
+
 
   getSeverityAnnotation (ChainDB.TraceLedgerReplayEvent ev) = case ev of
     LedgerDB.ReplayFromGenesis {} -> Info
@@ -167,7 +190,7 @@ instance HasSeverityAnnotation (ChainDB.TraceEvent blk) where
     ChainDB.OpenedDB {} -> Info
     ChainDB.ClosedDB {} -> Info
     ChainDB.OpenedImmutableDB {} -> Info
-    ChainDB.OpenedVolatileDB -> Info
+    ChainDB.OpenedVolatileDB {} -> Info
     ChainDB.OpenedLgrDB -> Info
     ChainDB.StartedOpeningDB -> Info
     ChainDB.StartedOpeningImmutableDB -> Info
@@ -181,7 +204,7 @@ instance HasSeverityAnnotation (ChainDB.TraceEvent blk) where
     ChainDB.FollowerNewImmIterator {} -> Debug
   getSeverityAnnotation (ChainDB.TraceInitChainSelEvent ev) = case ev of
     ChainDB.StartedInitChainSelection{} -> Info
-    ChainDB.InitalChainSelected{} -> Info
+    ChainDB.InitialChainSelected{} -> Info
     ChainDB.InitChainSelValidation ev' -> case ev' of
       ChainDB.InvalidBlock{} -> Debug
       ChainDB.ValidCandidate {} -> Info
@@ -217,6 +240,8 @@ instance HasSeverityAnnotation (ChainDB.TraceEvent blk) where
     VolDb.BlockAlreadyHere{}    -> Debug
     VolDb.Truncate{}            -> Error
     VolDb.InvalidFileNames{}    -> Warning
+    VolDb.DBClosed{}            -> Info
+  getSeverityAnnotation ChainDB.TraceLastShutdownUnclean = Warning
 
 instance HasSeverityAnnotation (LedgerEvent blk) where
   getSeverityAnnotation (LedgerUpdate _)  = Notice
@@ -240,6 +265,14 @@ instance HasSeverityAnnotation (TraceChainSyncClientEvent blk) where
   getSeverityAnnotation (TraceRolledBack _) = Notice
   getSeverityAnnotation (TraceException _) = Warning
   getSeverityAnnotation (TraceTermination _) = Notice
+  getSeverityAnnotation (TraceValidatedHeader _) = Debug
+  getSeverityAnnotation (TraceWaitingBeyondForecastHorizon _) = Debug
+  getSeverityAnnotation (TraceAccessingForecastHorizon _) = Debug
+  getSeverityAnnotation (TraceGaveLoPToken _ _ _) = Debug
+  getSeverityAnnotation (TraceOfferJump _) = Debug
+  getSeverityAnnotation (TraceJumpResult _) = Debug
+  getSeverityAnnotation TraceJumpingWaitingForNextInstruction = Debug
+  getSeverityAnnotation (TraceJumpingInstructionIs _) = Debug
 
 
 instance HasPrivacyAnnotation (TraceChainSyncServerEvent blk)
@@ -275,6 +308,7 @@ instance HasSeverityAnnotation (TraceForgeEvent blk) where
   getSeverityAnnotation TraceDidntAdoptBlock {}        = Error
   getSeverityAnnotation TraceForgedInvalidBlock {}     = Error
   getSeverityAnnotation TraceAdoptedBlock {}           = Info
+  getSeverityAnnotation TraceAdoptionThreadDied {}     = Error
 
 
 instance HasPrivacyAnnotation (TraceLocalTxSubmissionServerEvent blk)
@@ -440,6 +474,10 @@ instance ( tx ~ GenTx blk
         <> showT (unSlotNo slotNo)
         <> ": " <> renderHeaderHash (Proxy @blk) (blockHash blk)
         <> ", TxIds: " <> showT (map (txId . txForgetValidated) txs)
+    TraceAdoptionThreadDied slotNo blk -> const $
+      "Adoption Thread died in slot "
+        <> showT (unSlotNo slotNo)
+        <> ": " <> renderHeaderHash (Proxy @blk) (blockHash blk)
 
 
 instance Transformable Text IO (TraceLocalTxSubmissionServerEvent blk) where
@@ -463,7 +501,8 @@ instance ( ConvertRawHash blk
          , LedgerSupportsProtocol blk
          , InspectLedger blk
          , ToObject (Header blk)
-         , ToObject (LedgerEvent blk))
+         , ToObject (LedgerEvent blk)
+         , ToObject (SelectView (BlockProtocol blk)))
       => Transformable Text IO (ChainDB.TraceEvent blk) where
   trTransformer = trStructuredText
 
@@ -472,6 +511,7 @@ instance ( ConvertRawHash blk
          , InspectLedger blk)
       => HasTextFormatter (ChainDB.TraceEvent blk) where
     formatText tev _obj = case tev of
+      ChainDB.TraceLastShutdownUnclean -> "ChainDB is not clean. Validating all immutable chunks"
       ChainDB.TraceAddBlockEvent ev -> case ev of
         ChainDB.IgnoreBlockOlderThanK pt ->
           "Ignoring block older than K: " <> renderRealPointAsPhrase pt
@@ -485,6 +525,13 @@ instance ( ConvertRawHash blk
               "About to add block to queue: " <> renderRealPointAsPhrase pt
             FallingEdgeWith sz ->
               "Block added to queue: " <> renderRealPointAsPhrase pt <> " queue size " <> condenseT sz
+        ChainDB.AddedReprocessLoEBlocksToQueue ->
+          "Added request to queue to reprocess blocks postponed by LoE."
+        ChainDB.PoppedReprocessLoEBlocksFromQueue ->
+          "Poppped request from queue to reprocess blocks postponed by LoE."
+        ChainDB.ChainSelectionLoEDebug {} ->
+          "ChainDB LoE debug event"
+
         ChainDB.PoppedBlockFromQueue edgePt ->
           case edgePt of
             RisingEdge ->
@@ -544,9 +591,9 @@ instance ( ConvertRawHash blk
       ChainDB.TraceLedgerReplayEvent ev -> case ev of
         LedgerDB.ReplayFromGenesis _replayTo ->
           "Replaying ledger from genesis"
-        LedgerDB.ReplayFromSnapshot _ tip' _ _ ->
+        LedgerDB.ReplayFromSnapshot _ (ReplayStart tip') _goal ->
           "Replaying ledger from snapshot at " <>
-            renderRealPointAsPhrase tip'
+            renderPointAsPhrase tip'
         LedgerDB.ReplayedBlock pt _ledgerEvents (LedgerDB.ReplayStart replayFrom) (LedgerDB.ReplayGoal replayTo) ->
           let fromSlot = withOrigin 0 Prelude.id $ unSlotNo <$> pointSlot replayFrom
               atSlot   = unSlotNo $ realPointSlot pt
@@ -563,10 +610,21 @@ instance ( ConvertRawHash blk
           <> "%"
       ChainDB.TraceSnapshotEvent ev -> case ev of
         LedgerDB.InvalidSnapshot snap failure ->
-          "Invalid snapshot " <> showT snap <> showT failure
-        LedgerDB.TookSnapshot snap pt ->
-          "Took ledger snapshot " <> showT snap <>
+          "Invalid snapshot " <> showT snap <> showT failure <> context
+          where
+            context = case failure of
+              LedgerDB.InitFailureRead{} ->
+                   " This is most likely an expected change in the serialization format,"
+                <> " which currently requires a chain replay"
+              _ -> ""
+
+        LedgerDB.TookSnapshot snap pt RisingEdge ->
+          "Taking ledger snapshot " <> showT snap <>
           " at " <> renderRealPointAsPhrase pt
+        LedgerDB.TookSnapshot snap pt (FallingEdgeWith t) ->
+          "Took ledger snapshot " <> showT snap <>
+          " at " <> renderRealPointAsPhrase pt <>
+          ", duration: " <> showT t
         LedgerDB.DeletedSnapshot snap ->
           "Deleted old snapshot " <> showT snap
       ChainDB.TraceCopyToImmutableDBEvent ev -> case ev of
@@ -593,7 +651,8 @@ instance ( ConvertRawHash blk
         ChainDB.OpenedImmutableDB immTip chunk ->
           "Opened imm db with immutable tip at " <> renderPointAsPhrase immTip <>
           " and chunk " <> showT chunk
-        ChainDB.OpenedVolatileDB ->  "Opened vol db"
+        ChainDB.OpenedVolatileDB maxSlotN ->
+          "Opened vol db with max slot number " <> showT maxSlotN
         ChainDB.OpenedLgrDB ->  "Opened lgr db"
       ChainDB.TraceFollowerEvent ev -> case ev of
         ChainDB.NewFollower ->  "New follower was created"
@@ -602,7 +661,7 @@ instance ( ConvertRawHash blk
         ChainDB.FollowerNewImmIterator _ _ ->  "FollowerNewImmIterator"
       ChainDB.TraceInitChainSelEvent ev -> case ev of
         ChainDB.StartedInitChainSelection -> "Started initial chain selection"
-        ChainDB.InitalChainSelected -> "Initial chain selected"
+        ChainDB.InitialChainSelected -> "Initial chain selected"
         ChainDB.InitChainSelValidation e -> case e of
           ChainDB.InvalidBlock _err _pt -> "Invalid block found during Initial chain selection, truncating the candidate and retrying to select a best candidate."
           ChainDB.ValidCandidate af     -> "Valid candidate at tip " <> renderPointAsPhrase (AF.lastPoint af)
@@ -669,10 +728,10 @@ instance ( ConvertRawHash blk
         ImmDB.ChunkValidationEvent e -> case e of
           ImmDB.StartedValidatingChunk chunkNo outOf ->
                "Validating chunk no. " <> showT chunkNo <> " out of " <> showT outOf
-            <> ". Progress: " <> showProgressT (max (chunkNoToInt chunkNo - 1) 0) (chunkNoToInt outOf) <> "%"
+            <> ". Progress: " <> showProgressT (chunkNoToInt chunkNo) (chunkNoToInt outOf + 1) <> "%"
           ImmDB.ValidatedChunk chunkNo outOf ->
                "Validated chunk no. " <> showT chunkNo <> " out of " <> showT outOf
-            <> ". Progress: " <> showProgressT (chunkNoToInt chunkNo) (chunkNoToInt outOf) <> "%"
+            <> ". Progress: " <> showProgressT (chunkNoToInt chunkNo + 1) (chunkNoToInt outOf + 1) <> "%"
           ImmDB.MissingChunkFile cn      ->
             "The chunk file with number " <> showT cn <> " is missing."
           ImmDB.InvalidChunkFile cn er    ->
@@ -706,6 +765,7 @@ instance ( ConvertRawHash blk
         VolDb.BlockAlreadyHere bh   -> "Block " <> showT bh <> " was already in the Volatile DB."
         VolDb.Truncate e pth offs   -> "Truncating the file at " <> showT pth <> " at offset " <> showT offs <> ": " <> showT e
         VolDb.InvalidFileNames fs   -> "Invalid Volatile DB files: " <> showT fs
+        VolDb.DBClosed              -> "Closed Volatile DB."
      where showProgressT :: Int -> Int -> Text
            showProgressT chunkNo outOf =
              pack (showFFloat (Just 2) (100 * fromIntegral chunkNo / fromIntegral outOf :: Float) mempty)
@@ -761,6 +821,13 @@ instance ( StandardHash blk
       [ "kind" .= String "UnexpectedPrevHash"
       , "expected" .= String (pack $ show expect)
       , "actual" .= String (pack $ show act)
+      ]
+  toObject _verb (CheckpointMismatch blockNumber hdrHashExpected hdrHashActual) =
+    mconcat
+      [ "kind" .= String "CheckpointMismatch"
+      , "blockNo" .= String (pack $ show blockNumber)
+      , "expected" .= String (pack $ show hdrHashExpected)
+      , "actual" .= String (pack $ show hdrHashActual)
       ]
   toObject verb (OtherHeaderEnvelopeError err) =
     toObject verb err
@@ -856,8 +923,11 @@ instance (ToObject (LedgerUpdate blk), ToObject (LedgerWarning blk))
 instance ( ConvertRawHash blk
          , LedgerSupportsProtocol blk
          , ToObject (Header blk)
-         , ToObject (LedgerEvent blk))
+         , ToObject (LedgerEvent blk)
+         , ToObject (SelectView (BlockProtocol blk)))
       => ToObject (ChainDB.TraceEvent blk) where
+  toObject _verb ChainDB.TraceLastShutdownUnclean =
+    mconcat [ "kind" .= String "TraceLastShutdownUnclean" ]
   toObject verb (ChainDB.TraceAddBlockEvent ev) = case ev of
     ChainDB.IgnoreBlockOlderThanK pt ->
       mconcat [ "kind" .= String "TraceAddBlockEvent.IgnoreBlockOlderThanK"
@@ -896,23 +966,31 @@ instance ( ConvertRawHash blk
     ChainDB.ChangingSelection pt ->
       mconcat [ "kind" .= String "TraceAddBlockEvent.ChangingSelection"
                , "block" .= toObject verb pt ]
-    ChainDB.AddedToCurrentChain events _ base extended ->
+    ChainDB.AddedToCurrentChain events selChangedInfo base extended ->
       mconcat $
                [ "kind" .= String "TraceAddBlockEvent.AddedToCurrentChain"
                , "newtip" .= renderPointForVerbosity verb (AF.headPoint extended)
                , "chainLengthDelta" .= extended `chainLengthΔ` base
+               , "newTipSelectView" .= toObject verb (ChainDB.newTipSelectView selChangedInfo)
+               ]
+            ++ [ "oldTipSelectView" .= toObject verb oldTipSelectView
+               | Just oldTipSelectView <- [ChainDB.oldTipSelectView selChangedInfo]
                ]
             ++ [ "headers" .= toJSON (toObject verb `map` addedHdrsNewChain base extended)
                | verb == MaximalVerbosity ]
             ++ [ "events" .= toJSON (map (toObject verb) events)
                | not (null events) ]
-    ChainDB.SwitchedToAFork events _ old new ->
+    ChainDB.SwitchedToAFork events selChangedInfo old new ->
       mconcat $
                [ "kind" .= String "TraceAddBlockEvent.SwitchedToAFork"
                , "newtip" .= renderPointForVerbosity verb (AF.headPoint new)
                , "chainLengthDelta" .= new `chainLengthΔ` old
                -- Check that the SwitchedToAFork event was triggered by a proper fork.
                , "realFork" .= not (AF.withinFragmentBounds (AF.headPoint old) new)
+               , "newTipSelectView" .= toObject verb (ChainDB.newTipSelectView selChangedInfo)
+               ]
+            ++ [ "oldTipSelectView" .= toObject verb oldTipSelectView
+               | Just oldTipSelectView <- [ChainDB.oldTipSelectView selChangedInfo]
                ]
             ++ [ "headers" .= toJSON (toObject verb `map` addedHdrsNewChain old new)
                | verb == MaximalVerbosity ]
@@ -962,6 +1040,27 @@ instance ( ConvertRawHash blk
         mconcat [ "kind" .= String "TraceAddBlockEvent.PipeliningEvent.OutdatedTentativeHeader"
                  , "block" .= renderPointForVerbosity verb (blockPoint hdr)
                  ]
+    ChainDB.AddedReprocessLoEBlocksToQueue ->
+       mconcat [ "kind" .= String "AddedReprocessLoEBlocksToQueue" ]
+    ChainDB.PoppedReprocessLoEBlocksFromQueue ->
+       mconcat [ "kind" .= String "PoppedReprocessLoEBlocksFromQueue" ]
+    ChainDB.ChainSelectionLoEDebug curChain loeFrag ->
+      case loeFrag of
+        ChainDB.LoEEnabled loeF ->
+          mconcat [ "kind" .= String "ChainSelectionLoEDebug"
+                  , "curChain" .= headAndAnchor curChain
+                  , "loeFrag" .= headAndAnchor loeF
+                  ]
+        ChainDB.LoEDisabled ->
+          mconcat [ "kind" .= String "ChainSelectionLoEDebug"
+                  , "curChain" .= headAndAnchor curChain
+                  , "loeFrag" .= String "LoE is disabled"
+                  ]
+      where
+        headAndAnchor frag = Aeson.object
+          [ "anchor" .= renderPointForVerbosity verb (AF.anchorPoint frag)
+          , "head" .= renderPointForVerbosity verb (AF.headPoint frag)
+          ]
 
    where
      addedHdrsNewChain
@@ -980,7 +1079,7 @@ instance ( ConvertRawHash blk
   toObject verb (ChainDB.TraceLedgerReplayEvent ev) = case ev of
     LedgerDB.ReplayFromGenesis _replayTo ->
       mconcat [ "kind" .= String "TraceLedgerReplayEvent.ReplayFromGenesis" ]
-    LedgerDB.ReplayFromSnapshot snap tip' _replayFrom _replayTo ->
+    LedgerDB.ReplayFromSnapshot snap tip' _replayFrom ->
       mconcat [ "kind" .= String "TraceLedgerReplayEvent.ReplayFromSnapshot"
                , "snapshot" .= toObject verb snap
                , "tip" .= show tip' ]
@@ -991,10 +1090,12 @@ instance ( ConvertRawHash blk
 
   toObject MinimalVerbosity (ChainDB.TraceSnapshotEvent _ev) = mempty -- no output
   toObject verb (ChainDB.TraceSnapshotEvent ev) = case ev of
-    LedgerDB.TookSnapshot snap pt ->
+    LedgerDB.TookSnapshot snap pt enclosedTiming ->
       mconcat [ "kind" .= String "TraceSnapshotEvent.TookSnapshot"
                , "snapshot" .= toObject verb snap
-               , "tip" .= show pt ]
+               , "tip" .= show pt
+               , "enclosedTime" .= enclosedTiming
+               ]
     LedgerDB.DeletedSnapshot snap ->
       mconcat [ "kind" .= String "TraceSnapshotEvent.DeletedSnapshot"
                , "snapshot" .= toObject verb snap ]
@@ -1040,8 +1141,9 @@ instance ( ConvertRawHash blk
       mconcat [ "kind" .= String "TraceOpenEvent.OpenedImmutableDB"
                , "immtip" .= toObject verb immTip
                , "epoch" .= String ((pack . show) epoch) ]
-    ChainDB.OpenedVolatileDB ->
-      mconcat [ "kind" .= String "TraceOpenEvent.OpenedVolatileDB" ]
+    ChainDB.OpenedVolatileDB maxSlotN ->
+      mconcat [ "kind" .= String "TraceOpenEvent.OpenedVolatileDB"
+               , "maxSlotNo" .= String (showT maxSlotN) ]
     ChainDB.OpenedLgrDB ->
       mconcat [ "kind" .= String "TraceOpenEvent.OpenedLgrDB" ]
 
@@ -1055,8 +1157,8 @@ instance ( ConvertRawHash blk
     ChainDB.FollowerNewImmIterator _ _ ->
       mconcat [ "kind" .= String "TraceFollowerEvent.FollowerNewImmIterator" ]
   toObject verb (ChainDB.TraceInitChainSelEvent ev) = case ev of
-    ChainDB.InitalChainSelected ->
-      mconcat ["kind" .= String "TraceFollowerEvent.InitalChainSelected"]
+    ChainDB.InitialChainSelected ->
+      mconcat ["kind" .= String "TraceFollowerEvent.InitialChainSelected"]
     ChainDB.StartedInitChainSelection ->
       mconcat ["kind" .= String "TraceFollowerEvent.StartedInitChainSelection"]
     ChainDB.InitChainSelValidation ev' -> case ev' of
@@ -1189,6 +1291,7 @@ instance ( ConvertRawHash blk
       mconcat [ "kind" .= String "TraceVolatileDBEvent.InvalidFileNames"
                , "files" .= String (Text.pack . show $ map show fsPaths)
                ]
+    VolDb.DBClosed -> mconcat [ "kind" .= String "TraceVolatileDbEvent.DBClosed"]
 
 instance ConvertRawHash blk => ToObject (ImmDB.TraceChunkValidation blk ChunkNo) where
   toObject verb ev = case ev of
@@ -1285,6 +1388,74 @@ instance (ConvertRawHash blk, LedgerSupportsProtocol blk)
     TraceTermination reason ->
       mconcat [ "kind" .= String "ChainSyncClientEvent.TraceTermination"
                , "reason" .= String (pack $ show reason) ]
+    TraceValidatedHeader h ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceValidatedHeader"
+              , tipToObject (tipFromHeader h) ]
+    TraceWaitingBeyondForecastHorizon slotNo ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceWaitingBeyondForecastHorizon"
+               , "slot" .= condense slotNo  ]
+    TraceAccessingForecastHorizon slotNo ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceAccessingForecastHorizon"
+               , "slot" .= condense slotNo  ]
+    TraceGaveLoPToken tokenGiven h bestBlockNumberPriorToH ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceGaveLoPToken"
+               , "given" .= tokenGiven
+               , tipToObject (tipFromHeader h)
+               , "blockNo" .=  bestBlockNumberPriorToH ]
+    TraceOfferJump jumpTo ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceOfferJump"
+               , "jumpTo" .= toObject verb jumpTo
+               ]
+    TraceJumpResult res ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceJumpResult"
+               , "res" .= case res of
+                   ChainSync.Client.AcceptedJump info -> Aeson.object
+                     [ "kind" .= String "AcceptedJump"
+                      , "payload" .= toObject verb info ]
+                   ChainSync.Client.RejectedJump info -> Aeson.object
+                     [ "kind" .= String "RejectedJump"
+                      , "payload" .= toObject verb info ]
+               ]
+    TraceJumpingWaitingForNextInstruction ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceJumpingWaitingForNextInstruction"
+               ]
+    TraceJumpingInstructionIs instr ->
+      mconcat [ "kind" .= String "ChainSyncClientEvent.TraceJumpingInstructionIs"
+               , "instr" .= toObject verb instr
+               ]
+
+instance ( LedgerSupportsProtocol blk,
+           ConvertRawHash blk
+         ) => ToObject (ChainSync.Client.Instruction blk) where
+  toObject verb = \case
+    ChainSync.Client.RunNormally ->
+      mconcat ["kind" .= String "RunNormally"]
+    ChainSync.Client.Restart ->
+      mconcat ["kind" .= String "Restart"]
+    ChainSync.Client.JumpInstruction info ->
+      mconcat [ "kind" .= String "JumpInstruction"
+              , "payload" .= toObject verb info
+              ]
+
+instance ( LedgerSupportsProtocol blk,
+           ConvertRawHash blk
+         ) => ToObject (ChainSync.Client.JumpInstruction blk) where
+  toObject verb = \case
+    ChainSync.Client.JumpTo info ->
+      mconcat [ "kind" .= String "JumpTo"
+                , "info" .= toObject verb info ]
+    ChainSync.Client.JumpToGoodPoint info ->
+      mconcat [ "kind" .= String "JumpToGoodPoint"
+                , "info" .= toObject verb info ]
+
+instance ( LedgerSupportsProtocol blk,
+           ConvertRawHash blk
+         ) => ToObject (ChainSync.Client.JumpInfo blk) where
+  toObject verb info =
+    mconcat [ "kind" .= String "JumpInfo"
+              , "mostRecentIntersection" .= toObject verb (ChainSync.Client.jMostRecentIntersection info)
+              , "ourFragment" .= toJSON ((tipToObject . tipFromHeader) `map` AF.toOldestFirst (ChainSync.Client.jOurFragment info))
+              , "theirFragment" .= toJSON ((tipToObject . tipFromHeader) `map` AF.toOldestFirst (ChainSync.Client.jTheirFragment info)) ]
 
 instance ConvertRawHash blk
       => ToObject (TraceChainSyncServerEvent blk) where
@@ -1310,16 +1481,28 @@ instance ( ToObject (ApplyTxErr blk), ToObject (GenTx blk),
       , "mempoolSize" .= toObject verb mpSzAfter
       ]
   toObject verb (TraceMempoolRejectedTx tx txApplyErr mpSz) =
-    mconcat
+    mconcat $
       [ "kind" .= String "TraceMempoolRejectedTx"
-      , "err" .= toObject verb txApplyErr
       , "tx" .= toObject verb tx
       , "mempoolSize" .= toObject verb mpSz
+      ] <>
+      [ "err" .= toObject verb txApplyErr
+      | verb == MaximalVerbosity
       ]
   toObject verb (TraceMempoolRemoveTxs txs mpSz) =
     mconcat
       [ "kind" .= String "TraceMempoolRemoveTxs"
-      , "txs" .= map (toObject verb . txForgetValidated) txs
+      , "txs"
+          .= map
+            ( \(tx, err) ->
+                Aeson.object $
+                  [ "tx" .= toObject verb (txForgetValidated tx)
+                  ] <>
+                  [ "err" .= toObject verb err
+                  | verb == MaximalVerbosity
+                  ]
+            )
+            txs
       , "mempoolSize" .= toObject verb mpSz
       ]
   toObject verb (TraceMempoolManuallyRemovedTxs txs0 txs1 mpSz) =
@@ -1329,12 +1512,17 @@ instance ( ToObject (ApplyTxErr blk), ToObject (GenTx blk),
       , "txsInvalidated" .= map (toObject verb . txForgetValidated) txs1
       , "mempoolSize" .= toObject verb mpSz
       ]
+  toObject _verb (TraceMempoolSynced et) =
+    mconcat
+      [ "kind" .= String "TraceMempoolSynced"
+      , "enclosingTime" .= et
+      ]
 
 instance ToObject MempoolSize where
   toObject _verb MempoolSize{msNumTxs, msNumBytes} =
     mconcat
       [ "numTxs" .= msNumTxs
-      , "bytes" .= msNumBytes
+      , "bytes" .= unByteSize32 msNumBytes
       ]
 
 instance HasTextFormatter () where
@@ -1472,8 +1660,120 @@ instance ( RunNode blk
           (blockHash blk)
       , "blockSize" .= toJSON (getSizeInBytes $ estimateBlockSize (getHeader blk))
       ]
+  toObject verb (TraceAdoptionThreadDied slotNo blk) =
+    mconcat
+      [ "kind" .= String "TraceAdoptionThreadDied"
+      , "slot" .= toJSON (unSlotNo slotNo)
+      , "blockHash" .= renderHeaderHashForVerbosity
+          (Proxy @blk)
+          verb
+          (blockHash blk)
+      , "blockSize" .= toJSON (getSizeInBytes $ estimateBlockSize (getHeader blk))
+      ]
 
 
 instance ToObject (TraceLocalTxSubmissionServerEvent blk) where
   toObject _verb _ =
     mconcat [ "kind" .= String "TraceLocalTxSubmissionServerEvent" ]
+
+instance HasPrivacyAnnotation (TraceGsmEvent selection) where
+instance HasSeverityAnnotation (TraceGsmEvent selection) where
+  getSeverityAnnotation _ = Info
+instance ToObject selection => Transformable Text IO (TraceGsmEvent selection) where
+  trTransformer = trStructured
+
+instance ToObject selection => ToObject (TraceGsmEvent selection) where
+  toObject verb (GsmEventEnterCaughtUp i s) =
+    mconcat
+      [ "kind" .= String "GsmEventEnterCaughtUp"
+      , "peerNumber" .= toJSON i
+      , "currentSelection" .= toObject verb s
+      ]
+  toObject verb (GsmEventLeaveCaughtUp s a) =
+    mconcat
+      [ "kind" .= String "GsmEventLeaveCaughtUp"
+      , "currentSelection" .= toObject verb s
+      , "age" .= toJSON (show a)
+      ]
+  toObject _verb GsmEventPreSyncingToSyncing =
+    mconcat
+      [ "kind" .= String "GsmEventPreSyncingToSyncing"
+      ]
+  toObject _verb GsmEventSyncingToPreSyncing =
+    mconcat
+      [ "kind" .= String "GsmEventSyncingToPreSyncing"
+      ]
+
+instance HasPrivacyAnnotation (TraceGDDEvent peer blk) where
+instance HasSeverityAnnotation (TraceGDDEvent peer blk) where
+  getSeverityAnnotation _ = Debug
+instance (ToObject peer, ConvertRawHash blk, GetHeader blk) => Transformable Text IO (TraceGDDEvent peer blk) where
+  trTransformer = trStructured
+
+instance (ToObject peer, ConvertRawHash blk, GetHeader blk) => ToObject (TraceGDDEvent peer blk) where
+  toObject verb (TraceGDDDebug (GDDDebugInfo {..})) = mconcat $
+    [ "kind" .= String "TraceGDDEvent"
+    , "losingPeers".= toJSON (map (toObject verb) losingPeers)
+    , "loeHead" .= toObject verb loeHead
+    , "sgen" .= toJSON (unGenesisWindow sgen)
+    ] <> do
+      guard $ verb >= MaximalVerbosity
+      [ "bounds" .= toJSON (
+           map
+           ( \(peer, density) -> Object $ mconcat
+             [ "kind" .= String "PeerDensityBound"
+             , "peer" .= toObject verb peer
+             , "densityBounds" .= toObject verb density
+             ]
+           )
+           bounds
+         )
+       , "curChain" .= toObject verb curChain
+       , "candidates" .= toJSON (
+           map
+           ( \(peer, frag) -> Object $ mconcat
+             [ "kind" .= String "PeerCandidateFragment"
+             , "peer" .= toObject verb peer
+             , "candidateFragment" .= toObject verb frag
+             ]
+           )
+           candidates
+         )
+       , "candidateSuffixes" .= toJSON (
+           map
+           ( \(peer, frag) -> Object $ mconcat
+             [ "kind" .= String "PeerCandidateSuffix"
+             , "peer" .= toObject verb peer
+             , "candidateSuffix" .= toObject verb frag
+             ]
+           )
+           candidateSuffixes
+         )
+       ]
+
+  toObject verb (TraceGDDDisconnected peer) = mconcat
+    [ "kind" .= String "TraceGDDDisconnected"
+    , "peer" .= toJSON (map (toObject verb) $ toList peer)
+    ]
+
+instance (ConvertRawHash blk, GetHeader blk) => ToObject (DensityBounds blk) where
+  toObject verb DensityBounds {..} = mconcat
+    [ "kind" .= String "DensityBounds"
+    , "clippedFragment" .= toObject verb clippedFragment
+    , "offersMoreThanK" .= toJSON offersMoreThanK
+    , "lowerBound" .= toJSON lowerBound
+    , "upperBound" .= toJSON upperBound
+    , "hasBlockAfter" .= toJSON hasBlockAfter
+    , "latestSlot" .= toJSON (unSlotNo <$> withOriginToMaybe latestSlot)
+    , "idling" .= toJSON idling
+    ]
+
+instance ConvertRawHash blk => ToObject (Tip blk) where
+  toObject _verb TipGenesis =
+    mconcat [ "kind" .= String "TipGenesis" ]
+  toObject _verb (Tip slotNo hash bNo) =
+    mconcat [ "kind" .= String "Tip"
+            , "tipSlotNo" .= toJSON (unSlotNo slotNo)
+            , "tipHash" .= renderHeaderHash (Proxy @blk) hash
+            , "tipBlockNo" .= toJSON bNo
+            ]

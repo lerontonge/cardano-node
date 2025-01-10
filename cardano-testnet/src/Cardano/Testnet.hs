@@ -4,28 +4,29 @@ module Cardano.Testnet (
   -- * Testnets
 
   -- ** Start a testnet
-  testnet,
+  cardanoTestnet,
+  cardanoTestnetDefault,
+  retryOnAddressInUseError,
 
   -- ** Testnet options
-  TestnetOptions(..),
   CardanoTestnetOptions(..),
-  BabbageTestnetOptions(..),
-  ConwayTestnetOptions(..),
-  ShelleyTestnetOptions(..),
   TestnetNodeOptions(..),
-  cardanoDefaultTestnetOptions,
-  babbageDefaultTestnetOptions,
-  shelleyDefaultTestnetOptions,
   cardanoDefaultTestnetNodeOptions,
+  getDefaultAlonzoGenesis,
+  getDefaultShelleyGenesis,
 
   -- * Configuration
   Conf(..),
   TmpAbsolutePath(..),
-  YamlFilePath(..),
+  NodeConfiguration,
+  NodeConfigurationYaml,
   mkConf,
   makeLogDir,
   makeSocketDir,
   makeTmpBaseAbsPath,
+
+  -- * EpochState processsing helper functions
+  maybeExtractGovernanceActionIndex,
 
   -- * Processes
   procChairman,
@@ -33,20 +34,24 @@ module Cardano.Testnet (
   -- * Utils
   integration,
   waitUntilEpoch,
+  waitForEpochs,
 
   -- * Runtime
-  NodeRuntime(..),
-  allNodes,
+  TestnetRuntime(..),
+  testnetSprockets,
+  spoNodes,
+  relayNodes,
 
+  TestnetNode(..),
+  isTestnetNodeSpo,
+  nodeSocketPath,
   ) where
 
-import           Testnet.Conf
+import           Testnet.Components.Query
+import           Testnet.EpochStateProcessing
 import           Testnet.Filepath
-import           Testnet.Options
-import           Testnet.Start.Babbage
-import           Testnet.Start.Cardano
-import           Testnet.Start.Shelley as Shelley
-
 import           Testnet.Process.Run (procChairman)
-import           Testnet.Property.Utils
-import           Testnet.Runtime
+import           Testnet.Property.Util
+import           Testnet.Start.Cardano
+import           Testnet.Start.Types
+import           Testnet.Types

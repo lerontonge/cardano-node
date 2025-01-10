@@ -1,3 +1,4 @@
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
@@ -5,7 +6,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE UndecidableInstances #-}
-
 {-# OPTIONS_GHC -Wno-orphans #-}
 
 module Cardano.Node.Tracing.Tracers.NodeToNode
@@ -13,23 +13,21 @@ module Cardano.Node.Tracing.Tracers.NodeToNode
    ) where
 
 import           Cardano.Logging
-import           Data.Aeson (ToJSON (..), Value (String), (.=))
-import           Data.Proxy (Proxy (..))
-import           Data.Text (pack)
-import           Network.TypedProtocol.Codec (AnyMessageAndAgency (..))
-
 import           Cardano.Node.Queries (ConvertTxId)
 import           Cardano.Node.Tracing.Render (renderHeaderHash, renderTxIdForDetails)
-
 import           Ouroboros.Consensus.Block (ConvertRawHash, GetHeader, StandardHash, getHeader)
 import           Ouroboros.Consensus.Ledger.SupportsMempool (GenTx, HasTxId, HasTxs,
                    LedgerSupportsMempool, extractTxs, txId)
 import           Ouroboros.Consensus.Node.Run (SerialiseNodeToNodeConstraints, estimateBlockSize)
-
-import           Ouroboros.Network.Block (Point, Serialised, blockHash)
+import           Ouroboros.Network.Block (Point, Serialised (..), blockHash)
 import           Ouroboros.Network.Protocol.BlockFetch.Type (BlockFetch (..), Message (..))
 import qualified Ouroboros.Network.Protocol.TxSubmission2.Type as STX
 import           Ouroboros.Network.SizeInBytes (SizeInBytes (..))
+
+import           Data.Aeson (ToJSON (..), Value (String), (.=))
+import           Data.Proxy (Proxy (..))
+import           Data.Text (pack)
+import           Network.TypedProtocol.Codec (AnyMessageAndAgency (..))
 
 --------------------------------------------------------------------------------
 -- BlockFetch Tracer
@@ -44,14 +42,14 @@ instance ( ConvertTxId blk
          )
       => LogFormatting (AnyMessageAndAgency (BlockFetch blk (Point blk))) where
   forMachine DMinimal (AnyMessageAndAgency stok (MsgBlock blk)) =
-    mconcat [ "kind" .= String "MsgBlock"
+    mconcat [  "kind" .= String "MsgBlock"
              , "agency" .= String (pack $ show stok)
              , "blockHash" .= renderHeaderHash (Proxy @blk) (blockHash blk)
              , "blockSize" .= toJSON (estimateBlockSize (getHeader blk))
              ]
 
   forMachine dtal (AnyMessageAndAgency stok (MsgBlock blk)) =
-    mconcat [ "kind" .= String "MsgBlock"
+    mconcat [  "kind" .= String "MsgBlock"
              , "agency" .= String (pack $ show stok)
              , "blockHash" .= renderHeaderHash (Proxy @blk) (blockHash blk)
              , "blockSize" .= toJSON (estimateBlockSize (getHeader blk))
@@ -67,8 +65,8 @@ instance ( ConvertTxId blk
              ]
   forMachine _v (AnyMessageAndAgency stok MsgStartBatch{}) =
     mconcat [ "kind" .= String "MsgStartBatch"
-             , "agency" .= String (pack $ show stok)
-             ]
+            , "agency" .= String (pack $ show stok)
+            ]
   forMachine _v (AnyMessageAndAgency stok MsgNoBlocks{}) =
     mconcat [ "kind" .= String "MsgNoBlocks"
              , "agency" .= String (pack $ show stok)
@@ -81,6 +79,7 @@ instance ( ConvertTxId blk
     mconcat [ "kind" .= String "MsgClientDone"
              , "agency" .= String (pack $ show stok)
              ]
+
 
 instance ToJSON SizeInBytes where
     toJSON (SizeInBytes s) = toJSON s
@@ -135,55 +134,41 @@ instance MetaTrace (AnyMessageAndAgency (BlockFetch blk1 (Point blk2))) where
 -- BlockFetchSerialised Tracer
 --------------------------------------------------------------------------------
 
--- TODO Tracers
--- Provide complete implementation of forMachine
 instance ( ConvertTxId blk
-         , HasTxId (GenTx blk)
          , ConvertRawHash blk
          , StandardHash blk
          , HasTxs blk
+         , HasTxId (GenTx blk)
          )
       => LogFormatting (AnyMessageAndAgency (BlockFetch (Serialised blk) (Point blk))) where
-  forMachine DMinimal (AnyMessageAndAgency stok (MsgBlock _blk)) =
-    mconcat [ "kind" .= String "MsgBlock"
+  forMachine _dtal (AnyMessageAndAgency stok (MsgBlock blk')) =
+    mconcat  [ "kind" .= String "MsgBlock"
              , "agency" .= String (pack $ show stok)
-            -- , "blockHash" .= renderHeaderHash (Proxy @blk) (blockHash blk)
-            -- , "blockSize" .= toJSON (estimateBlockSize (getHeader blk))
+             , "bytes" .= String (showT blk')
              ]
-
-  forMachine _dtal (AnyMessageAndAgency stok (MsgBlock _blk)) =
-    mconcat [ "kind" .= String "MsgBlock"
-             , "agency" .= String (pack $ show stok)
-          -- , "blockHash" .= renderHeaderHash (Proxy @blk) (blockHash blk)
-          --  , "blockSize" .= toJSON (estimateBlockSize (getHeader blk))
-          --   , "txIds" .= toJSON (presentTx <$> extractTxs blk)
-             ]
-      -- where
-      --   presentTx :: GenTx blk -> Value
-      --   presentTx =  String . renderTxIdForDetails dtal . txId
 
   forMachine _v (AnyMessageAndAgency stok MsgRequestRange{}) =
-    mconcat [ "kind" .= String "MsgRequestRange"
+    mconcat [  "kind" .= String "MsgRequestRange"
              , "agency" .= String (pack $ show stok)
              ]
   forMachine _v (AnyMessageAndAgency stok MsgStartBatch{}) =
-    mconcat [ "kind" .= String "MsgStartBatch"
+    mconcat [  "kind" .= String "MsgStartBatch"
              , "agency" .= String (pack $ show stok)
              ]
   forMachine _v (AnyMessageAndAgency stok MsgNoBlocks{}) =
-    mconcat [ "kind" .= String "MsgNoBlocks"
+    mconcat [  "kind" .= String "MsgNoBlocks"
              , "agency" .= String (pack $ show stok)
              ]
   forMachine _v (AnyMessageAndAgency stok MsgBatchDone{}) =
-    mconcat [ "kind" .= String "MsgBatchDone"
+    mconcat [  "kind" .= String "MsgBatchDone"
              , "agency" .= String (pack $ show stok)
              ]
   forMachine _v (AnyMessageAndAgency stok MsgClientDone{}) =
-    mconcat [ "kind" .= String "MsgClientDone"
+    mconcat [  "kind" .= String "MsgClientDone"
              , "agency" .= String (pack $ show stok)
              ]
 
-  forHuman = pack . show
+  forHuman = showT
 
 --------------------------------------------------------------------------------
 -- TxSubmissionNode2 Tracer

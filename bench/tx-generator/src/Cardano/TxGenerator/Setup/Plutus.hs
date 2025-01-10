@@ -4,7 +4,10 @@
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | This module provides convenience functions when dealing with Plutus scripts.
+{-|
+Module      : Cardano.TxGenerator.Setup.Plutus
+Description : Convenience functions for dealing with Plutus scripts
+ -}
 module Cardano.TxGenerator.Setup.Plutus
        ( readPlutusScript
        , preExecutePlutusScript
@@ -12,47 +15,56 @@ module Cardano.TxGenerator.Setup.Plutus
        where
 
 import           Data.Bifunctor
+import           Data.ByteString.Short (ShortByteString)
+import           Data.Int (Int64)
 import           Data.Map.Strict as Map (lookup)
 
 import           Control.Monad.Trans.Except
 import           Control.Monad.Trans.Except.Extra
 import           Control.Monad.Writer (runWriter)
 
-import           Cardano.CLI.Shelley.Run.Read (readFileScriptInAnyLang)
+import           Cardano.CLI.Read (readFileScriptInAnyLang)
 
 import           Cardano.Api
 import           Cardano.Api.Shelley (PlutusScript (..), ProtocolParameters (..), fromAlonzoExUnits,
                    protocolParamCostModels, toPlutusData)
-import           Cardano.Ledger.Alonzo.TxInfo (exBudgetToExUnits)
+import           Cardano.Ledger.Plutus.TxInfo (exBudgetToExUnits)
 
 import qualified PlutusLedgerApi.V1 as PlutusV1
 import qualified PlutusLedgerApi.V2 as PlutusV2
+import qualified PlutusLedgerApi.V3 as PlutusV3
+import qualified PlutusTx.AssocMap as AssocMap (empty)
 
-import           Cardano.TxGenerator.Types
-
+import           Cardano.TxGenerator.Types (TxGenError (..))
 #ifdef WITH_LIBRARY
 import           Cardano.Benchmarking.PlutusScripts (findPlutusScript)
-#else
-import           Control.Exception (SomeException(..), try)
-import           Paths_tx_generator
 #endif
+import           Control.Exception (SomeException (..), try)
+import           Paths_tx_generator
 
 type ProtocolVersion = (Int, Int)
 
 
-readPlutusScript :: Either String FilePath -> IO (Either TxGenError ScriptInAnyLang)
-readPlutusScript (Left s)
+resolveFromLibrary :: String -> Maybe ScriptInAnyLang
 #ifdef WITH_LIBRARY
-  = pure
-  $ maybe (Left . TxGenError $ "readPlutusScript: " ++ s ++ " not found.")
-          Right
-          (findPlutusScript s)
+resolveFromLibrary = findPlutusScript
 #else
-  = try (getDataFileName $ "scripts-fallback/" ++ s ++ ".plutus") >>= either
-      (\(SomeException e) -> pure $ Left $ TxGenError $ show e)
-      (readPlutusScript . Right)
+resolveFromLibrary = const Nothing
 #endif
 
+-- | 'readPlutusScript' accepts a string for the name of a script that
+-- may be known in the 'Left' case and a filepath to read as a script
+-- in the 'Right' case. API errors are signalled via an 'Either'.
+-- What the @WITH_LIBRARY@ flag signifies is to use a set of statically-
+-- defined (via TH) scripts for the script name lookups instead of a
+-- set of library files.
+readPlutusScript :: Either String FilePath -> IO (Either TxGenError ScriptInAnyLang)
+readPlutusScript (Left s)
+  = case resolveFromLibrary s of
+      Just s' -> pure $ Right s'
+      Nothing -> try (getDataFileName $ "scripts-fallback/" ++ s ++ ".plutus") >>= either
+        (\(SomeException e) -> pure $ Left $ TxGenError $ show e)
+        (readPlutusScript . Right)
 readPlutusScript (Right fp)
   = runExceptT $ do
     script <- firstExceptT ApiError $
@@ -61,6 +73,13 @@ readPlutusScript (Right fp)
       ScriptInAnyLang (PlutusScriptLanguage _) _ -> pure script
       ScriptInAnyLang lang _ -> throwE $ TxGenError $ "readPlutusScript: only PlutusScript supported, found: " ++ show lang
 
+-- | 'preExecutePlutusScript' is a front end for the internal
+-- @preExecutePlutusVn@ functions used to calculate 'ExecutionUnits'
+-- that switches on Plutus versions. The
+-- 'PlutusV1.evaluateScriptCounting', 'PlutusV2.evaluateScriptCounting'
+-- and 'PlutusV3.evaluateScriptCounting' functions do the actual work on
+-- the script's binary representation to count the number of execution
+-- units needed.
 preExecutePlutusScript ::
      ProtocolParameters
   -> ScriptInAnyLang
@@ -85,6 +104,8 @@ preExecutePlutusScript
         hoistEither $ preExecutePlutusV1 protocolVersion script' datum redeemer costModel
       ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV2) script' ->
         hoistEither $ preExecutePlutusV2 protocolVersion script' datum redeemer costModel
+      ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV3) script' ->
+        hoistEither $ preExecutePlutusV3 protocolVersion script' datum redeemer costModel
       _ ->
         throwE $ TxGenError $ "preExecutePlutusScript: script not supported: " ++ show scriptLang
   where
@@ -101,15 +122,16 @@ preExecutePlutusV1 ::
 preExecutePlutusV1 protocolVersion_ (PlutusScript _ (PlutusScriptSerialised script)) datum redeemer costModel
   = fst $ runWriter $ runExceptT go       -- for now, we discard warnings (:: PlutusCore.Evaluation.Machine.CostModelInterface.CostModelApplyWarn)
   where
-    protocolVersion = uncurry PlutusV1.ProtocolVersion protocolVersion_
+    protocolVersion = PlutusV1.MajorProtocolVersion (fst protocolVersion_)
     go
       = do
       evaluationContext <- firstExceptT PlutusError $
         PlutusV1.mkEvaluationContext (flattenCostModel costModel)
 
+      deserialisedScript <- firstExceptT PlutusError $ PlutusV1.deserialiseScript protocolVersion script
       exBudget <- firstExceptT PlutusError $
         hoistEither $
-          snd $ PlutusV1.evaluateScriptCounting protocolVersion PlutusV1.Verbose evaluationContext script
+          snd $ PlutusV1.evaluateScriptCounting protocolVersion PlutusV1.Verbose evaluationContext deserialisedScript
             [ toPlutusData datum
             , toPlutusData (getScriptData redeemer)
             , PlutusV1.toData dummyContext
@@ -146,18 +168,20 @@ preExecutePlutusV2 ::
   -> ScriptRedeemer
   -> CostModel
   -> Either TxGenError ExecutionUnits
-preExecutePlutusV2 protocolVersion_ (PlutusScript _ (PlutusScriptSerialised script)) datum redeemer costModel
+preExecutePlutusV2 (major, _minor) (PlutusScript _ (PlutusScriptSerialised script)) datum redeemer costModel
   = fst $ runWriter $ runExceptT go       -- for now, we discard warnings (:: PlutusCore.Evaluation.Machine.CostModelInterface.CostModelApplyWarn)
   where
-    protocolVersion = uncurry PlutusV2.ProtocolVersion protocolVersion_
+    protocolVersion = PlutusV2.MajorProtocolVersion major
     go
       = do
       evaluationContext <- firstExceptT PlutusError $
         PlutusV2.mkEvaluationContext (flattenCostModel costModel)
 
+      deserialisedScript <- firstExceptT PlutusError $ PlutusV2.deserialiseScript protocolVersion script
+
       exBudget <- firstExceptT PlutusError $
         hoistEither $
-          snd $ PlutusV2.evaluateScriptCounting protocolVersion PlutusV2.Verbose evaluationContext script
+          snd $ PlutusV2.evaluateScriptCounting protocolVersion PlutusV2.Verbose evaluationContext deserialisedScript
             [ toPlutusData datum
             , toPlutusData (getScriptData redeemer)
             , PlutusV2.toData dummyContext
@@ -180,14 +204,75 @@ preExecutePlutusV2 protocolVersion_ (PlutusScript _ (PlutusScriptSerialised scri
       , PlutusV2.txInfoFee = mempty
       , PlutusV2.txInfoMint = mempty
       , PlutusV2.txInfoDCert = []
-      , PlutusV2.txInfoWdrl = PlutusV2.fromList []
+      , PlutusV2.txInfoWdrl = PlutusV2.unsafeFromList []
       , PlutusV2.txInfoValidRange = PlutusV2.always
       , PlutusV2.txInfoSignatories = []
-      , PlutusV2.txInfoData = PlutusV2.fromList []
+      , PlutusV2.txInfoData = PlutusV2.unsafeFromList []
       , PlutusV2.txInfoId = PlutusV2.TxId ""
       , PlutusV2.txInfoReferenceInputs = []
-      , PlutusV2.txInfoRedeemers = PlutusV2.fromList []
+      , PlutusV2.txInfoRedeemers = PlutusV2.unsafeFromList []
       }
 
-flattenCostModel :: CostModel -> [Integer]
+preExecutePlutusV3 ::
+     ProtocolVersion
+  -> Script PlutusScriptV3
+  -> ScriptData
+  -> ScriptRedeemer
+  -> CostModel
+  -> Either TxGenError ExecutionUnits
+preExecutePlutusV3 (major, _minor) (PlutusScript _ (PlutusScriptSerialised (script :: ShortByteString {- a.k.a. SerialisedScript -}))) datum redeemer costModel
+  = fst $ runWriter $ runExceptT go       -- for now, we discard warnings (:: PlutusCore.Evaluation.Machine.CostModelInterface.CostModelApplyWarn)
+  where
+    protocolVersion = PlutusV3.MajorProtocolVersion major
+    go
+      = do
+      evaluationContext <- firstExceptT PlutusError $
+        PlutusV3.mkEvaluationContext (flattenCostModel costModel)
+
+      scriptForEval <- withExceptT PlutusError $ PlutusV3.deserialiseScript protocolVersion script
+      exBudget <- firstExceptT PlutusError $
+        hoistEither .
+          snd $ PlutusV3.evaluateScriptCounting protocolVersion PlutusV3.Verbose evaluationContext scriptForEval
+                (PlutusV3.toData scriptContext)
+
+      x <- hoistMaybe (TxGenError "preExecutePlutusV3: could not convert to execution units") $
+        exBudgetToExUnits exBudget
+      return $ fromAlonzoExUnits x
+
+    r :: PlutusV3.Redeemer
+    r = PlutusV3.Redeemer $ PlutusV3.dataToBuiltinData $ toPlutusData $ getScriptData redeemer
+
+    d :: PlutusV3.Datum
+    d = PlutusV3.Datum $ PlutusV3.dataToBuiltinData $ toPlutusData datum
+
+    scriptContext :: PlutusV3.ScriptContext
+    scriptContext = PlutusV3.ScriptContext dummyTxInfo r scriptInfo
+
+    scriptInfo :: PlutusV3.ScriptInfo
+    scriptInfo = PlutusV3.SpendingScript dummyOutRef (Just d)
+
+    dummyOutRef :: PlutusV3.TxOutRef
+    dummyOutRef = PlutusV3.TxOutRef (PlutusV3.TxId "") 0
+
+    dummyTxInfo :: PlutusV3.TxInfo
+    dummyTxInfo = PlutusV3.TxInfo
+      { PlutusV3.txInfoInputs = []
+      , PlutusV3.txInfoOutputs = []
+      , PlutusV3.txInfoFee = 0
+      , PlutusV3.txInfoMint = mempty
+      , PlutusV3.txInfoTxCerts = []
+      , PlutusV3.txInfoWdrl = PlutusV3.unsafeFromList []
+      , PlutusV3.txInfoValidRange = PlutusV3.always
+      , PlutusV3.txInfoSignatories = []
+      , PlutusV3.txInfoData = PlutusV3.unsafeFromList []
+      , PlutusV3.txInfoId = PlutusV3.TxId ""
+      , PlutusV3.txInfoReferenceInputs = []
+      , PlutusV3.txInfoRedeemers = PlutusV3.unsafeFromList []
+      , PlutusV3.txInfoVotes = AssocMap.empty
+      , PlutusV3.txInfoProposalProcedures = []
+      , PlutusV3.txInfoCurrentTreasuryAmount = Nothing
+      , PlutusV3.txInfoTreasuryDonation = Nothing
+      }
+
+flattenCostModel :: CostModel -> [Int64]
 flattenCostModel (CostModel cm) = cm

@@ -12,41 +12,40 @@ module Cardano.Testnet.Test.Cli.QuerySlotNumber
   ( hprop_querySlotNumber
   ) where
 
-import           Control.Monad
+import           Cardano.Ledger.Shelley.Genesis (fromNominalDiffTimeMicro)
+import           Cardano.Slotting.Slot
+import           Cardano.Testnet
+
+import           Prelude
+
+import           Data.Default.Class
 import           Data.Either
-import           Data.Monoid (Last (..))
 import qualified Data.Time.Clock as DT
 import qualified Data.Time.Format as DT
-import           Hedgehog (Property)
-import qualified Hedgehog as H
-import qualified Hedgehog.Extras.Stock as H
-import qualified Hedgehog.Extras.Stock.IO.Network.Sprocket as IO
-import qualified Hedgehog.Extras.Test.Base as H
-import qualified Hedgehog.Extras.Test.Process as H
-import qualified Hedgehog.Internal.Property as H
-import           Prelude
-import           System.Environment (getEnvironment)
 import qualified System.Info as SYS
 
-import           Cardano.Testnet
-import           Testnet.Process.Run
-import qualified Testnet.Property.Utils as H
-import           Testnet.Runtime
+import           Testnet.Process.Run (execCli', mkExecConfig)
+import           Testnet.Property.Util (integrationRetryWorkspace)
+import           Testnet.Types
+
+import           Hedgehog (Property)
+import qualified Hedgehog.Extras.Stock as H
+import qualified Hedgehog.Extras.Test.Base as H
+import qualified Hedgehog.Extras.Test.TestWatchdog as H
+import qualified Hedgehog.Internal.Property as H
 
 -- | Tests @query slot-number@ cardano-cli command that it returns correct slot numbers for provided utc time
 hprop_querySlotNumber :: Property
-hprop_querySlotNumber = H.integrationRetryWorkspace 2 "query-slot-number" $ \tempAbsBasePath' -> do
+hprop_querySlotNumber = integrationRetryWorkspace 2 "query-slot-number" $ \tempAbsBasePath' -> H.runWithDefaultWatchdog_ $ do
   H.note_ SYS.os
-  conf <- H.noteShowM $ mkConf tempAbsBasePath'
+  conf <- mkConf tempAbsBasePath'
 
   let tempBaseAbsPath' = makeTmpBaseAbsPath $ tempAbsPath conf
-      testnetOptions = BabbageOnlyTestnetOptions $ babbageDefaultTestnetOptions
-        { babbageNodeLoggingFormat = NodeLoggingFormatAsJson
-        }
+
   tr@TestnetRuntime
     { testnetMagic
-    , poolNodes
-    } <- testnet testnetOptions conf
+    , testnetNodes
+    } <- cardanoTestnetDefault def def conf
   ShelleyGenesis{sgSlotLength, sgEpochLength} <- H.noteShowM $ shelleyGenesis tr
   startTime <- H.noteShowM $ getStartTime tempAbsBasePath' tr
 
@@ -54,27 +53,17 @@ hprop_querySlotNumber = H.integrationRetryWorkspace 2 "query-slot-number" $ \tem
       -- how many slots can the checked value differ from
       -- we have 1s precision for UTC timestamp CLI argument, so this value tells how many slots in 1s can be
       slotPrecision = round $ 1 / slotLength
-      epochSize = fromIntegral sgEpochLength :: Int
+      epochSize = fromIntegral (unEpochSize sgEpochLength) :: Int
 
-  poolNode1 <- H.headM poolNodes
-  poolSprocket1 <- H.noteShow $ nodeSprocket $ poolRuntime poolNode1
-  env <- H.evalIO getEnvironment
-  execConfig <- H.noteShow H.ExecConfig
-    { H.execConfigEnv = Last $ Just $
-      [ ("CARDANO_NODE_SOCKET_PATH", IO.sprocketArgumentName poolSprocket1)
-      ]
-      -- The environment must be passed onto child process on Windows in order to
-      -- successfully start that process.
-      <> env
-    , H.execConfigCwd = Last $ Just tempBaseAbsPath'
-    }
+  poolNode1 <- H.headM testnetNodes
+  poolSprocket1 <- H.noteShow $ nodeSprocket poolNode1
+  execConfig <- mkExecConfig tempBaseAbsPath' poolSprocket1 testnetMagic
 
   id do
     H.note_ "Try to retrieve slot 5s before genesis"
     testTime <- H.note . formatTime $ (-5) `DT.addUTCTime` startTime
     (result, _) <- H.runTestT $ execCli' execConfig
-      [ "query", "slot-number"
-      , "--testnet-magic", show @Int testnetMagic
+      [ "latest", "query", "slot-number"
       , testTime
       ]
     H.assertWith result isLeft
@@ -84,8 +73,7 @@ hprop_querySlotNumber = H.integrationRetryWorkspace 2 "query-slot-number" $ \tem
     testTime <- H.note $ formatTime startTime
     let expectedSlot = 0
     slot <- H.readNoteM =<< execCli' execConfig
-      [ "query", "slot-number"
-      , "--testnet-magic", show @Int testnetMagic
+      [ "latest", "query", "slot-number"
       , testTime
       ]
     H.assertWithinTolerance slot expectedSlot slotPrecision
@@ -96,8 +84,7 @@ hprop_querySlotNumber = H.integrationRetryWorkspace 2 "query-slot-number" $ \tem
         passedTime = fromIntegral expectedSlot * slotLength
     testTime <- H.note . formatTime $ passedTime `DT.addUTCTime` startTime
     slot <- H.readNoteM @Int =<< execCli' execConfig
-      [ "query", "slot-number"
-      , "--testnet-magic", show @Int testnetMagic
+      [ "latest", "query", "slot-number"
       , testTime
       ]
     H.assertWithinTolerance slot expectedSlot slotPrecision
@@ -111,8 +98,7 @@ hprop_querySlotNumber = H.integrationRetryWorkspace 2 "query-slot-number" $ \tem
         passedTime = fromIntegral expectedSlot * slotLength
     testTime <- H.note . formatTime $ passedTime `DT.addUTCTime` startTime
     slot <- H.readNoteM @Int =<< execCli' execConfig
-      [ "query", "slot-number"
-      , "--testnet-magic", show @Int testnetMagic
+      [ "latest", "query", "slot-number"
       , testTime
       ]
     H.assertWithinTolerance slot expectedSlot slotPrecision
@@ -122,13 +108,10 @@ hprop_querySlotNumber = H.integrationRetryWorkspace 2 "query-slot-number" $ \tem
     let timeOffset = slotLength * fromIntegral epochSize * 2
     testTime <- H.note . formatTime $ timeOffset `DT.addUTCTime` startTime
     (result, _) <- H.runTestT $ execCli' execConfig
-      [ "query", "slot-number"
-      , "--testnet-magic", show @Int testnetMagic
+      [ "latest", "query", "slot-number"
       , testTime
       ]
     H.assertWith result isLeft
-
-  -- }}}
 
 formatTime :: DT.UTCTime -> String
 formatTime = DT.formatTime DT.defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ"

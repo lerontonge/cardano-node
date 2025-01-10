@@ -5,6 +5,8 @@
 {-# LANGUAGE PackageImports #-}
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Cardano.Node.Configuration.Logging
   ( LoggingLayer (..)
@@ -172,7 +174,7 @@ createLoggingLayer ver nodeConfig' p = do
   -- These have to be set before the switchboard is set up.
   liftIO $ do
     Config.setTextOption logConfig "appversion" ver
-    Config.setTextOption logConfig "appcommit" gitRev
+    Config.setTextOption logConfig "appcommit" $(gitRev)
 
   (baseTrace', switchBoard) <- liftIO $ setupTrace_ logConfig "cardano"
 
@@ -288,7 +290,7 @@ createLoggingLayer ver nodeConfig' p = do
          >>= maybe (pure ())
                    (traceResourceStats
                       (appendName "node" tr))
-       Conc.threadDelay 1000000 -- TODO:  make configurable
+       Conc.threadDelay 1000000 -- microseconds = 1 sec
 
    traceResourceStats :: Trace IO Text -> ResourceStats -> IO ()
    traceResourceStats tr rs = do
@@ -329,7 +331,7 @@ nodeBasicInfo :: NodeConfiguration
               -> IO [LogObject Text]
 nodeBasicInfo nc (SomeConsensusProtocol whichP pForInfo) nodeStartTime' = do
   meta <- mkLOMeta Notice Public
-  let cfg = pInfoConfig $ Api.protocolInfo pForInfo
+  let cfg = pInfoConfig $ fst $ Api.protocolInfo @IO pForInfo
       protocolDependentItems =
         case whichP of
           Api.ByronBlockType ->
@@ -351,7 +353,7 @@ nodeBasicInfo nc (SomeConsensusProtocol whichP pForInfo) nodeStartTime' = do
       items = nub $
         [ ("protocol",      pack . show $ ncProtocol nc)
         , ("version",       pack . showVersion $ version)
-        , ("commit",        gitRev)
+        , ("commit",        $(gitRev))
         , ("nodeStartTime", textShow nodeStartTime')
         ] ++ protocolDependentItems
       logObjects =

@@ -1,6 +1,5 @@
 include "prof0-defaults";
 include "genesis";
-include "lib";
 
 ## XXX:  this is corruption at the highest levels, pure and simple.
 def default_value_tx_size_estimate:
@@ -87,6 +86,16 @@ def add_derived_params:
 | .node                                      as $node
 | .genesis.shelley.protocolParams            as $pparams
 
+## The perf-ssd machines have abundant physical RAM, and Nomad uses cgroups to constrain resources.
+## To also influence RTS / GC behaviour, -M needs to be used, as the RTS infers a heap limit from
+## the system's ulimit, not the cgroup limit.
+| $node.rts_flags_override                   as $rtsflags
+| $node.heap_limit                           as $heap_limit
+| (if $heap_limit | type == "number"
+   then $rtsflags + [("-M" + ($heap_limit | tostring) + "m")]
+   else $rtsflags
+   end)                                      as $rtsflags_derived
+
 ## Absolute durations:
 | ($gsis.epoch_length * $gsis.slot_duration)       as $epoch_duration
 | ($gsis.slot_duration / $gsis.active_slots_coeff) as $block_duration
@@ -102,7 +111,7 @@ def add_derived_params:
 | ($shutdown_slots | may_mult($gsis.slot_duration)) as $shutdown_time
 | ([ $generator_requested_duration
    , $shutdown_time
-   ] | drop_nulls | min)                     as $generator_duration
+   ] | map(values) | min)                     as $generator_duration
 
 ## Tx count for inferred absolute duration.
 ##   Note that this the workload would take longer, if we saturate the cluster.
@@ -119,6 +128,8 @@ def add_derived_params:
 | ($hosts.singular + $n_dense_pools)         as $n_pools
 
 | ($gsis.delegators // $n_pools)             as $effective_delegators
+
+| ($gsis.dreps // 0)                         as $dreps
 
 | ($generator_tx_count * $gtor.inputs_per_tx)
                                              as $utxo_generated
@@ -174,6 +185,7 @@ def add_derived_params:
          }
      , genesis:
          { delegators:            $effective_delegators
+         , dreps:                 $gsis.dreps
          , pool_coin:             (if $n_pools == 0 then 0
                                    else $gsis.per_pool_balance end)
          , shelley:
@@ -192,7 +204,7 @@ def add_derived_params:
          { tx_count:              $generator_tx_count
          }
      , node:
-         {
+         { rts_flags_override:    $rtsflags_derived
          }
      , analysis:
          { minimum_chain_density:      ($gsis.active_slots_coeff * 0.5)

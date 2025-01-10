@@ -7,17 +7,17 @@ module Cardano.Tracer.Handlers.RTView.Update.Resources
   ( updateResourcesHistory
   ) where
 
+import           Cardano.Tracer.Handlers.RTView.State.Historical
+import           Cardano.Tracer.Handlers.RTView.State.Last
+import           Cardano.Tracer.Handlers.RTView.Utils
+import           Cardano.Tracer.Handlers.Utils
+import           Cardano.Tracer.Types
+
 import           Control.Concurrent.STM.TVar (readTVarIO)
 import qualified Data.Map.Strict as M
 import           Data.Text.Read (decimal)
 import           Data.Time.Clock (UTCTime)
 import           Data.Word (Word64)
-
-import           Cardano.Tracer.Handlers.Metrics.Utils
-import           Cardano.Tracer.Handlers.RTView.State.Historical
-import           Cardano.Tracer.Handlers.RTView.State.Last
-import           Cardano.Tracer.Handlers.RTView.Update.Utils
-import           Cardano.Tracer.Types
 
 updateResourcesHistory
   :: NodeId
@@ -29,14 +29,14 @@ updateResourcesHistory
   -> IO ()
 updateResourcesHistory nodeId (ResHistory rHistory) lastResources metricName metricValue now =
   case metricName of
-    "Resources.Stat.Cputicks"    -> updateCPUUsage
-    "Resources.Mem.Resident"     -> updateRSSMemory
-    "Resources.RTS.GcLiveBytes"  -> updateGCLiveMemory
-    "Resources.RTS.GcMajorNum"   -> updateGCMajorNum
-    "Resources.RTS.GcMinorNum"   -> updateGCMinorNum
-    "Resources.RTS.Gcticks"      -> updateCPUTimeGC
-    "Resources.RTS.Mutticks"     -> updateCPUTimeApp
-    "Resources.RTS.Stat.Threads" -> updateThreadsNum
+    "Stat.cputicks"    -> updateCPUUsage
+    "Mem.resident"     -> updateRSSMemory
+    "RTS.gcLiveBytes"  -> updateGCLiveMemory
+    "RTS.gcMajorNum"   -> updateGCMajorNum
+    "RTS.gcMinorNum"   -> updateGCMinorNum
+    "RTS.gcticks"      -> updateCPUTimeGC
+    "RTS.mutticks"     -> updateCPUTimeApp
+    "Stat.threads"     -> updateThreadsNum
     _ -> return ()
  where
   updateCPUUsage =

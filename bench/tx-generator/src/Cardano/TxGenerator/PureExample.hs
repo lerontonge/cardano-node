@@ -1,5 +1,4 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# OPTIONS_GHC -fno-warn-incomplete-uni-patterns #-}
 
@@ -7,26 +6,24 @@ module  Cardano.TxGenerator.PureExample
         (demo)
         where
 
-import           Control.Monad (foldM)
-import           Control.Monad.Trans.Except
-import           Control.Monad.Trans.State.Strict
-import           Data.Either (fromRight)
-import           Data.Functor.Identity (runIdentity)
-import           Data.List (foldl')
-import           Data.String (fromString)
-import           System.Exit (die)
-
 import           Cardano.Api
--- import           Cardano.Api.Shelley (ProtocolParameters)
+import           Cardano.Api.Shelley (convertToLedgerProtocolParameters)
 
-import           Data.Aeson (eitherDecodeFileStrict')
-
+import qualified Cardano.Ledger.Coin as L
 import           Cardano.TxGenerator.FundQueue
 import           Cardano.TxGenerator.Setup.SigningKey
 import           Cardano.TxGenerator.Tx (genTx, sourceToStoreTransaction)
 import           Cardano.TxGenerator.Types (TxEnvironment (..), TxGenError (..), TxGenerator)
 import           Cardano.TxGenerator.Utils (inputsToOutputsWithFee)
 import           Cardano.TxGenerator.UTxO (makeToUTxOList, mkUTxOVariant)
+
+import           Control.Monad (foldM)
+import           Control.Monad.Trans.State.Strict
+import           Data.Aeson (eitherDecodeFileStrict')
+import           Data.Either (fromRight)
+import           Data.List as List (foldl')
+import           Data.String (fromString)
+import           System.Exit (die)
 
 import           Paths_tx_generator
 
@@ -42,7 +39,7 @@ demo' parametersFile = do
       demoEnv = TxEnvironment {
           txEnvNetworkId = Mainnet
         , txEnvProtocolParams = protocolParameters
-        , txEnvFee = TxFeeExplicit TxFeesExplicitInBabbageEra 100000
+        , txEnvFee = TxFeeExplicit ShelleyBasedEraBabbage 100000
         , txEnvMetadata = TxMetadataNone
         }
 
@@ -75,7 +72,7 @@ genesisValue :: TxOutValue BabbageEra
 
 (genesisTxIn, genesisValue) =
   ( TxIn "900fc5da77a0747da53f7675cbb7d149d46779346dea2f879ab811ccc72a2162" (TxIx 0)
-  , lovelaceToTxOutValue $ Lovelace 90000000000000
+  , lovelaceToTxOutValue ShelleyBasedEraBabbage $ L.Coin 90000000000000
   )
 
 genesisFund :: Fund
@@ -95,21 +92,22 @@ type Generator = State FundQueue
 generateTx ::
      TxEnvironment BabbageEra
   -> Generator (Either TxGenError (Tx BabbageEra))
-generateTx TxEnvironment{..} = do
-  funds' <- consumeInputFunds
-  case funds' of
-    Left err -> pure $ Left err
-    Right funds -> runExceptT $ sourceToStoreTransaction
-                                    generator
-                                    funds
-                                    computeOutputValues
-                                    (makeToUTxOList $ repeat computeUTxO)
-                                    addNewOutputFunds
+generateTx TxEnvironment{..}
+  = sourceToStoreTransaction
+        generator
+        consumeInputFunds
+        computeOutputValues
+        (makeToUTxOList $ repeat computeUTxO)
+        addNewOutputFunds
   where
     TxFeeExplicit _ fee = txEnvFee
 
     generator :: TxGenerator BabbageEra
-    generator = genTx BabbageEra txEnvProtocolParams collateralFunds txEnvFee txEnvMetadata
+    generator =
+        case convertToLedgerProtocolParameters shelleyBasedEra txEnvProtocolParams of
+          Right ledgerParameters ->
+            genTx ShelleyBasedEraBabbage ledgerParameters collateralFunds txEnvFee txEnvMetadata
+          Left err -> \_ _ -> Left (ApiError err)
       where
         -- collateralFunds are needed for Plutus transactions
         collateralFunds :: (TxInsCollateral BabbageEra, [Fund])
@@ -123,10 +121,10 @@ generateTx TxEnvironment{..} = do
       return $ Right funds
 
     addNewOutputFunds :: [Fund] -> Generator ()
-    addNewOutputFunds = put . foldl' insertFund emptyFundQueue
+    addNewOutputFunds = put . List.foldl' insertFund emptyFundQueue
 
-    computeOutputValues :: Monad m => [Lovelace] -> ExceptT TxGenError m [Lovelace]
-    computeOutputValues = withExceptT TxGenError . inputsToOutputsWithFee fee numOfOutputs
+    computeOutputValues :: [L.Coin] -> [L.Coin]
+    computeOutputValues = inputsToOutputsWithFee fee numOfOutputs
       where numOfOutputs = 2
 
     computeUTxO = mkUTxOVariant txEnvNetworkId signingKey
@@ -148,23 +146,28 @@ generateTxPure ::
   -> Either TxGenError (Tx BabbageEra, FundQueue)
 generateTxPure TxEnvironment{..} inQueue
   = do
-      outValues <- runIdentity . runExceptT . withExcept TxGenError . computeOutputValues $ map getFundLovelace inputs
-      let (outputs, toFunds) = makeToUTxOList (repeat computeUTxO) outValues
       (tx, txId) <- generator inputs outputs
-      let outQueue = foldl' insertFund emptyFundQueue (toFunds txId)
+      let outQueue = List.foldl' insertFund emptyFundQueue (toFunds txId)
       pure (tx, outQueue)
   where
     inputs = toList inQueue
     TxFeeExplicit _ fee = txEnvFee
 
     generator :: TxGenerator BabbageEra
-    generator = genTx BabbageEra txEnvProtocolParams collateralFunds txEnvFee txEnvMetadata
+    generator =
+        case convertToLedgerProtocolParameters shelleyBasedEra txEnvProtocolParams of
+          Right ledgerParameters ->
+            genTx ShelleyBasedEraBabbage ledgerParameters collateralFunds txEnvFee txEnvMetadata
+          Left err -> \_ _ -> Left (ApiError err)
       where
         -- collateralFunds are needed for Plutus transactions
         collateralFunds :: (TxInsCollateral BabbageEra, [Fund])
         collateralFunds = (TxInsCollateralNone, [])
 
-    computeOutputValues :: Monad m => [Lovelace] -> ExceptT String m [Lovelace]
+    outValues = computeOutputValues $ map getFundCoin inputs
+    (outputs, toFunds) = makeToUTxOList (repeat computeUTxO) outValues
+
+    computeOutputValues :: [L.Coin] -> [L.Coin]
     computeOutputValues = inputsToOutputsWithFee fee numOfOutputs
       where numOfOutputs = 2
 

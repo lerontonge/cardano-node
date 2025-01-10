@@ -1,21 +1,27 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+
+
 
 {-# OPTIONS_GHC -Wno-orphans  #-}
 
 module Cardano.Node.Tracing.Tracers.Diffusion
   () where
 
+
 import           Cardano.Logging
 import           Data.Aeson (Value (String), (.=))
 import           Data.Text (pack)
+import           Formatting
 import           Network.Mux (MuxTrace (..), WithMuxBearer (..))
+import           Network.Mux.Types
 import           Network.TypedProtocol.Codec (AnyMessageAndAgency (..))
-
-import           Cardano.Node.Configuration.TopologyP2P (UseLedger (..))
 
 import qualified Data.List as List
 import qualified Ouroboros.Network.Diffusion as ND
@@ -23,20 +29,21 @@ import qualified Ouroboros.Network.NodeToNode as NtN
 import           Ouroboros.Network.PeerSelection.LedgerPeers (NumberOfPeers (..), PoolStake (..),
                    TraceLedgerPeers (..))
 import qualified Ouroboros.Network.Protocol.Handshake.Type as HS
+import Cardano.Node.Configuration.TopologyP2P ()
 
 
 --------------------------------------------------------------------------------
 -- Mux Tracer
 --------------------------------------------------------------------------------
 
-instance (LogFormatting peer, Show peer) =>
+instance (LogFormatting peer, LogFormatting MuxTrace) =>
     LogFormatting (WithMuxBearer peer MuxTrace) where
     forMachine dtal (WithMuxBearer b ev) =
-      mconcat [ "kind" .= String "MuxTrace"
+      mconcat [ "kind"   .= String "MuxTrace"
               , "bearer" .= forMachine dtal b
-              , "event" .= showT ev ]
-    forHuman (WithMuxBearer b ev) = "With mux bearer " <> showT b
-                                      <> ". " <> showT ev
+              , "event"  .= forMachine dtal ev ]
+    forHuman (WithMuxBearer b ev) = "With mux bearer " <> forHumanOrMachine b
+                                      <> ". " <> forHumanOrMachine ev
 
 instance MetaTrace tr => MetaTrace (WithMuxBearer peer tr) where
     namespaceFor (WithMuxBearer _peer obj) = (nsCast . namespaceFor) obj
@@ -52,6 +59,274 @@ instance MetaTrace tr => MetaTrace (WithMuxBearer peer tr) where
     documentFor ns = documentFor (nsCast ns :: Namespace tr)
     metricsDocFor ns = metricsDocFor (nsCast ns :: Namespace tr)
     allNamespaces = map nsCast (allNamespaces :: [Namespace tr])
+
+instance LogFormatting MuxTrace where
+    forMachine _dtal MuxTraceRecvHeaderStart = mconcat
+      [ "kind" .= String "MuxTraceRecvHeaderStart"
+      , "msg"  .= String "Bearer Receive Header Start"
+      ]
+    forMachine _dtal (MuxTraceRecvHeaderEnd MuxSDUHeader { mhTimestamp, mhNum, mhDir, mhLength }) = mconcat
+      [ "kind" .= String "MuxTraceRecvHeaderStart"
+      , "msg"  .=  String "Bearer Receive Header End"
+      , "timestamp" .= String (showTHex (unRemoteClockModel mhTimestamp))
+      , "miniProtocolNum" .= String (showT mhNum)
+      , "miniProtocolDir" .= String (showT mhDir)
+      , "length" .= String (showT mhLength)
+      ]
+    forMachine _dtal (MuxTraceRecvDeltaQObservation MuxSDUHeader { mhTimestamp, mhLength } ts) = mconcat
+      [ "kind" .= String "MuxTraceRecvDeltaQObservation"
+      , "msg"  .=  String "Bearer DeltaQ observation"
+      , "timeRemote" .=  String (showT ts)
+      , "timeLocal" .= String (showTHex (unRemoteClockModel mhTimestamp))
+      , "length" .= String (showT mhLength)
+      ]
+    forMachine _dtal (MuxTraceRecvDeltaQSample d sp so dqs dqvm dqvs estR sdud) = mconcat
+      [ "kind" .= String "MuxTraceRecvDeltaQSample"
+      , "msg"  .=  String "Bearer DeltaQ Sample"
+      , "duration" .=  String (showT d)
+      , "packets" .= String (showT sp)
+      , "sumBytes" .= String (showT so)
+      , "DeltaQ_S" .= String (showT dqs)
+      , "DeltaQ_VMean" .= String (showT dqvm)
+      , "DeltaQ_VVar" .= String (showT dqvs)
+      , "DeltaQ_estR" .= String (showT estR)
+      , "sizeDist" .= String (showT sdud)
+      ]
+    forMachine _dtal (MuxTraceRecvStart len) = mconcat
+      [ "kind" .= String "MuxTraceRecvStart"
+      , "msg"  .= String "Bearer Receive Start"
+      , "length" .= String (showT len)
+      ]
+    forMachine _dtal (MuxTraceRecvEnd len) = mconcat
+      [ "kind" .= String "MuxTraceRecvEnd"
+      , "msg"  .= String "Bearer Receive End"
+      , "length" .= String (showT len)
+      ]
+    forMachine _dtal (MuxTraceSendStart MuxSDUHeader { mhTimestamp, mhNum, mhDir, mhLength }) = mconcat
+      [ "kind" .= String "MuxTraceSendStart"
+      , "msg"  .= String "Bearer Send Start"
+      , "timestamp" .= String (showTHex (unRemoteClockModel mhTimestamp))
+      , "miniProtocolNum" .= String (showT mhNum)
+      , "miniProtocolDir" .= String (showT mhDir)
+      , "length" .= String (showT mhLength)
+      ]
+    forMachine _dtal MuxTraceSendEnd = mconcat
+      [ "kind" .= String "MuxTraceSendEnd"
+      , "msg"  .= String "Bearer Send End"
+      ]
+    forMachine _dtal (MuxTraceState new) = mconcat
+      [ "kind" .= String "MuxTraceState"
+      , "msg"  .= String "MuxState"
+      , "state" .= String (showT new)
+      ]
+    forMachine _dtal (MuxTraceCleanExit mid dir) = mconcat
+      [ "kind" .= String "MuxTraceCleanExit"
+      , "msg"  .= String "Miniprotocol terminated cleanly"
+      , "miniProtocolNum" .= String (showT mid)
+      , "miniProtocolDir" .= String (showT dir)
+      ]
+    forMachine _dtal (MuxTraceExceptionExit mid dir exc) = mconcat
+      [ "kind" .= String "MuxTraceExceptionExit"
+      , "msg"  .= String "Miniprotocol terminated with exception"
+      , "miniProtocolNum" .= String (showT mid)
+      , "miniProtocolDir" .= String (showT dir)
+      , "exception" .= String (showT exc)
+      ]
+    forMachine _dtal (MuxTraceChannelRecvStart mid) = mconcat
+      [ "kind" .= String "MuxTraceChannelRecvStart"
+      , "msg"  .= String "Channel Receive Start"
+      , "miniProtocolNum" .= String (showT mid)
+      ]
+    forMachine _dtal (MuxTraceChannelRecvEnd mid len) = mconcat
+      [ "kind" .= String "MuxTraceChannelRecvEnd"
+      , "msg"  .= String "Channel Receive End"
+      , "miniProtocolNum" .= String (showT mid)
+      , "length" .= String (showT len)
+      ]
+    forMachine _dtal (MuxTraceChannelSendStart mid len) = mconcat
+      [ "kind" .= String "MuxTraceChannelSendStart"
+      , "msg"  .= String "Channel Send Start"
+      , "miniProtocolNum" .= String (showT mid)
+      , "length" .= String (showT len)
+      ]
+    forMachine _dtal (MuxTraceChannelSendEnd mid) = mconcat
+      [ "kind" .= String "MuxTraceChannelSendEnd"
+      , "msg"  .= String "Channel Send End"
+      , "miniProtocolNum" .= String (showT mid)
+      ]
+    forMachine _dtal MuxTraceHandshakeStart = mconcat
+      [ "kind" .= String "MuxTraceHandshakeStart"
+      , "msg"  .= String "Handshake start"
+      ]
+    forMachine _dtal (MuxTraceHandshakeClientEnd duration) = mconcat
+      [ "kind" .= String "MuxTraceHandshakeClientEnd"
+      , "msg"  .= String "Handshake Client end"
+      , "duration" .= String (showT duration)
+      ]
+    forMachine _dtal MuxTraceHandshakeServerEnd = mconcat
+      [ "kind" .= String "MuxTraceHandshakeServerEnd"
+      , "msg"  .= String "Handshake Server end"
+      ]
+    forMachine dtal (MuxTraceHandshakeClientError e duration) = mconcat
+      [ "kind" .= String "MuxTraceHandshakeClientError"
+      , "msg"  .= String "Handshake Client Error"
+      , "duration" .= String (showT duration)
+      -- Client Error can include an error string from the peer which could be very large.
+      , "error" .= if dtal >= DDetailed
+                      then show e
+                      else take 256 $ show e
+      ]
+    forMachine dtal (MuxTraceHandshakeServerError e) = mconcat
+      [ "kind" .= String "MuxTraceHandshakeServerError"
+      , "msg"  .= String "Handshake Server Error"
+      , "error" .= if dtal >= DDetailed
+                      then show e
+                      else take 256 $ show e
+      ]
+    forMachine _dtal MuxTraceSDUReadTimeoutException = mconcat
+      [ "kind" .= String "MuxTraceSDUReadTimeoutException"
+      , "msg"  .= String "Timed out reading SDU"
+      ]
+    forMachine _dtal MuxTraceSDUWriteTimeoutException = mconcat
+      [ "kind" .= String "MuxTraceSDUWriteTimeoutException"
+      , "msg"  .= String "Timed out writing SDU"
+      ]
+    forMachine _dtal (MuxTraceStartEagerly mid dir) = mconcat
+      [ "kind" .= String "MuxTraceStartEagerly"
+      , "msg"  .= String "Eagerly started"
+      , "miniProtocolNum" .= String (showT mid)
+      , "miniProtocolDir" .= String (showT dir)
+      ]
+    forMachine _dtal (MuxTraceStartOnDemand mid dir) = mconcat
+      [ "kind" .= String "MuxTraceStartOnDemand"
+      , "msg"  .= String "Preparing to start"
+      , "miniProtocolNum" .= String (showT mid)
+      , "miniProtocolDir" .= String (showT dir)
+      ]
+    forMachine _dtal (MuxTraceStartedOnDemand mid dir) = mconcat
+      [ "kind" .= String "MuxTraceStartedOnDemand"
+      , "msg"  .= String "Started on demand"
+      , "miniProtocolNum" .= String (showT mid)
+      , "miniProtocolDir" .= String (showT dir)
+      ]
+    forMachine _dtal (MuxTraceTerminating mid dir) = mconcat
+      [ "kind" .= String "MuxTraceTerminating"
+      , "msg"  .= String "Terminating"
+      , "miniProtocolNum" .= String (showT mid)
+      , "miniProtocolDir" .= String (showT dir)
+      ]
+    forMachine _dtal MuxTraceStopping = mconcat
+      [ "kind" .= String "MuxTraceStopping"
+      , "msg"  .= String "Mux stopping"
+      ]
+    forMachine _dtal MuxTraceStopped = mconcat
+      [ "kind" .= String "MuxTraceStopped"
+      , "msg"  .= String "Mux stoppped"
+      ]
+#ifdef os_HOST_linux
+    forMachine _dtal (MuxTraceTCPInfo StructTCPInfo
+            { tcpi_snd_mss, tcpi_rcv_mss, tcpi_lost, tcpi_retrans
+            , tcpi_rtt, tcpi_rttvar, tcpi_snd_cwnd }
+            len) =
+      [ "kind" .= String "MuxTraceTCPInfo"
+      , "msg"  .= String "TCPInfo"
+      , "rtt"  .= String (show (fromIntegral tcpi_rtt :: Word))
+      , "rttvar" .= String (show (fromIntegral tcpi_rttvar :: Word))
+      , "snd_cwnd" .= String (show (fromIntegral tcpi_snd_cwnd :: Word))
+      , "snd_mss" .= String (show (fromIntegral tcpi_snd_mss :: Word))
+      , "rcv_mss" .= String (show (fromIntegral tcpi_rcv_mss :: Word))
+      , "lost" .= String (show (fromIntegral tcpi_lost :: Word))
+      , "retrans" .= String (show (fromIntegral tcpi_retrans :: Word))
+      , "length" .= String (showT len)
+      ]
+#else
+    forMachine _dtal (MuxTraceTCPInfo _ len) = mconcat
+      [ "kind" .= String "MuxTraceTCPInfo"
+      , "msg"  .= String "TCPInfo"
+      , "len"  .= String (showT len)
+      ]
+#endif
+
+    forHuman MuxTraceRecvHeaderStart =
+      "Bearer Receive Header Start"
+    forHuman (MuxTraceRecvHeaderEnd MuxSDUHeader { mhTimestamp, mhNum, mhDir, mhLength }) =
+      sformat ("Bearer Receive Header End: ts:" % prefixHex % "(" % shown % ") " % shown % " len " % int)
+        (unRemoteClockModel mhTimestamp) mhNum mhDir mhLength
+    forHuman (MuxTraceRecvDeltaQObservation MuxSDUHeader { mhTimestamp, mhLength } ts) =
+      sformat ("Bearer DeltaQ observation: remote ts" % int % " local ts " % shown % " length " % int)
+         (unRemoteClockModel mhTimestamp) ts mhLength
+    forHuman (MuxTraceRecvDeltaQSample d sp so dqs dqvm dqvs estR sdud) =
+      sformat ("Bearer DeltaQ Sample: duration " % fixed 3 % " packets " % int % " sumBytes "
+        % int % " DeltaQ_S " % fixed 3 % " DeltaQ_VMean " % fixed 3 % "DeltaQ_VVar " % fixed 3
+        % " DeltaQ_estR " % fixed 3 % " sizeDist " % string)
+        d sp so dqs dqvm dqvs estR sdud
+    forHuman (MuxTraceRecvStart len) =
+      sformat ("Bearer Receive Start: length " % int) len
+    forHuman (MuxTraceRecvEnd len) =
+      sformat ("Bearer Receive End: length " % int) len
+    forHuman (MuxTraceSendStart MuxSDUHeader { mhTimestamp, mhNum, mhDir, mhLength }) =
+      sformat ("Bearer Send Start: ts: " % prefixHex % " (" % shown % ") " % shown % " length " % int)
+        (unRemoteClockModel mhTimestamp) mhNum mhDir mhLength
+    forHuman MuxTraceSendEnd =
+      "Bearer Send End"
+    forHuman (MuxTraceState new) =
+      sformat ("State: " % shown) new
+    forHuman (MuxTraceCleanExit mid dir) =
+      sformat ("Miniprotocol (" % shown % ") " % shown % " terminated cleanly")
+      mid dir
+    forHuman (MuxTraceExceptionExit mid dir e) =
+      sformat ("Miniprotocol (" % shown % ") " % shown %
+        " terminated with exception " % shown) mid dir e
+    forHuman (MuxTraceChannelRecvStart mid) =
+      sformat ("Channel Receive Start on " % shown) mid
+    forHuman (MuxTraceChannelRecvEnd mid len) =
+      sformat ("Channel Receive End on (" % shown % ") " % int) mid len
+    forHuman (MuxTraceChannelSendStart mid len) =
+      sformat ("Channel Send Start on (" % shown % ") " % int) mid len
+    forHuman (MuxTraceChannelSendEnd mid) =
+      sformat ("Channel Send End on " % shown) mid
+    forHuman MuxTraceHandshakeStart =
+      "Handshake start"
+    forHuman (MuxTraceHandshakeClientEnd duration) =
+      sformat ("Handshake Client end, duration " % shown) duration
+    forHuman MuxTraceHandshakeServerEnd =
+      "Handshake Server end"
+    forHuman (MuxTraceHandshakeClientError e duration) =
+         -- Client Error can include an error string from the peer which could be very large.
+        sformat ("Handshake Client Error " % string % " duration " % shown)
+          (take 256 $ show e) duration
+    forHuman (MuxTraceHandshakeServerError e) =
+      sformat ("Handshake Server Error " % shown) e
+    forHuman MuxTraceSDUReadTimeoutException =
+      "Timed out reading SDU"
+    forHuman MuxTraceSDUWriteTimeoutException =
+      "Timed out writing SDU"
+    forHuman (MuxTraceStartEagerly mid dir) =
+      sformat ("Eagerly started (" % shown % ") in " % shown) mid dir
+    forHuman (MuxTraceStartOnDemand mid dir) =
+      sformat ("Preparing to start (" % shown % ") in " % shown) mid dir
+    forHuman (MuxTraceStartedOnDemand mid dir) =
+      sformat ("Started on demand (" % shown % ") in " % shown) mid dir
+    forHuman (MuxTraceTerminating mid dir) =
+      sformat ("Terminating (" % shown % ") in " % shown) mid dir
+    forHuman MuxTraceStopping = "Mux stopping"
+    forHuman MuxTraceStopped  = "Mux stoppped"
+#ifdef os_HOST_linux
+    forHuman (MuxTraceTCPInfo StructTCPInfo
+            { tcpi_snd_mss, tcpi_rcv_mss, tcpi_lost, tcpi_retrans
+            , tcpi_rtt, tcpi_rttvar, tcpi_snd_cwnd }
+            len) =
+      sformat ("TCPInfo rtt % int % " rttvar " % ínt % " cwnd " % int %
+               " smss " % int % " rmss " % int % " lost " % int %
+               " retrans " % int % " len " %int)
+              (fromIntegral tcpi_rtt :: Word) (fromIntegral tcpi_rttvar :: Word)
+              (fromIntegral tcpi_snd_cwnd :: Word) (fromIntegral tcpi_snd_mss :: Word)
+              (fromIntegral tcpi_rcv_mss :: Word) (fromIntegral tcpi_lost :: Word)
+              (fromIntegral tcpi_retrans :: Word)
+              len
+#else
+    forHuman (MuxTraceTCPInfo _ len) = sformat ("TCPInfo len " % int) len
+#endif
 
 instance MetaTrace MuxTrace where
     namespaceFor MuxTraceRecvHeaderStart {}       =
@@ -140,6 +415,8 @@ instance MetaTrace MuxTrace where
     severityFor (Namespace _ ["StartedOnDemand"]) _       = Just Debug
     severityFor (Namespace _ ["Terminating"]) _           = Just Debug
     severityFor (Namespace _ ["Shutdown"]) _              = Just Debug
+    severityFor (Namespace _ ["Stopping"]) _               = Just Debug
+    severityFor (Namespace _ ["Stopped"]) _               = Just Debug
     severityFor (Namespace _ ["TCPInfo"]) _               = Just Debug
     severityFor _ _ = Nothing
 
@@ -195,6 +472,10 @@ instance MetaTrace MuxTrace where
       "Started on demand."
     documentFor (Namespace _ ["Terminating"])           = Just
       "Terminating."
+    documentFor (Namespace _ ["Stopping"])              = Just
+      "Mux shutdown."
+    documentFor (Namespace _ ["Stopped"])              = Just
+      "Mux shutdown."
     documentFor (Namespace _ ["Shutdown"])              = Just
       "Mux shutdown."
     documentFor (Namespace _ ["TCPInfo"])               = Just
@@ -228,6 +509,8 @@ instance MetaTrace MuxTrace where
       , Namespace [] ["StartOnDemand"]
       , Namespace [] ["StartedOnDemand"]
       , Namespace [] ["Terminating"]
+      , Namespace [] ["Stopping"]
+      , Namespace [] ["Stopped"]
       , Namespace [] ["Shutdown"]
       , Namespace [] ["TCPInfo"]
       ]
@@ -479,32 +762,46 @@ instance MetaTrace (ND.DiffusionTracer ntnAddr ntcAddr) where
 --------------------------------------------------------------------------------
 
 instance LogFormatting TraceLedgerPeers where
-  forMachine _dtal (PickedPeer addr _ackStake stake) =
+  forMachine _dtal (PickedLedgerPeer addr _ackStake stake) =
     mconcat
-      [ "kind" .= String "PickedPeer"
+      [ "kind" .= String "PickedLedgerPeer"
       , "address" .= show addr
       , "relativeStake" .= (realToFrac (unPoolStake stake) :: Double)
       ]
-  forMachine _dtal (PickedPeers (NumberOfPeers n) addrs) =
+  forMachine _dtal (PickedLedgerPeers (NumberOfPeers n) addrs) =
     mconcat
-      [ "kind" .= String "PickedPeers"
+      [ "kind" .= String "PickedLedgerPeers"
       , "desiredCount" .= n
       , "count" .= List.length addrs
       , "addresses" .= show addrs
       ]
-  forMachine _dtal (FetchingNewLedgerState cnt) =
+  forMachine _dtal (PickedBigLedgerPeer addr _ackStake stake) =
+    mconcat
+      [ "kind" .= String "PickedBigLedgerPeer"
+      , "address" .= show addr
+      , "relativeStake" .= (realToFrac (unPoolStake stake) :: Double)
+      ]
+  forMachine _dtal (PickedBigLedgerPeers (NumberOfPeers n) addrs) =
+    mconcat
+      [ "kind" .= String "PickedBigLedgerPeers"
+      , "desiredCount" .= n
+      , "count" .= List.length addrs
+      , "addresses" .= show addrs
+      ]
+  forMachine _dtal (FetchingNewLedgerState cnt bigCnt) =
     mconcat
       [ "kind" .= String "FetchingNewLedgerState"
-      , "numberOfPools" .= cnt
+      , "numberOfLedgerPeers" .= cnt
+      , "numberOfBigLedgerPeers" .= bigCnt
       ]
   forMachine _dtal DisabledLedgerPeers =
     mconcat
       [ "kind" .= String "DisabledLedgerPeers"
       ]
-  forMachine _dtal (TraceUseLedgerAfter ula) =
+  forMachine _dtal (TraceUseLedgerPeers ulp) =
     mconcat
-      [ "kind" .= String "UseLedgerAfter"
-      , "useLedgerAfter" .= UseLedger ula
+      [ "kind" .= String "UseLedgerPeers"
+      , "useLedgerPeers" .= ulp
       ]
   forMachine _dtal WaitingOnRequest =
     mconcat
@@ -521,30 +818,73 @@ instance LogFormatting TraceLedgerPeers where
       , "numberOfPools" .= cnt
       , "ledgerStateAge" .= age
       ]
-  forMachine _dtal FallingBackToBootstrapPeers =
+  forMachine _dtal FallingBackToPublicRootPeers =
     mconcat
-      [ "kind" .= String "FallingBackToBootstrapPeers"
+      [ "kind" .= String "FallingBackToPublicRootPeers"
+      ]
+  forMachine _dtal (NotEnoughLedgerPeers (NumberOfPeers target) numOfLedgerPeers) =
+    mconcat
+      [ "kind" .= String "NotEnoughLedgerPeers"
+      , "target" .= target
+      , "numOfLedgerPeers" .= numOfLedgerPeers
+      ]
+  forMachine _dtal (NotEnoughBigLedgerPeers (NumberOfPeers target) numOfBigLedgerPeers) =
+    mconcat
+      [ "kind" .= String "NotEnoughBigLedgerPeers"
+      , "target" .= target
+      , "numOfBigLedgerPeers" .= numOfBigLedgerPeers
+      ]
+  forMachine _dtal (TraceLedgerPeersDomains daps) =
+    mconcat
+      [ "kind" .= String "TraceLedgerPeersDomains"
+      , "domainAccessPoints" .= daps
+      ]
+  forMachine _dtal (TraceLedgerPeersResult dap ips) =
+    mconcat
+      [ "kind" .= String "TraceLedgerPeersResult"
+      , "domainAccessPoint" .= show dap
+      , "ips" .= map show ips
+      ]
+  forMachine _dtal (TraceLedgerPeersFailure dap reason) =
+    mconcat
+      [ "kind" .= String "TraceLedgerPeersFailure"
+      , "domainAccessPoint" .= show dap
+      , "error" .= show reason
       ]
 
 instance MetaTrace TraceLedgerPeers where
-    namespaceFor PickedPeer {} =
-      Namespace [] ["PickedPeer"]
-    namespaceFor PickedPeers {} =
-      Namespace [] ["PickedPeers"]
+    namespaceFor PickedLedgerPeer {} =
+      Namespace [] ["PickedLedgerPeer"]
+    namespaceFor PickedLedgerPeers {} =
+      Namespace [] ["PickedLedgerPeers"]
+    namespaceFor PickedBigLedgerPeer {} =
+      Namespace [] ["PickedBigLedgerPeer"]
+    namespaceFor PickedBigLedgerPeers {} =
+      Namespace [] ["PickedBigLedgerPeers"]
     namespaceFor FetchingNewLedgerState {} =
       Namespace [] ["FetchingNewLedgerState"]
     namespaceFor DisabledLedgerPeers {} =
       Namespace [] ["DisabledLedgerPeers"]
-    namespaceFor TraceUseLedgerAfter {} =
-      Namespace [] ["TraceUseLedgerAfter"]
+    namespaceFor TraceUseLedgerPeers {} =
+      Namespace [] ["TraceUseLedgerPeers"]
     namespaceFor WaitingOnRequest {} =
       Namespace [] ["WaitingOnRequest"]
     namespaceFor RequestForPeers {} =
       Namespace [] ["RequestForPeers"]
     namespaceFor ReusingLedgerState {} =
       Namespace [] ["ReusingLedgerState"]
-    namespaceFor FallingBackToBootstrapPeers {} =
-      Namespace [] ["FallingBackToBootstrapPeers"]
+    namespaceFor FallingBackToPublicRootPeers {} =
+      Namespace [] ["FallingBackToPublicRootPeers"]
+    namespaceFor NotEnoughLedgerPeers {} =
+      Namespace [] ["NotEnoughLedgerPeers"]
+    namespaceFor NotEnoughBigLedgerPeers {} =
+      Namespace [] ["NotEnoughBigLedgerPeers"]
+    namespaceFor TraceLedgerPeersDomains {} =
+      Namespace [] ["TraceLedgerPeersDomains"]
+    namespaceFor TraceLedgerPeersResult {} =
+      Namespace [] ["TraceLedgerPeersResult"]
+    namespaceFor TraceLedgerPeersFailure {} =
+      Namespace [] ["TraceLedgerPeersFailure"]
 
     severityFor (Namespace _ ["PickedPeer"]) _ = Just Debug
     severityFor (Namespace _ ["PickedPeers"]) _ = Just Info
@@ -554,7 +894,12 @@ instance MetaTrace TraceLedgerPeers where
     severityFor (Namespace _ ["WaitingOnRequest"]) _ = Just Debug
     severityFor (Namespace _ ["RequestForPeers"]) _ = Just Debug
     severityFor (Namespace _ ["ReusingLedgerState"]) _ = Just Debug
-    severityFor (Namespace _ ["FallingBackToBootstrapPeers"]) _ = Just Info
+    severityFor (Namespace _ ["FallingBackToPublicRootPeers"]) _ = Just Info
+    severityFor (Namespace _ ["NotEnoughLedgerPeers"]) _ = Just Warning
+    severityFor (Namespace _ ["NotEnoughBigLedgerPeers"]) _ = Just Warning
+    severityFor (Namespace _ ["TraceLedgerPeersDomains"]) _ = Just Debug
+    severityFor (Namespace _ ["TraceLedgerPeersResult"]) _ = Just Debug
+    severityFor (Namespace _ ["TraceLedgerPeersFailure"]) _ = Just Debug
     severityFor _ _ = Nothing
 
     documentFor (Namespace _ ["PickedPeer"]) = Just
@@ -575,7 +920,13 @@ instance MetaTrace TraceLedgerPeers where
       "RequestForPeers (NumberOfPeers 1)"
     documentFor (Namespace _ ["ReusingLedgerState"]) = Just
       ""
-    documentFor (Namespace _ ["FallingBackToBootstrapPeers"]) = Just
+    documentFor (Namespace _ ["FallingBackToPublicRootPeers"]) = Just
+      ""
+    documentFor (Namespace _ ["TraceLedgerPeersDomains"]) = Just
+      ""
+    documentFor (Namespace _ ["TraceLedgerPeersResult"]) = Just
+      ""
+    documentFor (Namespace _ ["TraceLedgerPeersFailure"]) = Just
       ""
     documentFor _ = Nothing
 
@@ -588,5 +939,8 @@ instance MetaTrace TraceLedgerPeers where
       , Namespace [] ["WaitingOnRequest"]
       , Namespace [] ["RequestForPeers"]
       , Namespace [] ["ReusingLedgerState"]
-      , Namespace [] ["FallingBackToBootstrapPeers"]
+      , Namespace [] ["FallingBackToPublicRootPeers"]
+      , Namespace [] ["TraceLedgerPeersDomains"]
+      , Namespace [] ["TraceLedgerPeersResult"]
+      , Namespace [] ["TraceLedgerPeersFailure"]
       ]

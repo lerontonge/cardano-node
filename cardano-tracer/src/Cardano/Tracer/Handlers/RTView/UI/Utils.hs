@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes #-}
@@ -48,7 +49,12 @@ module Cardano.Tracer.Handlers.RTView.UI.Utils
   , hiddenState
   , webPageIsOpened
   , webPageIsClosed
+  , on_
   ) where
+
+import           Cardano.Tracer.Environment
+import           Cardano.Tracer.Handlers.RTView.State.Displayed
+import           Cardano.Tracer.Types
 
 import           Control.Concurrent.STM (atomically)
 import           Control.Concurrent.STM.TVar (TVar, modifyTVar')
@@ -57,15 +63,12 @@ import           Control.Monad.Extra (whenJustM)
 import           Data.String.QQ
 import           Data.Text (Text, unpack)
 import qualified Data.Text as T
+
 import qualified Foreign.JavaScript as JS
 import qualified Foreign.RemotePtr as Foreign
 import qualified Graphics.UI.Threepenny as UI
 import           Graphics.UI.Threepenny.Core
 import           Graphics.UI.Threepenny.JQuery (Easing (..), fadeIn, fadeOut)
-
-import           Cardano.Tracer.Environment
-import           Cardano.Tracer.Handlers.RTView.State.Displayed
-import           Cardano.Tracer.Types
 
 (##) :: UI Element -> String -> UI Element
 (##) el anId = el # set UI.id_ anId
@@ -301,9 +304,13 @@ exportErrorsToJSONFile nodesErrors nodeId nodeName =
     downloadJSONFile fileName errorsAsJSON
 -}
 
-webPageIsOpened, webPageIsClosed :: TracerEnv -> UI ()
-webPageIsOpened TracerEnv{teRTViewPageOpened} = setFlag teRTViewPageOpened True
-webPageIsClosed TracerEnv{teRTViewPageOpened} = setFlag teRTViewPageOpened False
+webPageIsOpened, webPageIsClosed :: TracerEnvRTView -> UI ()
+webPageIsOpened TracerEnvRTView{teRTViewPageOpened} = setFlag teRTViewPageOpened True
+webPageIsClosed TracerEnvRTView{teRTViewPageOpened} = setFlag teRTViewPageOpened False
 
 setFlag :: TVar Bool -> Bool -> UI ()
 setFlag flag state = liftIO . atomically . modifyTVar' flag $ const state
+
+-- | A version of @on@ that ignores the result of the event.
+on_ :: (element -> Event a) -> element -> UI void -> UI ()
+on_ event el action = on event el do const action

@@ -15,25 +15,12 @@ module Cardano.Node.Protocol.Cardano
   , CardanoProtocolInstantiationError(..)
   ) where
 
-import           Prelude
-
-import           Control.Monad.Trans.Except (ExceptT)
-import           Control.Monad.Trans.Except.Extra (firstExceptT)
-
-import           Ouroboros.Consensus.Cardano
-import qualified Ouroboros.Consensus.Cardano as Consensus
-import qualified Ouroboros.Consensus.Cardano.CanHardFork as Consensus
-import           Ouroboros.Consensus.Cardano.Condense ()
-import           Ouroboros.Consensus.HardFork.Combinator.Condense ()
-import qualified Ouroboros.Consensus.Mempool.Capacity as TxLimits
-import qualified Ouroboros.Consensus.Shelley.Node.Praos as Praos
-
 import           Cardano.Api
 import           Cardano.Api.Byron as Byron
-import qualified Cardano.Chain.Update as Update
 
+import qualified Cardano.Chain.Update as Update
+import qualified Cardano.Ledger.Api.Transition as Ledger
 import           Cardano.Ledger.BaseTypes (natVersion)
-import           Cardano.Ledger.Shelley.Translation (emptyFromByronTranslationContext)
 import qualified Cardano.Node.Protocol.Alonzo as Alonzo
 import qualified Cardano.Node.Protocol.Byron as Byron
 import qualified Cardano.Node.Protocol.Conway as Conway
@@ -42,6 +29,15 @@ import           Cardano.Node.Protocol.Types
 import           Cardano.Node.Types
 import           Cardano.Tracing.OrphanInstances.Byron ()
 import           Cardano.Tracing.OrphanInstances.Shelley ()
+import           Ouroboros.Consensus.Cardano
+import qualified Ouroboros.Consensus.Cardano as Consensus
+import qualified Ouroboros.Consensus.Cardano.CanHardFork as Consensus
+import           Ouroboros.Consensus.Cardano.Condense ()
+import qualified Ouroboros.Consensus.Cardano.Node as Consensus
+import           Ouroboros.Consensus.Config (emptyCheckpointsMap)
+import           Ouroboros.Consensus.HardFork.Combinator.Condense ()
+
+import           Prelude
 
 ------------------------------------------------------------------------------
 -- Real Cardano protocol
@@ -88,8 +84,7 @@ mkSomeConsensusProtocolCardano NodeByronProtocolConfiguration {
                              npcConwayGenesisFile,
                              npcConwayGenesisFileHash
                            }
-                           NodeHardForkProtocolConfiguration {
-                            npcExperimentalHardForksEnabled,
+                           npc@NodeHardForkProtocolConfiguration {
                             -- During testing of the Alonzo era, we conditionally declared that we
                             -- knew about the Alonzo era. We do so only when a config option for
                             -- testing development/unstable eras is used. This lets us include
@@ -126,22 +121,28 @@ mkSomeConsensusProtocolCardano NodeByronProtocolConfiguration {
 
     (alonzoGenesis, _alonzoGenesisHash) <-
       firstExceptT CardanoProtocolInstantiationAlonzoGenesisReadError $
-        Alonzo.readGenesis npcAlonzoGenesisFile
-                           npcAlonzoGenesisFileHash
+        case npcTestStartingEra npc of
+          Nothing ->
+            Alonzo.readGenesis Nothing
+                               npcAlonzoGenesisFile
+                               npcAlonzoGenesisFileHash
+          Just (AnyShelleyBasedEra sbe) -> do
+            Alonzo.readGenesis (Just $ toCardanoEra sbe)
+                               npcAlonzoGenesisFile
+                               npcAlonzoGenesisFileHash
 
     (conwayGenesis, _conwayGenesisHash) <-
       firstExceptT CardanoProtocolInstantiationConwayGenesisReadError $
         Conway.readGenesis npcConwayGenesisFile
-                           npcConwayGenesisFileHash
+                                npcConwayGenesisFileHash
 
     shelleyLeaderCredentials <-
       firstExceptT CardanoProtocolInstantiationPraosLeaderCredentialsError $
         Shelley.readLeaderCredentials files
 
-    --TODO: all these protocol versions below are confusing and unnecessary.
-    -- It could and should all be automated and these config entries eliminated.
     return $!
-      SomeConsensusProtocol CardanoBlockType $ ProtocolInfoArgsCardano
+      SomeConsensusProtocol CardanoBlockType $ ProtocolInfoArgsCardano $ Consensus.CardanoProtocolParams {
+        Consensus.byronProtocolParams =
         Consensus.ProtocolParamsByron {
           byronGenesis = byronGenesis,
           byronPbftSignatureThreshold =
@@ -162,86 +163,24 @@ mkSomeConsensusProtocolCardano NodeByronProtocolConfiguration {
               npcByronSupportedProtocolVersionAlt,
           byronSoftwareVersion = Byron.softwareVersion,
           byronLeaderCredentials =
-            byronLeaderCredentials,
-          byronMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
+            byronLeaderCredentials
         }
+      , Consensus.shelleyBasedProtocolParams =
         Consensus.ProtocolParamsShelleyBased {
-          shelleyBasedGenesis           = shelleyGenesis,
           shelleyBasedInitialNonce      = Shelley.genesisHashToPraosNonce
                                             shelleyGenesisHash,
           shelleyBasedLeaderCredentials = shelleyLeaderCredentials
         }
-        Consensus.ProtocolParamsShelley {
-          -- This is /not/ the Shelley protocol version. It is the protocol
-          -- version that this node will declare that it understands, when it
-          -- is in the Shelley era. That is, it is the version of protocol
-          -- /after/ Shelley, i.e. Allegra.
-          shelleyProtVer =
-            ProtVer (natVersion @3) 0,
-          shelleyMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
-        }
-        Consensus.ProtocolParamsAllegra {
-          -- This is /not/ the Allegra protocol version. It is the protocol
-          -- version that this node will declare that it understands, when it
-          -- is in the Allegra era. That is, it is the version of protocol
-          -- /after/ Allegra, i.e. Mary.
-          allegraProtVer =
-            ProtVer (natVersion @4) 0,
-          allegraMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
-        }
-        Consensus.ProtocolParamsMary {
-          -- This is /not/ the Mary protocol version. It is the protocol
-          -- version that this node will declare that it understands, when it
-          -- is in the Mary era. That is, it is the version of protocol
-          -- /after/ Mary, i.e. Alonzo.
-          maryProtVer = ProtVer (natVersion @5) 0,
-          maryMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
-        }
-        Consensus.ProtocolParamsAlonzo {
-          -- This is /not/ the Alonzo protocol version. It is the protocol
-          -- version that this node will declare that it understands, when it
-          -- is in the Alonzo era. That is, it is the version of protocol
-          -- /after/ Alonzo, i.e. Babbage.
-          -- NOTE:
-          -- We are not actually transitioning to version 7.2,
-          -- this is a HACK so that we can distinguish between others
-          -- versions of the node that are broadcasting major version 7.
-          -- We intentionally broadcast 7.0 starting in Babbage.
-          alonzoProtVer = ProtVer (natVersion @7) 2,
-          alonzoMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
-        }
-        Praos.ProtocolParamsBabbage {
-          -- This is /not/ the Babbage protocol version. It is the protocol
-          -- version that this node will declare that it understands, when it
-          -- is in the Babbage era. Since Babbage is currently the last known
-          -- protocol version then this is also the Babbage protocol version.
-          Praos.babbageProtVer =
-            if npcExperimentalHardForksEnabled
-              then ProtVer (natVersion @9) 0
-              else ProtVer (natVersion @8) 0,
-          Praos.babbageMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
-        }
-        Praos.ProtocolParamsConway {
-          -- This is /not/ the Babbage protocol version. It is the protocol
-          -- version that this node will declare that it understands, when it
-          -- is in the Babbage era. Since Babbage is currently the last known
-          -- protocol version then this is also the Babbage protocol version.
-          Praos.conwayProtVer = ProtVer (natVersion @9) 0,
-          Praos.conwayMaxTxCapacityOverrides =
-            TxLimits.mkOverrides TxLimits.noOverridesMeasure
-        }
-        -- ProtocolParamsTransition specifies the parameters needed to transition between two eras
-        -- The comments below also apply for the Shelley -> Allegra and Allegra -> Mary hard forks.
-        -- Byron to Shelley hard fork parameters
-        Consensus.ProtocolTransitionParamsShelleyBased {
-          transitionTranslationContext = emptyFromByronTranslationContext,
-          transitionTrigger =
+      , Consensus.cardanoProtocolVersion = ProtVer (natVersion @10) 0
+        -- The remaining arguments specify the parameters needed to transition between two eras
+      , Consensus.cardanoLedgerTransitionConfig =
+          Ledger.mkLatestTransitionConfig
+            shelleyGenesis
+            alonzoGenesis
+            conwayGenesis
+      , Consensus.cardanoHardForkTriggers =
+        Consensus.CardanoHardForkTriggers' {
+          triggerHardForkShelley =
             -- What will trigger the Byron -> Shelley hard fork?
             case npcTestShelleyHardForkAtEpoch of
 
@@ -257,7 +196,8 @@ mkSomeConsensusProtocolCardano NodeByronProtocolConfiguration {
                -- Version 6 is Alonzo (intra era hardfork)
                -- Version 7 is Babbage
                -- Version 8 is Babbage (intra era hardfork)
-               -- Version 9 is Conway
+               -- Version 9 is Conway (bootstrap era)
+               -- Version 10 is Conway + 1
                --
                -- But we also provide an override to allow for simpler test setups
                -- such as triggering at the 0 -> 1 transition .
@@ -268,54 +208,35 @@ mkSomeConsensusProtocolCardano NodeByronProtocolConfiguration {
                -- Alternatively, for testing we can transition at a specific epoch.
                --
                Just epochNo -> Consensus.TriggerHardForkAtEpoch epochNo
-        }
-        -- Shelley to Allegra hard fork parameters
-        Consensus.ProtocolTransitionParamsShelleyBased {
-          transitionTranslationContext = (),
-          transitionTrigger =
+        , triggerHardForkAllegra =
             case npcTestAllegraHardForkAtEpoch of
                Nothing -> Consensus.TriggerHardForkAtVersion
                             (maybe 3 fromIntegral npcTestAllegraHardForkAtVersion)
                Just epochNo -> Consensus.TriggerHardForkAtEpoch epochNo
-        }
-        -- Allegra to Mary hard fork parameters
-        Consensus.ProtocolTransitionParamsShelleyBased {
-          transitionTranslationContext = (),
-          transitionTrigger =
+        , triggerHardForkMary =
             case npcTestMaryHardForkAtEpoch of
                Nothing -> Consensus.TriggerHardForkAtVersion
                             (maybe 4 fromIntegral npcTestMaryHardForkAtVersion)
                Just epochNo -> Consensus.TriggerHardForkAtEpoch epochNo
-        }
-        -- Mary to Alonzo hard fork parameters
-        Consensus.ProtocolTransitionParamsShelleyBased {
-          transitionTranslationContext = alonzoGenesis,
-          transitionTrigger =
+        , triggerHardForkAlonzo =
             case npcTestAlonzoHardForkAtEpoch of
                Nothing -> Consensus.TriggerHardForkAtVersion
                             (maybe 5 fromIntegral npcTestAlonzoHardForkAtVersion)
                Just epochNo -> Consensus.TriggerHardForkAtEpoch epochNo
-        }
-        -- Alonzo to Babbage hard fork parameters
-        Consensus.ProtocolTransitionParamsShelleyBased {
-          transitionTranslationContext = (),
-          transitionTrigger =
+        , triggerHardForkBabbage =
              case npcTestBabbageHardForkAtEpoch of
                 Nothing -> Consensus.TriggerHardForkAtVersion
                              (maybe 7 fromIntegral npcTestBabbageHardForkAtVersion)
                 Just epochNo -> Consensus.TriggerHardForkAtEpoch epochNo
-
-        }
-        -- Babbage to Conway hard fork parameters
-        Consensus.ProtocolTransitionParamsShelleyBased {
-          transitionTranslationContext = conwayGenesis,
-          transitionTrigger =
+        , triggerHardForkConway =
              case npcTestConwayHardForkAtEpoch of
                 Nothing -> Consensus.TriggerHardForkAtVersion
                              (maybe 9 fromIntegral npcTestConwayHardForkAtVersion)
                 Just epochNo -> Consensus.TriggerHardForkAtEpoch epochNo
-
         }
+       -- TODO: once https://github.com/IntersectMBO/cardano-node/issues/5730 is implemented 'emptyCheckpointsMap' needs to be replaced with the checkpoints map read from a configuration file.
+      , Consensus.cardanoCheckpoints = emptyCheckpointsMap
+      }
 
         ----------------------------------------------------------------------
         -- WARNING When adding new entries above, be aware that if there is an
@@ -347,15 +268,15 @@ data CardanoProtocolInstantiationError =
   deriving Show
 
 instance Error CardanoProtocolInstantiationError where
-  displayError (CardanoProtocolInstantiationErrorByron err) =
-    displayError err
-  displayError (CardanoProtocolInstantiationShelleyGenesisReadError err) =
-    "Shelley related: " <> displayError err
-  displayError (CardanoProtocolInstantiationAlonzoGenesisReadError err) =
-    "Alonzo related: " <> displayError err
-  displayError (CardanoProtocolInstantiationConwayGenesisReadError err) =
-    "Conway related : " <> displayError err
-  displayError (CardanoProtocolInstantiationPraosLeaderCredentialsError err) =
-    displayError err
-  displayError (CardanoProtocolInstantiationErrorAlonzo err) =
-    displayError err
+  prettyError (CardanoProtocolInstantiationErrorByron err) =
+    prettyError err
+  prettyError (CardanoProtocolInstantiationShelleyGenesisReadError err) =
+    "Shelley related: " <> prettyError err
+  prettyError (CardanoProtocolInstantiationAlonzoGenesisReadError err) =
+    "Alonzo related: " <> prettyError err
+  prettyError (CardanoProtocolInstantiationConwayGenesisReadError err) =
+    "Conway related : " <> prettyError err
+  prettyError (CardanoProtocolInstantiationPraosLeaderCredentialsError err) =
+    prettyError err
+  prettyError (CardanoProtocolInstantiationErrorAlonzo err) =
+    prettyError err

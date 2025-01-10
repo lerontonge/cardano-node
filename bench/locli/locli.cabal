@@ -1,23 +1,25 @@
 cabal-version: 3.0
 
 name:                   locli
-version:                1.29
+version:                2.0
 synopsis:               Cardano log analysis CLI
 description:            Cardano log analysis CLI.
 category:               Cardano,
                         Logging,
-copyright:              2021-2023 Input Output Global Inc (IOG).
+copyright:              2021-2023 Input Output Global Inc (IOG), 2023-2024 Intersect.
 author:                 IOHK
 maintainer:             operations@iohk.io
 license:                Apache-2.0
 license-files:          LICENSE
                         NOTICE
+extra-doc-files:        CHANGELOG.md
 build-type:             Simple
 
 common project-config
   default-language:     Haskell2010
   default-extensions:   BangPatterns
                         BlockArguments
+                        DataKinds
                         DeriveGeneric
                         DerivingStrategies
                         DerivingVia
@@ -38,7 +40,6 @@ common project-config
                         TupleSections
                         TypeApplications
                         TypeFamilies
-                        TypeInType
                         ViewPatterns
 
   ghc-options:          -Wall
@@ -49,7 +50,10 @@ common project-config
                         -Wcompat
                         -Wno-all-missed-specialisations
 
-  build-depends:        base >= 4.14 && < 4.17,
+  if impl(ghc >= 9.8)
+    ghc-options:        -Wno-x-partial
+
+  build-depends:        base >= 4.14 && < 5,
 
   if os(windows)
     buildable: False
@@ -88,20 +92,20 @@ library
                         Cardano.Org
                         Cardano.Render
 
+                        Cardano.Unlog.BackendDB
+                        Cardano.Unlog.BackendFile
                         Cardano.Unlog.LogObject
+                        Cardano.Unlog.LogObjectDB
                         Cardano.Unlog.Resources
 
   other-modules:        Paths_locli
   autogen-modules:      Paths_locli
 
   build-depends:        aeson
-                      , Histogram
                       , aeson-pretty
                       , async
-                      , attoparsec
-                      , attoparsec-iso8601
                       , bytestring
-                      , cardano-git-rev
+                      , cardano-git-rev ^>= 0.2.2
                       , cardano-ledger-core
                       , cardano-prelude
                       , cardano-slotting
@@ -110,25 +114,17 @@ library
                       , directory
                       , ede
                       , extra
-                      , file-embed
                       , filepath
                       , fingertree
-                      , ghc
-                      , gnuplot
-                      , iohk-monitoring
-                      , optparse-applicative-fork
-                      , optparse-generic
+                      , hashable
+                      , optparse-applicative-fork >= 0.18.1
                       , ouroboros-consensus
-                      -- for Data.SOP.Strict:
-                      , ouroboros-network ^>= 0.8.1.0
-                      , ouroboros-network-api
-                      , process
-                      , quiet
-                      , scientific
+                      , ouroboros-network-api ^>= 0.10
+                      , sop-core
                       , split
+                      , sqlite-easy >= 1.1.0.1
                       , statistics
-                      , system-filepath
-                      , template-haskell
+                      , strict-sop-core
                       , text
                       , text-short
                       , time
@@ -137,10 +133,8 @@ library
                       , transformers-except
                       , unix
                       , unordered-containers
-                      , utf8-string
                       , vector
                       , witherable
-                      , cardano-strict-containers ^>= 0.1
 
 executable locli
   import:               project-config
@@ -148,9 +142,8 @@ executable locli
   hs-source-dirs:       app
   main-is:              locli.hs
   ghc-options:          -threaded
-                        -Wall
                         -rtsopts
-                        "-with-rtsopts=-T -N7 -A2m -qb -H64m"
+                        "-with-rtsopts=-T -N7 -A2m -c -H64m"
 
   build-depends:        aeson
                       , cardano-prelude
@@ -161,20 +154,45 @@ executable locli
                       , transformers
                       , transformers-except
 
+executable locli-quick
+  import:               project-config
+
+  hs-source-dirs:       app
+  main-is:              locli-quick.hs
+  ghc-options:          -threaded
+                        -rtsopts
+                        "-with-rtsopts=-T -N7 -A2m -c -H64m"
+
+  build-depends:        locli
+                      , aeson
+                      , async
+                      , bytestring
+                      , containers
+                      , cardano-api
+                      , extra
+                      , split
+                      , text
+                      , text-short
+                      , time
+                      , trace-resources
+                      , sqlite-easy >= 1.1.0.1
+                      , unordered-containers
+
 test-suite test-locli
   import:               project-config
 
   hs-source-dirs:       test
   main-is:              test-locli.hs
   type:                 exitcode-stdio-1.0
-  ghc-options:          -threaded -rtsopts -with-rtsopts=-N -with-rtsopts=-T
+  ghc-options:          -threaded -rtsopts "-with-rtsopts=-N -T"
 
   build-depends:        cardano-prelude
                       , containers
                       , hedgehog
-                      , hedgehog-extras ^>= 0.4
+                      , hedgehog-extras ^>= 0.6.4
                       , locli
                       , text
 
   other-modules:        Test.Analysis.CDF
+                        Test.Unlog.LogObjectDB
                         Test.Unlog.Org

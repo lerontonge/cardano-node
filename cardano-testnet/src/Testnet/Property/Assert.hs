@@ -1,48 +1,62 @@
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE NumericUnderscores #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
-
-{- HLINT ignore "Redundant return" -}
+{-# LANGUAGE TypeOperators #-}
 
 module Testnet.Property.Assert
   ( assertByDeadlineIOCustom
   , readJsonLines
   , assertChainExtended
   , getRelevantSlots
+  , assertExpectedSposInLedgerState
+  , assertErasEqual
   ) where
+
+
+import           Cardano.Api.Shelley hiding (Value)
 
 import           Prelude hiding (lines)
 
 import qualified Control.Concurrent as IO
 import           Control.Monad
-import           Control.Monad.IO.Class (MonadIO)
+import           Control.Monad.Catch (MonadCatch)
 import           Control.Monad.Trans.Reader (ReaderT)
 import           Control.Monad.Trans.Resource (ResourceT)
 import           Data.Aeson (FromJSON (..), Value, (.:))
-import           Data.Text (Text)
-import           Data.Word (Word8)
-import           GHC.Stack (HasCallStack)
-import qualified GHC.Stack as GHC
-import           Hedgehog (MonadTest)
-import           Hedgehog.Extras.Internal.Test.Integration (IntegrationState)
-
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.List as L
 import           Data.Maybe (mapMaybe)
 import qualified Data.Maybe as Maybe
+import           Data.Set (Set)
+import qualified Data.Set as Set
+import           Data.Text (Text)
 import qualified Data.Time.Clock as DTC
+import           Data.Type.Equality
+import           Data.Word (Word8)
+import           GHC.Stack as GHC
+
+import           Testnet.Process.Run
+import           Testnet.Start.Types
+
+import           Hedgehog (MonadTest)
 import qualified Hedgehog as H
+import           Hedgehog.Extras.Internal.Test.Integration (IntegrationState)
 import qualified Hedgehog.Extras.Stock.IO.File as IO
+import           Hedgehog.Extras.Test.Base (failMessage)
 import qualified Hedgehog.Extras.Test.Base as H
-import           Testnet.Runtime (NodeLoggingFormat (..))
+import qualified Hedgehog.Extras.Test.File as H
+import           Hedgehog.Extras.Test.Process (ExecConfig)
 
 newlineBytes :: Word8
 newlineBytes = 10
 
 readJsonLines :: (MonadTest m, MonadIO m, HasCallStack) => FilePath -> m [Value]
-readJsonLines fp = mapMaybe (Aeson.decode @Value) . LBS.split newlineBytes <$> H.evalIO (LBS.readFile fp)
+readJsonLines fp = withFrozenCallStack $ mapMaybe (Aeson.decode @Value) . LBS.split newlineBytes <$> H.evalIO (LBS.readFile fp)
 
 fileJsonGrep :: FilePath -> (Value -> Bool) -> IO Bool
 fileJsonGrep fp f = do
@@ -53,24 +67,52 @@ fileJsonGrep fp f = do
 assertByDeadlineIOCustom
   :: (MonadTest m, MonadIO m, HasCallStack)
   => String -> DTC.UTCTime -> IO Bool -> m ()
-assertByDeadlineIOCustom str deadline f = GHC.withFrozenCallStack $ do
+assertByDeadlineIOCustom str deadline f = withFrozenCallStack $ do
   success <- H.evalIO f
   unless success $ do
     currentTime <- H.evalIO DTC.getCurrentTime
     if currentTime < deadline
       then do
-        H.evalIO $ IO.threadDelay 1000000
+        H.evalIO $ IO.threadDelay 1_000_000
         assertByDeadlineIOCustom str deadline f
       else do
         H.annotateShow currentTime
         H.failMessage GHC.callStack $ "Condition not met by deadline: " <> str
 
-assertChainExtended :: (H.MonadTest m, MonadIO m)
+-- | A sanity check that confirms that there are the expected number of SPOs in the ledger state
+assertExpectedSposInLedgerState
+  :: (MonadTest m, MonadCatch m, MonadIO m, HasCallStack)
+  => FilePath -- ^ Stake pools query output filepath
+  -> NumPools
+  -> ExecConfig
+  -> m ()
+assertExpectedSposInLedgerState output (NumPools numExpectedPools) execConfig = withFrozenCallStack $ do
+  void $ execCli' execConfig
+      [ "latest", "query", "stake-pools"
+      , "--out-file", output
+      ]
+
+  poolSet <- H.evalEither =<< H.evalIO (Aeson.eitherDecodeFileStrict' @(Set PoolId) output)
+
+  H.cat output
+
+  let numPoolsInLedgerState = Set.size poolSet
+  unless (numPoolsInLedgerState == numExpectedPools) $
+    failMessage GHC.callStack
+      $ unlines [ "Expected number of stake pools not found in ledger state"
+                , "Expected: ", show numExpectedPools
+                , "Actual: ", show numPoolsInLedgerState
+                ]
+
+assertChainExtended
+  :: HasCallStack
+  => H.MonadTest m
+  => MonadIO m
   => DTC.UTCTime
   -> NodeLoggingFormat
   -> FilePath
   -> m ()
-assertChainExtended deadline nodeLoggingFormat nodeStdoutFile =
+assertChainExtended deadline nodeLoggingFormat nodeStdoutFile = withFrozenCallStack $
   assertByDeadlineIOCustom "Chain not extended" deadline $ do
     case nodeLoggingFormat of
       NodeLoggingFormatAsText -> IO.fileContains "Chain extended, new tip" nodeStdoutFile
@@ -130,3 +172,18 @@ getRelevantSlots poolNodeStdoutFile slotLowerBound = do
     notLeaderSlots
 
   pure (relevantLeaderSlots, relevantNotLeaderSlots)
+
+assertErasEqual
+  :: HasCallStack
+  => TestEquality eon
+  => Show (eon expectedEra)
+  => Show (eon receivedEra)
+  => MonadError String m
+  => eon expectedEra
+  -> eon receivedEra
+  -> m (expectedEra :~: receivedEra)
+assertErasEqual expectedEra receivedEra = withFrozenCallStack $
+  case testEquality expectedEra receivedEra of
+    Just Refl -> pure Refl
+    Nothing ->
+      throwError $ "Eras mismatch! expected: " <> show expectedEra <> ", received era: " <> show receivedEra

@@ -11,7 +11,19 @@ module Cardano.Node.Parsers
   , renderHelpDoc
   ) where
 
+import           Cardano.Logging.Types
+import           Cardano.Node.Configuration.NodeAddress (File (..),
+                   NodeHostIPv4Address (NodeHostIPv4Address),
+                   NodeHostIPv6Address (NodeHostIPv6Address), PortNumber, SocketPath)
+import           Cardano.Node.Configuration.POM (PartialNodeConfiguration (..), lastOption)
+import           Cardano.Node.Configuration.Socket
+import           Cardano.Node.Handlers.Shutdown
+import           Cardano.Node.Types
 import           Cardano.Prelude (ConvertText (..))
+import           Ouroboros.Consensus.Ledger.SupportsMempool
+import           Ouroboros.Consensus.Node
+import           Ouroboros.Consensus.Storage.LedgerDB.DiskPolicy (NumOfDiskSnapshots (..),
+                   SnapshotInterval (..))
 
 import           Data.Foldable
 import           Data.Maybe (fromMaybe)
@@ -24,19 +36,6 @@ import qualified Options.Applicative as Opt
 import qualified Options.Applicative.Help as OptI
 import           System.Posix.Types (Fd (..))
 import           Text.Read (readMaybe)
-
-import           Ouroboros.Consensus.Mempool (MempoolCapacityBytes (..),
-                   MempoolCapacityBytesOverride (..))
-import           Ouroboros.Consensus.Storage.LedgerDB.DiskPolicy (SnapshotInterval (..))
-
-import           Cardano.Logging.Types
-import           Cardano.Node.Configuration.NodeAddress (File (..),
-                   NodeHostIPv4Address (NodeHostIPv4Address),
-                   NodeHostIPv6Address (NodeHostIPv6Address), PortNumber, SocketPath)
-import           Cardano.Node.Configuration.POM (PartialNodeConfiguration (..), lastOption)
-import           Cardano.Node.Configuration.Socket
-import           Cardano.Node.Handlers.Shutdown
-import           Cardano.Node.Types
 
 nodeCLIParser  :: Parser PartialNodeConfiguration
 nodeCLIParser = subparser
@@ -51,9 +50,11 @@ nodeRunParser :: Parser PartialNodeConfiguration
 nodeRunParser = do
   -- Filepaths
   topFp <- lastOption parseTopologyFile
-  dbFp <- lastOption parseDbPath
+  dbFp <- lastOption parseNodeDatabasePaths
+  validate <- lastOption parseValidateDB
   socketFp <- lastOption $ parseSocketPath "Path to a cardano-node socket"
   traceForwardSocket <- lastOption parseTracerSocketMode
+  nodeConfigFp <- lastOption parseConfigFile
 
   -- Protocol files
   byronCertFile   <- optional parseByronDelegationCert
@@ -62,20 +63,20 @@ nodeRunParser = do
   shelleyVRFFile  <- optional parseVrfKeyFilePath
   shelleyCertFile <- optional parseOperationalCertFilePath
   shelleyBulkCredsFile <- optional parseBulkCredsFilePath
+  startAsNonProducingNode <- lastOption parseStartAsNonProducingNode
 
   -- Node Address
   nIPv4Address <- lastOption parseHostIPv4Addr
   nIPv6Address <- lastOption parseHostIPv6Addr
   nPortNumber  <- lastOption parsePort
 
-  -- NodeConfiguration filepath
-  nodeConfigFp <- lastOption parseConfigFile
-  snapshotInterval <- lastOption parseSnapshotInterval
-
-  validate <- lastOption parseValidateDB
+  -- Shutdown
   shutdownIPC <- lastOption parseShutdownIPC
   shutdownOnLimit <- lastOption parseShutdownOn
 
+  -- Hidden options (to be removed eventually)
+  numOfDiskSnapshots <- lastOption parseNumOfDiskSnapshots
+  snapshotInterval   <- lastOption parseSnapshotInterval
   maybeMempoolCapacityOverride <- lastOption parseMempoolCapacityOverride
 
   pure $ PartialNodeConfiguration
@@ -87,8 +88,9 @@ nodeRunParser = do
                  socketFp
            , pncConfigFile   = ConfigYamlFilePath <$> nodeConfigFp
            , pncTopologyFile = TopologyFile <$> topFp
-           , pncDatabaseFile = DbFile <$> dbFp
+           , pncDatabaseFile = dbFp
            , pncDiffusionMode = mempty
+           , pncNumOfDiskSnapshots = numOfDiskSnapshots
            , pncSnapshotInterval = snapshotInterval
            , pncExperimentalProtocolsEnabled = mempty
            , pncProtocolFiles = Last $ Just ProtocolFilepaths
@@ -102,6 +104,7 @@ nodeRunParser = do
            , pncValidateDB = validate
            , pncShutdownConfig =
                Last . Just $ ShutdownConfig (getLast shutdownIPC) (getLast shutdownOnLimit)
+           , pncStartAsNonProducingNode = startAsNonProducingNode
            , pncProtocolConfig = mempty
            , pncMaxConcurrencyBulkSync = mempty
            , pncMaxConcurrencyDeadline = mempty
@@ -112,11 +115,15 @@ nodeRunParser = do
            , pncMaybeMempoolCapacityOverride = maybeMempoolCapacityOverride
            , pncProtocolIdleTimeout = mempty
            , pncTimeWaitTimeout = mempty
+           , pncChainSyncIdleTimeout = mempty
            , pncAcceptedConnectionsLimit = mempty
            , pncTargetNumberOfRootPeers = mempty
            , pncTargetNumberOfKnownPeers = mempty
            , pncTargetNumberOfEstablishedPeers = mempty
            , pncTargetNumberOfActivePeers = mempty
+           , pncTargetNumberOfKnownBigLedgerPeers = mempty
+           , pncTargetNumberOfEstablishedBigLedgerPeers = mempty
+           , pncTargetNumberOfActiveBigLedgerPeers = mempty
            , pncEnableP2P = mempty
            , pncPeerSharing = mempty
            }
@@ -204,27 +211,55 @@ parseMempoolCapacityOverride = parseOverride <|> parseNoOverride
   where
     parseOverride :: Parser MempoolCapacityBytesOverride
     parseOverride =
-      MempoolCapacityBytesOverride . MempoolCapacityBytes <$>
-      Opt.option (auto @Word32)
-        (  long "mempool-capacity-override"
-        <> metavar "BYTES"
-        <> help "The number of bytes"
-        )
+      MempoolCapacityBytesOverride . ByteSize32 <$>
+        Opt.option (auto @Word32)
+          (  long "mempool-capacity-override"
+          <> metavar "BYTES"
+          <> help "[DEPRECATED: Set it in config file with key MempoolCapacityBytesOverride] The number of bytes"
+          )
     parseNoOverride :: Parser MempoolCapacityBytesOverride
     parseNoOverride =
       flag' NoMempoolCapacityBytesOverride
         (  long "no-mempool-capacity-override"
-        <> help "The port number"
+        <> help "[DEPRECATED: Set it in config file] Don't override mempool capacity"
         )
 
-parseDbPath :: Parser FilePath
+
+parseNodeDatabasePaths :: Parser NodeDatabasePaths
+parseNodeDatabasePaths = parseDbPath <|> parseMultipleDbPaths
+
+parseDbPath :: Parser NodeDatabasePaths
 parseDbPath =
-  strOption
-    ( long "database-path"
-    <> metavar "FILEPATH"
-    <> help "Directory where the state is stored."
-    <> completer (bashCompleter "file")
-    )
+    fmap OnePathForAllDbs $
+        strOption $
+            mconcat
+                [ long "database-path"
+                , metavar "FILEPATH"
+                , help "Directory where the state is stored."
+                , completer (bashCompleter "file")
+                ]
+
+parseMultipleDbPaths :: Parser NodeDatabasePaths
+parseMultipleDbPaths = MultipleDbPaths <$> parseImmutableDbPath <*> parseVolatileDbPath
+
+parseVolatileDbPath :: Parser FilePath
+parseVolatileDbPath = strOption $
+  mconcat
+    [ long "volatile-database-path"
+    , metavar "FILEPATH"
+    , help "Directory where the state is stored."
+    , completer (bashCompleter "file")
+    ]
+
+parseImmutableDbPath :: Parser FilePath
+parseImmutableDbPath = strOption $
+  mconcat
+    [ long "immutable-database-path"
+    , metavar "FILEPATH"
+    , help "Directory where the state is stored."
+    , completer (bashCompleter "file")
+    ]
+
 
 parseValidateDB :: Parser Bool
 parseValidateDB =
@@ -313,6 +348,25 @@ parseVrfKeyFilePath =
         <> completer (bashCompleter "file")
     )
 
+parseStartAsNonProducingNode :: Parser Bool
+parseStartAsNonProducingNode =
+  switch $ mconcat
+    [ long "non-producing-node"
+    , help $ mconcat
+        [ "Start the node as a non block producing node even if "
+        , "credentials are specified."
+        ]
+    ]
+
+parseNumOfDiskSnapshots :: Parser NumOfDiskSnapshots
+parseNumOfDiskSnapshots = fmap RequestedNumOfDiskSnapshots parseNum
+  where
+  parseNum = Opt.option auto
+    ( long "num-of-disk-snapshots"
+        <> metavar "NUMOFDISKSNAPSHOTS"
+        <> help "[DEPRECATED: Set it in config file with key NumOfDiskSnapshots] Number of ledger snapshots stored on disk."
+    )
+
 -- TODO revisit because it sucks
 parseSnapshotInterval :: Parser SnapshotInterval
 parseSnapshotInterval = fmap (RequestedSnapshotInterval . secondsToDiffTime) parseDifftime
@@ -320,7 +374,7 @@ parseSnapshotInterval = fmap (RequestedSnapshotInterval . secondsToDiffTime) par
   parseDifftime = Opt.option auto
     ( long "snapshot-interval"
         <> metavar "SNAPSHOTINTERVAL"
-        <> help "Snapshot Interval (in second)"
+        <> help "[DEPRECATED: Set it in config file with key SnapshotInterval] Snapshot Interval (in seconds)"
     )
 
 -- | Produce just the brief help header for a given CLI option parser,

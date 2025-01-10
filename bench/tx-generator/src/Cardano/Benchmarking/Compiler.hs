@@ -7,11 +7,17 @@
 module Cardano.Benchmarking.Compiler
 where
 
+import           Cardano.Api
+
+import           Cardano.Benchmarking.Script.Types
+import qualified Cardano.Ledger.Coin as L
+import           Cardano.TxGenerator.Setup.NixService
+import           Cardano.TxGenerator.Setup.SigningKey
+import           Cardano.TxGenerator.Types
+
 import           Prelude
 
 import           Control.Monad
-import           Control.Monad.Trans.Class (lift)
-import           Control.Monad.Trans.Except
 import           Control.Monad.Trans.RWS.CPS
 import           Data.ByteString as BS (ByteString)
 import           Data.DList (DList)
@@ -20,12 +26,6 @@ import           Data.Functor ((<&>))
 import           Data.Maybe
 import           Data.Text (Text)
 import qualified Data.Text as Text
-
-import           Cardano.Api
-import           Cardano.Benchmarking.Script.Types
-import           Cardano.TxGenerator.Setup.NixService
-import           Cardano.TxGenerator.Setup.SigningKey
-import           Cardano.TxGenerator.Types
 
 data CompileError where
   SomeCompilerError :: String -> CompileError
@@ -160,7 +160,7 @@ splittingPhase srcWallet = do
 -- testCompiler (error "opts") $ splitSequenceWalletNames (WalletName "w1") (WalletName "w2") (unfoldSplitSequence 1 1000 10000)
 
 data Split
-  = SplitWithChange Lovelace Int
+  = SplitWithChange L.Coin Int
   | FullSplits Int
   deriving Show
 
@@ -172,7 +172,7 @@ splitSequenceWalletNames src dst (split: rest) = do
   l <- splitSequenceWalletNames tempWallet dst rest
   return $ ( src, tempWallet, split) : l
 
-unfoldSplitSequence :: Lovelace -> Lovelace -> Int -> [ Split ]
+unfoldSplitSequence :: L.Coin -> L.Coin -> Int -> [ Split ]
 unfoldSplitSequence fee value outputs
   = if outputs < maxOutputsPerTx
       then [ SplitWithChange value outputs ]
@@ -201,16 +201,16 @@ benchmarkingPhase wallet collateralWallet = do
     payMode = PayToAddr keyNameBenchmarkDone doneWallet
     submitMode = if debugMode
         then LocalSocket
-        else Benchmark targetNodes "tx-submit-benchmark" tps txCount
+        else Benchmark targetNodes tps txCount
     generator = Take txCount $ Cycle $ NtoM wallet payMode inputs outputs (Just $ txParamAddTxSize txParams) collateralWallet
   emit $ Submit era submitMode txParams generator
   unless debugMode $ do
-    emit $ WaitBenchmark "tx-submit-benchmark"
+    emit WaitBenchmark
   return doneWallet
 
 data Fees = Fees {
-    _safeCollateral :: Lovelace
-  , _minValuePerInput :: Lovelace
+    _safeCollateral :: L.Coin
+  , _minValuePerInput :: L.Coin
   }
 
 evilFeeMagic :: Compiler Fees

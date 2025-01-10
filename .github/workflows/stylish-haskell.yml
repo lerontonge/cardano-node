@@ -1,7 +1,7 @@
 name: Check Stylish Haskell
 
 on:
-  push:
+  pull_request: # Required for workflows to be able to be approved from forks
   merge_group:
 
 # When pushing branches (and/or updating PRs), we do want to cancel previous
@@ -26,23 +26,19 @@ jobs:
       fail-fast: false
 
     env:
-      # Modify this value to "invalidate" the cabal cache.
-      CABAL_CACHE_VERSION: "2023-06-20"
-
       STYLISH_HASKELL_VERSION: "0.14.4.0"
 
       STYLISH_HASKELL_PATHS: >
-        cardano-testnet
         cardano-git-rev
         cardano-node
-        cardano-client-demo
-        cardano-node-chairman
-        cardano-tracer
-        trace-resources
         cardano-node-capi
+        cardano-node-chairman
+        cardano-submit-api
+        cardano-testnet
+        cardano-tracer
         trace-dispatcher
         trace-forward
-        cardano-submit-api
+        trace-resources
 
     steps:
     - name: Download stylish-haskell
@@ -58,14 +54,18 @@ jobs:
 
     - uses: actions/checkout@v3
 
-    - name: Run stylish-haskell over all Haskell files
+    - name: Run stylish-haskell over all Haskell files (always succeeds)
       run: |
         git add .
         git stash
 
         for x in $(git ls-tree --full-tree --name-only -r HEAD ${{ env.STYLISH_HASKELL_PATHS }}); do
           if [ "${x##*.}" == "hs" ]; then
-            stylish-haskell -i $x
+            if grep -qE '^#' $x; then
+              echo "$x contains CPP.  Skipping."
+            else
+              stylish-haskell -i $x
+            fi
           fi
         done
 
@@ -76,9 +76,13 @@ jobs:
         git add .
         git stash
         git fetch origin ${{ github.base_ref }} --unshallow
-        for x in $(git diff --name-only ${{ github.base_ref }} HEAD ${{ env.STYLISH_HASKELL_PATHS }}); do
+        for x in $(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}..HEAD ${{ env.STYLISH_HASKELL_PATHS }}); do
           if [ "${x##*.}" == "hs" ]; then
-            stylish-haskell -i $x
+            if grep -qE '^#' $x; then
+              echo "$x contains CPP.  Skipping."
+            else
+              stylish-haskell -i $x
+            fi
           fi
         done
 

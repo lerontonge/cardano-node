@@ -2,7 +2,7 @@
 name: User facing feature
 about: For internal use only; Open a user-facing feature tracking file
 title: "[FEATURE] - "
-labels: ["type: internal-feature", "user type: internal"]
+labels: ["type: internal-feature", "user type: internal", "needs triage"]
 assignees: ''
 
 ---
@@ -56,4 +56,4 @@ assignees: ''
 
 Acceptance Criteria & User Stories define here (or in a separate file (linked here) for a big feature)
 
-Example - https://github.com/input-output-hk/cardano-node/issues/4453
+Example - https://github.com/intersectmbo/cardano-node/issues/4453

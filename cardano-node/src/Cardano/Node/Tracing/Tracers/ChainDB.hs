@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -13,22 +13,13 @@ module Cardano.Node.Tracing.Tracers.ChainDB
    ( withAddedToCurrentChainEmptyLimited
    ) where
 
-import           Cardano.Prelude (maximumDef)
-
-import           Data.Aeson (Value (String), toJSON, (.=))
-import           Data.Int (Int64)
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import           Data.Word (Word64)
-import           Numeric (showFFloat)
-
 import           Cardano.Logging
 import           Cardano.Node.Tracing.Era.Byron ()
 import           Cardano.Node.Tracing.Era.Shelley ()
 import           Cardano.Node.Tracing.Formatting ()
 import           Cardano.Node.Tracing.Render
-
+import           Cardano.Prelude (maximumDef)
+import           Cardano.Tracing.HasIssuer
 import           Ouroboros.Consensus.Block
 import           Ouroboros.Consensus.HeaderValidation (HeaderEnvelopeError (..), HeaderError (..),
                    OtherHeaderEnvelopeError)
@@ -36,29 +27,38 @@ import           Ouroboros.Consensus.Ledger.Abstract (LedgerError)
 import           Ouroboros.Consensus.Ledger.Extended (ExtValidationError (..))
 import           Ouroboros.Consensus.Ledger.Inspect (InspectLedger, LedgerEvent (..))
 import           Ouroboros.Consensus.Ledger.SupportsProtocol (LedgerSupportsProtocol)
-import           Ouroboros.Consensus.Protocol.Abstract (ValidationErr)
+import           Ouroboros.Consensus.Protocol.Abstract (SelectView, ValidationErr)
 import qualified Ouroboros.Consensus.Protocol.PBFT as PBFT
 import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
 import qualified Ouroboros.Consensus.Storage.ImmutableDB as ImmDB
 import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal (chunkNoToInt)
 import qualified Ouroboros.Consensus.Storage.ImmutableDB.Impl.Types as ImmDB
-import           Ouroboros.Consensus.Storage.LedgerDB (UpdateLedgerDbTraceEvent (..))
+import           Ouroboros.Consensus.Storage.LedgerDB (ReplayStart (..),
+                   UpdateLedgerDbTraceEvent (..))
 import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
 import qualified Ouroboros.Consensus.Storage.VolatileDB as VolDB
 import           Ouroboros.Consensus.Util.Condense (condense)
 import           Ouroboros.Consensus.Util.Enclose
-
 import qualified Ouroboros.Network.AnchoredFragment as AF
+
+import           Data.Aeson (Value (String), object, toJSON, (.=))
+import qualified Data.ByteString.Base16 as B16
+import           Data.Int (Int64)
+import           Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+import           Data.Word (Word64)
+import           Numeric (showFFloat)
 
 -- {-# ANN module ("HLint: ignore Redundant bracket" :: Text) #-}
 
--- TODO implement differently so that it uses configuration
+-- A limiter that is not coming from configuration, because it carries a special filter
 withAddedToCurrentChainEmptyLimited
   :: Trace IO (ChainDB.TraceEvent blk)
   -> IO (Trace IO (ChainDB.TraceEvent blk))
 withAddedToCurrentChainEmptyLimited tr = do
   ltr <- limitFrequency 1.25 "AddedToCurrentChainLimiter" mempty tr
-  routingTrace (selecting ltr) tr
+  pure $ routingTrace (selecting ltr) tr
  where
     selecting
       ltr
@@ -76,23 +76,29 @@ withAddedToCurrentChainEmptyLimited tr = do
 instance (  LogFormatting (Header blk)
           , LogFormatting (LedgerEvent blk)
           , LogFormatting (RealPoint blk)
+          , LogFormatting (SelectView (BlockProtocol blk))
           , ConvertRawHash blk
           , ConvertRawHash (Header blk)
           , LedgerSupportsProtocol blk
           , InspectLedger blk
+          , HasIssuer blk
           ) => LogFormatting (ChainDB.TraceEvent blk) where
-  forHuman (ChainDB.TraceAddBlockEvent v)          = forHuman v
-  forHuman (ChainDB.TraceFollowerEvent v)          = forHuman v
-  forHuman (ChainDB.TraceCopyToImmutableDBEvent v) = forHuman v
-  forHuman (ChainDB.TraceGCEvent v)                = forHuman v
-  forHuman (ChainDB.TraceInitChainSelEvent v)      = forHuman v
-  forHuman (ChainDB.TraceOpenEvent v)              = forHuman v
-  forHuman (ChainDB.TraceIteratorEvent v)          = forHuman v
-  forHuman (ChainDB.TraceSnapshotEvent v)          = forHuman v
-  forHuman (ChainDB.TraceLedgerReplayEvent v)      = forHuman v
-  forHuman (ChainDB.TraceImmutableDBEvent v)       = forHuman v
-  forHuman (ChainDB.TraceVolatileDBEvent v)        = forHuman v
+  forHuman ChainDB.TraceLastShutdownUnclean        =
+    "ChainDB is not clean. Validating all immutable chunks"
+  forHuman (ChainDB.TraceAddBlockEvent v)          = forHumanOrMachine v
+  forHuman (ChainDB.TraceFollowerEvent v)          = forHumanOrMachine v
+  forHuman (ChainDB.TraceCopyToImmutableDBEvent v) = forHumanOrMachine v
+  forHuman (ChainDB.TraceGCEvent v)                = forHumanOrMachine v
+  forHuman (ChainDB.TraceInitChainSelEvent v)      = forHumanOrMachine v
+  forHuman (ChainDB.TraceOpenEvent v)              = forHumanOrMachine v
+  forHuman (ChainDB.TraceIteratorEvent v)          = forHumanOrMachine v
+  forHuman (ChainDB.TraceSnapshotEvent v)          = forHumanOrMachine v
+  forHuman (ChainDB.TraceLedgerReplayEvent v)      = forHumanOrMachine v
+  forHuman (ChainDB.TraceImmutableDBEvent v)       = forHumanOrMachine v
+  forHuman (ChainDB.TraceVolatileDBEvent v)        = forHumanOrMachine v
 
+  forMachine _ ChainDB.TraceLastShutdownUnclean =
+    mconcat [ "kind" .= String "LastShutdownUnclean" ]
   forMachine details (ChainDB.TraceAddBlockEvent v) =
     forMachine details v
   forMachine details (ChainDB.TraceFollowerEvent v) =
@@ -116,6 +122,7 @@ instance (  LogFormatting (Header blk)
   forMachine details (ChainDB.TraceVolatileDBEvent v) =
     forMachine details v
 
+  asMetrics ChainDB.TraceLastShutdownUnclean        = []
   asMetrics (ChainDB.TraceAddBlockEvent v)          = asMetrics v
   asMetrics (ChainDB.TraceFollowerEvent v)          = asMetrics v
   asMetrics (ChainDB.TraceCopyToImmutableDBEvent v) = asMetrics v
@@ -130,6 +137,8 @@ instance (  LogFormatting (Header blk)
 
 
 instance MetaTrace  (ChainDB.TraceEvent blk) where
+  namespaceFor ChainDB.TraceLastShutdownUnclean =
+    Namespace [] ["LastShutdownUnclean"]
   namespaceFor (ChainDB.TraceAddBlockEvent ev) =
     nsPrependInner "AddBlockEvent" (namespaceFor ev)
   namespaceFor (ChainDB.TraceFollowerEvent ev) =
@@ -153,6 +162,7 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
   namespaceFor (ChainDB.TraceVolatileDBEvent ev) =
      nsPrependInner "VolatileDbEvent" (namespaceFor ev)
 
+  severityFor (Namespace _ ["LastShutdownUnclean"]) _ = Just Info
   severityFor (Namespace out ("AddBlockEvent" : tl)) (Just (ChainDB.TraceAddBlockEvent ev')) =
     severityFor (Namespace out tl) (Just ev')
   severityFor (Namespace out ("AddBlockEvent" : tl)) Nothing =
@@ -199,6 +209,7 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
     severityFor (Namespace out tl :: Namespace (VolDB.TraceEvent blk)) Nothing
   severityFor _ns _ = Nothing
 
+  privacyFor (Namespace _ ["LastShutdownUnclean"]) _ = Just Public
   privacyFor (Namespace out ("AddBlockEvent" : tl)) (Just (ChainDB.TraceAddBlockEvent ev')) =
     privacyFor (Namespace out tl) (Just ev')
   privacyFor (Namespace out ("AddBlockEvent" : tl)) Nothing =
@@ -245,6 +256,7 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
     privacyFor (Namespace out tl :: Namespace (VolDB.TraceEvent blk)) Nothing
   privacyFor _ _ = Nothing
 
+  detailsFor (Namespace _ ["LastShutdownUnclean"]) _ = Just DNormal
   detailsFor (Namespace out ("AddBlockEvent" : tl)) (Just (ChainDB.TraceAddBlockEvent ev')) =
     detailsFor (Namespace out tl) (Just ev')
   detailsFor (Namespace out ("AddBlockEvent" : tl)) Nothing =
@@ -315,6 +327,11 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
     metricsDocFor (Namespace out tl :: Namespace (VolDB.TraceEvent blk))
   metricsDocFor _ = []
 
+  documentFor (Namespace _ ["LastShutdownUnclean"]) = Just $ mconcat
+    [ "Last shutdown of the node didn't leave the ChainDB directory in a clean"
+    , " state. Therefore, revalidating all the immutable chunks is necessary to"
+    , " ensure the correctness of the chain."
+    ]
   documentFor (Namespace out ("AddBlockEvent" : tl)) =
     documentFor (Namespace out tl :: Namespace (ChainDB.TraceAddBlockEvent blk))
   documentFor (Namespace out ("FollowerEvent" : tl)) =
@@ -340,7 +357,9 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
   documentFor _ = Nothing
 
   allNamespaces =
-        map  (nsPrependInner "AddBlockEvent")
+        Namespace [] ["LastShutdownUnclean"]
+
+          : (map  (nsPrependInner "AddBlockEvent")
                   (allNamespaces :: [Namespace (ChainDB.TraceAddBlockEvent blk)])
           ++ map  (nsPrependInner "FollowerEvent")
                   (allNamespaces :: [Namespace (ChainDB.TraceFollowerEvent blk)])
@@ -362,6 +381,7 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
                   (allNamespaces :: [Namespace (ImmDB.TraceEvent blk)])
           ++ map  (nsPrependInner "VolatileDbEvent")
                   (allNamespaces :: [Namespace (VolDB.TraceEvent blk)])
+            )
 
 
 --------------------------------------------------------------------------------
@@ -372,10 +392,12 @@ instance MetaTrace  (ChainDB.TraceEvent blk) where
 instance ( LogFormatting (Header blk)
          , LogFormatting (LedgerEvent blk)
          , LogFormatting (RealPoint blk)
+         , LogFormatting (SelectView (BlockProtocol blk))
          , ConvertRawHash blk
          , ConvertRawHash (Header blk)
          , LedgerSupportsProtocol blk
          , InspectLedger blk
+         , HasIssuer blk
          ) => LogFormatting (ChainDB.TraceAddBlockEvent blk) where
   forHuman (ChainDB.IgnoreBlockOlderThanK pt) =
     "Ignoring block older than K: " <> renderRealPointAsPhrase pt
@@ -411,14 +433,20 @@ instance ( LogFormatting (Header blk)
   forHuman (ChainDB.SwitchedToAFork es _ _ c) =
       "Switched to a fork, new tip: " <> renderPointAsPhrase (AF.headPoint c) <>
         Text.concat [ "\nEvent: " <> showT e | e <- es ]
-  forHuman (ChainDB.AddBlockValidation ev') = forHuman ev'
+  forHuman (ChainDB.AddBlockValidation ev') = forHumanOrMachine ev'
   forHuman (ChainDB.AddedBlockToVolatileDB pt _ _ enclosing) =
       case enclosing of
         RisingEdge  -> "Chain about to add block " <> renderRealPointAsPhrase pt
         FallingEdge -> "Chain added block " <> renderRealPointAsPhrase pt
   forHuman (ChainDB.ChainSelectionForFutureBlock pt) =
       "Chain selection run for block previously from future: " <> renderRealPointAsPhrase pt
-  forHuman (ChainDB.PipeliningEvent ev') = forHuman ev'
+  forHuman (ChainDB.PipeliningEvent ev') = forHumanOrMachine ev'
+  forHuman ChainDB.AddedReprocessLoEBlocksToQueue =
+      "Added request to queue to reprocess blocks postponed by LoE."
+  forHuman ChainDB.PoppedReprocessLoEBlocksFromQueue =
+      "Poppped request from queue to reprocess blocks postponed by LoE."
+  forHuman ChainDB.ChainSelectionLoEDebug{} =
+      "ChainDB LoE debug event"
   forMachine dtal (ChainDB.IgnoreBlockOlderThanK pt) =
       mconcat [ "kind" .= String "IgnoreBlockOlderThanK"
                , "block" .= forMachine dtal pt ]
@@ -456,24 +484,77 @@ instance ( LogFormatting (Header blk)
   forMachine dtal (ChainDB.ChangingSelection pt) =
       mconcat [ "kind" .= String "TraceAddBlockEvent.ChangingSelection"
                , "block" .= forMachine dtal pt ]
-  forMachine dtal (ChainDB.AddedToCurrentChain events _ base extended) =
+
+  forMachine DDetailed (ChainDB.AddedToCurrentChain events selChangedInfo base extended) =
+      let ChainInformation { .. } = chainInformation selChangedInfo base extended 0
+          tipBlockIssuerVkHashText :: Text
+          tipBlockIssuerVkHashText =
+            case tipBlockIssuerVerificationKeyHash of
+              NoBlockIssuer -> "NoBlockIssuer"
+              BlockIssuerVerificationKeyHash bs ->
+                Text.decodeLatin1 (B16.encode bs)
+      in mconcat $
+               [ "kind" .=  String "AddedToCurrentChain"
+               , "newtip" .= renderPointForDetails DDetailed (AF.headPoint extended)
+               , "newTipSelectView" .= forMachine DDetailed (ChainDB.newTipSelectView selChangedInfo)
+               ]
+            ++ [ "oldTipSelectView" .= forMachine DDetailed oldTipSelectView
+               | Just oldTipSelectView <- [ChainDB.oldTipSelectView selChangedInfo]
+               ]
+            ++ [ "headers" .= toJSON (forMachine DDetailed `map` addedHdrsNewChain base extended)
+               ]
+            ++ [ "events" .= toJSON (map (forMachine DDetailed) events)
+               | not (null events) ]
+            ++ [ "tipBlockHash" .= tipBlockHash
+               , "tipBlockParentHash" .= tipBlockParentHash
+               , "tipBlockIssuerVKeyHash" .= tipBlockIssuerVkHashText]
+  forMachine dtal (ChainDB.AddedToCurrentChain events selChangedInfo _base extended) =
       mconcat $
                [ "kind" .=  String "AddedToCurrentChain"
                , "newtip" .= renderPointForDetails dtal (AF.headPoint extended)
+               , "newTipSelectView" .= forMachine dtal (ChainDB.newTipSelectView selChangedInfo)
                ]
-            ++ [ "headers" .= toJSON (forMachine dtal `map` addedHdrsNewChain base extended)
-               | dtal == DDetailed ]
+            ++ [ "oldTipSelectView" .= forMachine dtal oldTipSelectView
+               | Just oldTipSelectView <- [ChainDB.oldTipSelectView selChangedInfo]
+               ]
             ++ [ "events" .= toJSON (map (forMachine dtal) events)
                | not (null events) ]
-  forMachine dtal (ChainDB.SwitchedToAFork events _ old new) =
+
+  forMachine DDetailed (ChainDB.SwitchedToAFork events selChangedInfo old new) =
+      let ChainInformation { .. } = chainInformation selChangedInfo old new 0
+          tipBlockIssuerVkHashText :: Text
+          tipBlockIssuerVkHashText =
+            case tipBlockIssuerVerificationKeyHash of
+              NoBlockIssuer -> "NoBlockIssuer"
+              BlockIssuerVerificationKeyHash bs ->
+                Text.decodeLatin1 (B16.encode bs)
+      in mconcat $
+               [ "kind" .= String "TraceAddBlockEvent.SwitchedToAFork"
+               , "newtip" .= renderPointForDetails DDetailed (AF.headPoint new)
+               , "newTipSelectView" .= forMachine DDetailed (ChainDB.newTipSelectView selChangedInfo)
+               ]
+            ++ [ "oldTipSelectView" .= forMachine DDetailed oldTipSelectView
+               | Just oldTipSelectView <- [ChainDB.oldTipSelectView selChangedInfo]
+               ]
+            ++ [ "headers" .= toJSON (forMachine DDetailed `map` addedHdrsNewChain old new)
+               ]
+            ++ [ "events" .= toJSON (map (forMachine DDetailed) events)
+               | not (null events) ]
+            ++ [ "tipBlockHash" .= tipBlockHash
+               , "tipBlockParentHash" .= tipBlockParentHash
+               , "tipBlockIssuerVKeyHash" .= tipBlockIssuerVkHashText]
+  forMachine dtal (ChainDB.SwitchedToAFork events selChangedInfo _old new) =
       mconcat $
                [ "kind" .= String "TraceAddBlockEvent.SwitchedToAFork"
                , "newtip" .= renderPointForDetails dtal (AF.headPoint new)
+               , "newTipSelectView" .= forMachine dtal (ChainDB.newTipSelectView selChangedInfo)
                ]
-            ++ [ "headers" .= toJSON (forMachine dtal `map` addedHdrsNewChain old new)
-               | dtal == DDetailed ]
+            ++ [ "oldTipSelectView" .= forMachine dtal oldTipSelectView
+               | Just oldTipSelectView <- [ChainDB.oldTipSelectView selChangedInfo]
+               ]
             ++ [ "events" .= toJSON (map (forMachine dtal) events)
                | not (null events) ]
+
   forMachine dtal (ChainDB.AddBlockValidation ev') =
     forMachine dtal ev'
   forMachine dtal (ChainDB.AddedBlockToVolatileDB pt (BlockNo bn) _ enclosing) =
@@ -486,24 +567,64 @@ instance ( LogFormatting (Header blk)
                , "block" .= forMachine dtal pt ]
   forMachine dtal (ChainDB.PipeliningEvent ev') =
     forMachine dtal ev'
-
-  asMetrics (ChainDB.SwitchedToAFork _warnings newTipInfo _oldChain newChain) =
-    let ChainInformation { slots, blocks, density, epoch, slotInEpoch } =
-          chainInformation newTipInfo newChain 0
-    in  [ DoubleM "ChainDB.Density" (fromRational density)
-        , IntM    "ChainDB.SlotNum" (fromIntegral slots)
-        , IntM    "ChainDB.BlockNum" (fromIntegral blocks)
-        , IntM    "ChainDB.SlotInEpoch" (fromIntegral slotInEpoch)
-        , IntM    "ChainDB.Epoch" (fromIntegral (unEpochNo epoch))
+  forMachine _dtal ChainDB.AddedReprocessLoEBlocksToQueue =
+      mconcat [ "kind" .= String "AddedReprocessLoEBlocksToQueue" ]
+  forMachine _dtal ChainDB.PoppedReprocessLoEBlocksFromQueue =
+      mconcat [ "kind" .= String "PoppedReprocessLoEBlocksFromQueue" ]
+  forMachine dtal (ChainDB.ChainSelectionLoEDebug curChain loeFrag) =
+      case loeFrag of
+        ChainDB.LoEEnabled loeF ->
+          mconcat [ "kind" .= String "ChainSelectionLoEDebug"
+                  , "curChain" .= headAndAnchor curChain
+                  , "loeFrag" .= headAndAnchor loeF
+                  ]
+        ChainDB.LoEDisabled ->
+          mconcat [ "kind" .= String "ChainSelectionLoEDebug"
+                  , "curChain" .= headAndAnchor curChain
+                  , "loeFrag" .= String "LoE is disabled"
+                  ]
+    where
+      headAndAnchor frag = object
+        [ "anchor" .= forMachine dtal (AF.anchorPoint frag)
+        , "head" .= forMachine dtal (AF.headPoint frag)
         ]
-  asMetrics (ChainDB.AddedToCurrentChain _warnings newTipInfo _oldChain newChain) =
-    let ChainInformation { slots, blocks, density, epoch, slotInEpoch } =
-          chainInformation newTipInfo newChain 0
-    in  [ DoubleM "ChainDB.Density" (fromRational density)
-        , IntM    "ChainDB.SlotNum" (fromIntegral slots)
-        , IntM    "ChainDB.BlockNum" (fromIntegral blocks)
-        , IntM    "ChainDB.SlotInEpoch" (fromIntegral slotInEpoch)
-        , IntM    "ChainDB.Epoch" (fromIntegral (unEpochNo epoch))
+
+
+  asMetrics (ChainDB.SwitchedToAFork _warnings selChangedInfo oldChain newChain) =
+    let forkIt = not $ AF.withinFragmentBounds (AF.headPoint oldChain)
+                              newChain
+        ChainInformation { .. } = chainInformation selChangedInfo oldChain newChain 0
+        tipBlockIssuerVkHashText =
+          case tipBlockIssuerVerificationKeyHash of
+            NoBlockIssuer -> "NoBlockIssuer"
+            BlockIssuerVerificationKeyHash bs ->
+              Text.decodeLatin1 (B16.encode bs)
+    in  [ DoubleM "density" (fromRational density)
+        , IntM    "slotNum" (fromIntegral slots)
+        , IntM    "blockNum" (fromIntegral blocks)
+        , IntM    "slotInEpoch" (fromIntegral slotInEpoch)
+        , IntM    "epoch" (fromIntegral (unEpochNo epoch))
+        , CounterM "forks" (Just (if forkIt then 1 else 0))
+        , PrometheusM "tipBlock" [("hash",tipBlockHash)
+                                 ,("parent_hash",tipBlockParentHash)
+                                 ,("issuer_VKey_hash", tipBlockIssuerVkHashText)]
+        ]
+  asMetrics (ChainDB.AddedToCurrentChain _warnings selChangedInfo oldChain newChain) =
+    let ChainInformation { .. } =
+          chainInformation selChangedInfo oldChain newChain 0
+        tipBlockIssuerVkHashText =
+          case tipBlockIssuerVerificationKeyHash of
+            NoBlockIssuer -> "NoBlockIssuer"
+            BlockIssuerVerificationKeyHash bs ->
+              Text.decodeLatin1 (B16.encode bs)
+    in  [ DoubleM "density" (fromRational density)
+        , IntM    "slotNum" (fromIntegral slots)
+        , IntM    "blockNum" (fromIntegral blocks)
+        , IntM    "slotInEpoch" (fromIntegral slotInEpoch)
+        , IntM    "epoch" (fromIntegral (unEpochNo epoch))
+        , PrometheusM "tipBlock" [("hash",tipBlockHash)
+                                 ,("parent hash",tipBlockParentHash)
+                                 ,("issuer verification key hash", tipBlockIssuerVkHashText)]
         ]
   asMetrics _ = []
 
@@ -541,6 +662,12 @@ instance MetaTrace  (ChainDB.TraceAddBlockEvent blk) where
     Namespace [] ["ChainSelectionForFutureBlock"]
   namespaceFor (ChainDB.PipeliningEvent ev') =
     nsPrependInner "PipeliningEvent" (namespaceFor ev')
+  namespaceFor ChainDB.AddedReprocessLoEBlocksToQueue =
+    Namespace [] ["AddedReprocessLoEBlocksToQueue"]
+  namespaceFor ChainDB.PoppedReprocessLoEBlocksFromQueue =
+    Namespace [] ["PoppedReprocessLoEBlocksFromQueue"]
+  namespaceFor ChainDB.ChainSelectionLoEDebug {} =
+    Namespace [] ["ChainSelectionLoEDebug"]
 
   severityFor (Namespace _ ["IgnoreBlockOlderThanK"]) _ = Just Info
   severityFor (Namespace _ ["IgnoreBlockAlreadyInVolatileDB"]) _ = Just Info
@@ -571,6 +698,9 @@ instance MetaTrace  (ChainDB.TraceAddBlockEvent blk) where
     severityFor (Namespace out tl) (Just ev')
   severityFor (Namespace out ("PipeliningEvent" : tl)) Nothing =
     severityFor (Namespace out tl :: Namespace (ChainDB.TracePipeliningEvent blk)) Nothing
+  severityFor (Namespace _ ["AddedReprocessLoEBlocksToQueue"]) _ = Just Debug
+  severityFor (Namespace _ ["PoppedReprocessLoEBlocksFromQueue"]) _ = Just Debug
+  severityFor (Namespace _ ["ChainSelectionLoEDebug"]) _ = Just Debug
   severityFor _ _ = Nothing
 
   privacyFor (Namespace out ("AddBlockEvent" : tl)) (Just (ChainDB.AddBlockValidation ev')) =
@@ -594,49 +724,59 @@ instance MetaTrace  (ChainDB.TraceAddBlockEvent blk) where
   detailsFor _ _ = Just DNormal
 
   metricsDocFor (Namespace _ ["SwitchedToAFork"]) =
-        [ ( "ChainDB.Density"
+        [ ( "density"
           , mconcat
             [ "The actual number of blocks created over the maximum expected number"
             , " of blocks that could be created over the span of the last @k@ blocks."
             ]
           )
-        , ( "ChainDB.SlotNum"
+        , ( "slotNum"
           , "Number of slots in this chain fragment."
           )
-        , ( "ChainDB.Blocks"
+        , ( "blockNum"
           , "Number of blocks in this chain fragment."
           )
-        , ( "ChainDB.SlotInEpoch"
+        , ( "slotInEpoch"
           , mconcat
             [ "Relative slot number of the tip of the current chain within the"
             , " epoch.."
             ]
           )
-        , ( "ChainDB.Epoch"
+        , ( "epoch"
           , "In which epoch is the tip of the current chain."
+          )
+        , ( "forks"
+          , "counter for forks"
+          )
+        , ( "tipBlock"
+          , "Values for hash, parent hash and issuer verification key hash"
           )
         ]
+
   metricsDocFor (Namespace _ ["AddedToCurrentChain"]) =
-        [ ( "ChainDB.Density"
+        [ ( "density"
           , mconcat
             [ "The actual number of blocks created over the maximum expected number"
             , " of blocks that could be created over the span of the last @k@ blocks."
             ]
           )
-        , ( "ChainDB.SlotNum"
+        , ( "slotNum"
           , "Number of slots in this chain fragment."
           )
-        , ( "ChainDB.Blocks"
+        , ( "blockNum"
           , "Number of blocks in this chain fragment."
           )
-        , ( "ChainDB.SlotInEpoch"
+        , ( "slotInEpoch"
           , mconcat
             [ "Relative slot number of the tip of the current chain within the"
             , " epoch.."
             ]
           )
-        , ( "ChainDB.Epoch"
+        , ( "epoch"
           , "In which epoch is the tip of the current chain."
+          )
+        , ( "tipBlock"
+          , "Values for hash, parent hash and issuer verification key hash"
           )
         ]
   metricsDocFor _ = []
@@ -714,6 +854,9 @@ instance MetaTrace  (ChainDB.TraceAddBlockEvent blk) where
     , Namespace [] ["AddedToCurrentChain"]
     , Namespace [] ["SwitchedToAFork"]
     , Namespace [] ["ChainSelectionForFutureBlock"]
+    , Namespace [] ["AddedReprocessLoEBlocksToQueue"]
+    , Namespace [] ["PoppedReprocessLoEBlocksFromQueue"]
+    , Namespace [] ["ChainSelectionLoEDebug"]
     ]
     ++ map (nsPrependInner "PipeliningEvent")
           (allNamespaces :: [Namespace (ChainDB.TracePipeliningEvent blk)])
@@ -942,75 +1085,75 @@ instance MetaTrace (ChainDB.TraceGCEvent blk) where
 
 instance (ConvertRawHash blk, LedgerSupportsProtocol blk)
   => LogFormatting (ChainDB.TraceInitChainSelEvent blk) where
-    forHuman (ChainDB.InitChainSelValidation v) = forHuman v
-    forHuman ChainDB.InitalChainSelected{} =
+    forHuman (ChainDB.InitChainSelValidation v) = forHumanOrMachine v
+    forHuman ChainDB.InitialChainSelected{} =
         "Initial chain selected"
     forHuman ChainDB.StartedInitChainSelection {} =
         "Started initial chain selection"
 
     forMachine dtal (ChainDB.InitChainSelValidation v) = forMachine dtal v
-    forMachine _dtal ChainDB.InitalChainSelected =
-      mconcat ["kind" .= String "Follower.InitalChainSelected"]
+    forMachine _dtal ChainDB.InitialChainSelected =
+      mconcat ["kind" .= String "Follower.InitialChainSelected"]
     forMachine _dtal ChainDB.StartedInitChainSelection =
       mconcat ["kind" .= String "Follower.StartedInitChainSelection"]
 
     asMetrics (ChainDB.InitChainSelValidation v) = asMetrics v
-    asMetrics ChainDB.InitalChainSelected        = []
+    asMetrics ChainDB.InitialChainSelected        = []
     asMetrics ChainDB.StartedInitChainSelection  = []
 
 instance MetaTrace (ChainDB.TraceInitChainSelEvent blk) where
-  namespaceFor ChainDB.InitalChainSelected {} =
-    Namespace [] ["InitalChainSelected"]
+  namespaceFor ChainDB.InitialChainSelected {} =
+    Namespace [] ["InitialChainSelected"]
   namespaceFor ChainDB.StartedInitChainSelection {} =
     Namespace [] ["StartedInitChainSelection"]
   namespaceFor (ChainDB.InitChainSelValidation ev') =
     nsPrependInner "Validation" (namespaceFor ev')
 
-  severityFor (Namespace _ ["InitalChainSelected"]) _ = Just Info
+  severityFor (Namespace _ ["InitialChainSelected"]) _ = Just Info
   severityFor (Namespace _ ["StartedInitChainSelection"]) _ = Just Info
-  severityFor (Namespace out ("InitChainSelValidation" : tl))
+  severityFor (Namespace out ("Validation" : tl))
                             (Just (ChainDB.InitChainSelValidation ev')) =
     severityFor (Namespace out tl) (Just ev')
-  severityFor (Namespace out ("InitChainSelValidation" : tl)) Nothing =
+  severityFor (Namespace out ("Validation" : tl)) Nothing =
     severityFor (Namespace out tl ::
       Namespace (ChainDB.TraceValidationEvent blk)) Nothing
   severityFor _ _ = Nothing
 
-  privacyFor (Namespace out ("InitChainSelValidation" : tl))
+  privacyFor (Namespace out ("Validation" : tl))
               (Just (ChainDB.InitChainSelValidation ev')) =
     privacyFor (Namespace out tl) (Just ev')
-  privacyFor (Namespace out ("InitChainSelValidation" : tl)) Nothing =
+  privacyFor (Namespace out ("Validation" : tl)) Nothing =
     privacyFor (Namespace out tl ::
       Namespace (ChainDB.TraceValidationEvent blk)) Nothing
   privacyFor _ _ = Just Public
 
-  detailsFor (Namespace out ("InitChainSelValidation" : tl))
+  detailsFor (Namespace out ("Validation" : tl))
               (Just (ChainDB.InitChainSelValidation ev')) =
     detailsFor (Namespace out tl) (Just ev')
-  detailsFor (Namespace out ("InitChainSelValidation" : tl)) Nothing =
+  detailsFor (Namespace out ("Validation" : tl)) Nothing =
     detailsFor (Namespace out tl ::
       Namespace (ChainDB.TraceValidationEvent blk)) Nothing
   detailsFor _ _ = Just DNormal
 
-  metricsDocFor (Namespace out ("InitChainSelValidation" : tl)) =
+  metricsDocFor (Namespace out ("Validation" : tl)) =
     metricsDocFor (Namespace out tl :: Namespace (ChainDB.TraceValidationEvent blk))
   metricsDocFor _ = []
 
-  documentFor (Namespace _ ["InitalChainSelected"]) = Just
+  documentFor (Namespace _ ["InitialChainSelected"]) = Just
     "A garbage collection for the given 'SlotNo' was performed."
   documentFor (Namespace _ ["StartedInitChainSelection"]) = Just $ mconcat
     [ "A garbage collection for the given 'SlotNo' was scheduled to happen"
     , " at the given time."
     ]
-  documentFor (Namespace o ("InitChainSelValidation" : tl)) =
+  documentFor (Namespace o ("Validation" : tl)) =
      documentFor (Namespace o tl :: Namespace (ChainDB.TraceValidationEvent blk))
   documentFor _ = Nothing
 
   allNamespaces =
-    [ Namespace [] ["InitalChainSelected"]
+    [ Namespace [] ["InitialChainSelected"]
     , Namespace [] ["StartedInitChainSelection"]
     ]
-    ++ map (nsPrependInner "InitChainSelValidation")
+    ++ map (nsPrependInner "Validation")
           (allNamespaces :: [Namespace (ChainDB.TraceValidationEvent blk)])
 
 
@@ -1139,7 +1282,8 @@ instance ConvertRawHash blk
   forHuman (ChainDB.OpenedImmutableDB immTip chunk) =
           "Opened imm db with immutable tip at " <> renderPointAsPhrase immTip <>
           " and chunk " <> showT chunk
-  forHuman ChainDB.OpenedVolatileDB = "Opened vol db"
+  forHuman (ChainDB.OpenedVolatileDB maxSlotN) =
+    "Opened vol db with max slot number " <> showT maxSlotN
   forHuman ChainDB.OpenedLgrDB = "Opened lgr db"
   forHuman ChainDB.StartedOpeningDB = "Started opening Chain DB"
   forHuman ChainDB.StartedOpeningImmutableDB = "Started opening Immutable DB"
@@ -1158,8 +1302,9 @@ instance ConvertRawHash blk
     mconcat [ "kind" .= String "OpenedImmutableDB"
              , "immtip" .= forMachine dtal immTip
              , "epoch" .= String ((Text.pack . show) epoch) ]
-  forMachine _dtal ChainDB.OpenedVolatileDB =
-      mconcat [ "kind" .= String "OpenedVolatileDB" ]
+  forMachine _dtal (ChainDB.OpenedVolatileDB maxSlotN) =
+      mconcat [ "kind" .= String "OpenedVolatileDB"
+               , "maxSlotNo" .= String (showT maxSlotN) ]
   forMachine _dtal ChainDB.OpenedLgrDB =
       mconcat [ "kind" .= String "OpenedLgrDB" ]
   forMachine _dtal ChainDB.StartedOpeningDB =
@@ -1241,7 +1386,7 @@ instance MetaTrace (ChainDB.TraceOpenEvent blk) where
 instance  ( StandardHash blk
           , ConvertRawHash blk
           ) => LogFormatting (ChainDB.TraceIteratorEvent blk) where
-  forHuman (ChainDB.UnknownRangeRequested ev') = forHuman ev'
+  forHuman (ChainDB.UnknownRangeRequested ev') = forHumanOrMachine ev'
   forHuman (ChainDB.BlockMissingFromVolatileDB realPt) = mconcat
     [ "This block is no longer in the VolatileDB because it has been garbage"
     , " collected. It might now be in the ImmDB if it was part of the"
@@ -1418,7 +1563,6 @@ instance MetaTrace (ChainDB.UnknownRange blk) where
     namespaceFor ChainDB.MissingBlock {} = Namespace [] ["MissingBlock"]
     namespaceFor ChainDB.ForkTooOld {} = Namespace []  ["ForkTooOld"]
 
-    -- TODO Tracers Is this really as intended?
     severityFor _ _ = Just Debug
 
     documentFor (Namespace _ ["MissingBlock"]) = Just
@@ -1439,18 +1583,28 @@ instance MetaTrace (ChainDB.UnknownRange blk) where
 instance ( StandardHash blk
          , ConvertRawHash blk)
          => LogFormatting (LedgerDB.TraceSnapshotEvent blk) where
-  forHuman (LedgerDB.TookSnapshot snap pt) =
-      "Took ledger snapshot " <> showT snap <>
+  forHuman (LedgerDB.TookSnapshot snap pt RisingEdge) =
+      "Taking ledger snapshot " <> showT snap <>
         " at " <> renderRealPointAsPhrase pt
+  forHuman (LedgerDB.TookSnapshot snap pt (FallingEdgeWith t)) =
+      "Took ledger snapshot " <> showT snap <>
+        " at " <> renderRealPointAsPhrase pt <> ", duration: " <> showT t
   forHuman (LedgerDB.DeletedSnapshot snap) =
       "Deleted old snapshot " <> showT snap
   forHuman (LedgerDB.InvalidSnapshot snap failure) =
-      "Invalid snapshot " <> showT snap <> showT failure
+      "Invalid snapshot " <> showT snap <> showT failure <> context
+    where
+      context = case failure of
+        LedgerDB.InitFailureRead{} ->
+             " This is most likely an expected change in the serialization format,"
+          <> " which currently requires a chain replay"
+        _ -> ""
 
-  forMachine dtals (LedgerDB.TookSnapshot snap pt) =
+  forMachine dtals (LedgerDB.TookSnapshot snap pt enclosedTiming) =
     mconcat [ "kind" .= String "TookSnapshot"
              , "snapshot" .= forMachine dtals snap
-             , "tip" .= show pt ]
+             , "tip" .= show pt
+             , "enclosedTime" .= enclosedTiming]
   forMachine dtals (LedgerDB.DeletedSnapshot snap) =
     mconcat [ "kind" .= String "DeletedSnapshot"
              , "snapshot" .= forMachine dtals snap ]
@@ -1469,12 +1623,15 @@ instance MetaTrace (LedgerDB.TraceSnapshotEvent blk) where
     severityFor  (Namespace _ ["InvalidSnapshot"]) _ = Just Error
     severityFor _ _ = Nothing
 
-    documentFor (Namespace _ ["TookSnapshot"]) = Just
-          "A snapshot was written to disk."
+    documentFor (Namespace _ ["TookSnapshot"]) = Just $ mconcat
+         [ "A snapshot is being written to disk. Two events will be traced, one"
+         , " for when the node starts taking the snapshot and another one for"
+         , " when the snapshot has been written to the disk."
+         ]
     documentFor (Namespace _ ["DeletedSnapshot"]) = Just
-          "A snapshot was written to disk."
+          "A snapshot was deleted from the disk."
     documentFor (Namespace _ ["InvalidSnapshot"]) = Just
-          "An on disk snapshot was skipped because it was invalid."
+          "An on disk snapshot was invalid. Unless it was suffixed, it will be deleted"
     documentFor _ = Nothing
 
     allNamespaces =
@@ -1492,9 +1649,9 @@ instance (StandardHash blk, ConvertRawHash blk)
           => LogFormatting (LedgerDB.TraceReplayEvent blk) where
   forHuman (LedgerDB.ReplayFromGenesis _replayTo) =
       "Replaying ledger from genesis"
-  forHuman (LedgerDB.ReplayFromSnapshot snap tip' _ _) =
-      "Replaying ledger from snapshot " <> showT snap <> " at " <>
-        renderRealPointAsPhrase tip'
+  forHuman (LedgerDB.ReplayFromSnapshot snap (ReplayStart tip') _goal) =
+      "Replaying ledger from snapshot " <> showT snap <> " at "
+      <> renderPointAsPhrase tip'
   forHuman (LedgerDB.ReplayedBlock
               pt
               _ledgerEvents
@@ -1516,7 +1673,7 @@ instance (StandardHash blk, ConvertRawHash blk)
 
   forMachine _dtal (LedgerDB.ReplayFromGenesis _replayTo) =
       mconcat [ "kind" .= String "ReplayFromGenesis" ]
-  forMachine dtal (LedgerDB.ReplayFromSnapshot snap tip' _ _) =
+  forMachine dtal (LedgerDB.ReplayFromSnapshot snap tip' _) =
       mconcat [ "kind" .= String "ReplayFromSnapshot"
                , "snapshot" .= forMachine dtal snap
                , "tip" .= show tip' ]
@@ -1617,10 +1774,10 @@ instance (ConvertRawHash blk, StandardHash blk)
     forHuman (ImmDB.ChunkValidationEvent e) = case e of
           ImmDB.StartedValidatingChunk chunkNo outOf ->
                "Validating chunk no. " <> showT chunkNo <> " out of " <> showT outOf
-            <> ". Progress: " <> showProgressT (max (chunkNoToInt chunkNo - 1) 0) (chunkNoToInt outOf) <> "%"
+            <> ". Progress: " <> showProgressT (chunkNoToInt chunkNo) (chunkNoToInt outOf + 1) <> "%"
           ImmDB.ValidatedChunk chunkNo outOf ->
                "Validated chunk no. " <> showT chunkNo <> " out of " <> showT outOf
-            <> ". Progress: " <> showProgressT (chunkNoToInt chunkNo) (chunkNoToInt outOf) <> "%"
+            <> ". Progress: " <> showProgressT (chunkNoToInt chunkNo + 1) (chunkNoToInt outOf + 1) <> "%"
           ImmDB.MissingChunkFile cn      ->
             "The chunk file with number " <> showT cn <> " is missing."
           ImmDB.InvalidChunkFile cn er    ->
@@ -1949,17 +2106,21 @@ instance StandardHash blk => LogFormatting (VolDB.TraceEvent blk) where
       mconcat [ "kind" .= String "InvalidFileNames"
                , "files" .= String (Text.pack . show $ map show fsPaths)
               ]
+    forMachine _dtal VolDB.DBClosed =
+      mconcat [ "kind" .= String "DBClosed" ]
 
 instance MetaTrace (VolDB.TraceEvent blk) where
     namespaceFor VolDB.DBAlreadyClosed {} = Namespace [] ["DBAlreadyClosed"]
     namespaceFor VolDB.BlockAlreadyHere {} = Namespace [] ["BlockAlreadyHere"]
     namespaceFor VolDB.Truncate {} = Namespace [] ["Truncate"]
     namespaceFor VolDB.InvalidFileNames {} = Namespace [] ["InvalidFileNames"]
+    namespaceFor VolDB.DBClosed {} = Namespace [] ["DBClosed"]
 
     severityFor  (Namespace _ ["DBAlreadyClosed"]) _ = Just Debug
     severityFor  (Namespace _ ["BlockAlreadyHere"]) _ = Just Debug
     severityFor  (Namespace _ ["Truncate"]) _ = Just Debug
     severityFor  (Namespace _ ["InvalidFileNames"]) _ = Just Debug
+    severityFor  (Namespace _ ["DBClosed"]) _ = Just Debug
     severityFor _ _ = Nothing
 
     documentFor  (Namespace _ ["DBAlreadyClosed"]) = Just
@@ -1970,6 +2131,8 @@ instance MetaTrace (VolDB.TraceEvent blk) where
       "Truncates a file up to offset because of the error."
     documentFor  (Namespace _ ["InvalidFileNames"]) = Just
       "Reports a list of invalid file paths."
+    documentFor  (Namespace _ ["DBClosed"]) = Just
+      "Closing the volatile DB"
     documentFor _ = Nothing
 
     allNamespaces =
@@ -1977,6 +2140,7 @@ instance MetaTrace (VolDB.TraceEvent blk) where
       , Namespace [] ["BlockAlreadyHere"]
       , Namespace [] ["Truncate"]
       , Namespace [] ["InvalidFileNames"]
+      , Namespace [] ["DBClosed"]
       ]
 
 
@@ -2007,24 +2171,38 @@ data ChainInformation = ChainInformation
     -- ^ Relative slot number of the tip of the current chain within the
     -- epoch.
   , blocksUncoupledDelta :: Int64
-    -- ^ The net change in number of blocks forged since last restart not on the
-    -- current chain.
+  , tipBlockHash :: Text
+    -- ^ Hash of the last adopted block.
+  , tipBlockParentHash :: Text
+    -- ^ Hash of the parent block of the last adopted block.
+  , tipBlockIssuerVerificationKeyHash :: BlockIssuerVerificationKeyHash
+    -- ^ Hash of the last adopted block issuer's verification key.
   }
+
 
 chainInformation
   :: forall blk. HasHeader (Header blk)
-  => ChainDB.NewTipInfo blk
+  => HasIssuer blk
+  => ConvertRawHash blk
+  => ChainDB.SelectionChangedInfo blk
   -> AF.AnchoredFragment (Header blk)
+  -> AF.AnchoredFragment (Header blk) -- ^ New fragment.
   -> Int64
   -> ChainInformation
-chainInformation newTipInfo frag blocksUncoupledDelta = ChainInformation
+chainInformation selChangedInfo oldFrag frag blocksUncoupledDelta = ChainInformation
     { slots = unSlotNo $ fromWithOrigin 0 (AF.headSlot frag)
     , blocks = unBlockNo $ fromWithOrigin (BlockNo 1) (AF.headBlockNo frag)
     , density = fragmentChainDensity frag
-    , epoch = ChainDB.newTipEpoch newTipInfo
-    , slotInEpoch = ChainDB.newTipSlotInEpoch newTipInfo
+    , epoch = ChainDB.newTipEpoch selChangedInfo
+    , slotInEpoch = ChainDB.newTipSlotInEpoch selChangedInfo
     , blocksUncoupledDelta = blocksUncoupledDelta
+    , tipBlockHash = renderHeaderHash (Proxy @blk) $ realPointHash (ChainDB.newTipPoint selChangedInfo)
+    , tipBlockParentHash = renderChainHash (Text.decodeLatin1 . B16.encode . toRawHash (Proxy @blk)) $ AF.headHash oldFrag
+    , tipBlockIssuerVerificationKeyHash = tipIssuerVkHash
     }
+  where
+    tipIssuerVkHash :: BlockIssuerVerificationKeyHash
+    tipIssuerVkHash = either (const NoBlockIssuer) getIssuerVerificationKeyHash (AF.head frag)
 
 fragmentChainDensity ::
   HasHeader (Header blk)
@@ -2100,6 +2278,15 @@ instance ( StandardHash blk
       , "expected" .= String (Text.pack $ show expect)
       , "actual" .= String (Text.pack $ show act)
       ]
+
+  forMachine _dtal (CheckpointMismatch blockNumber hdrHashExpected hdrHashActual) =
+    mconcat
+      [ "kind" .= String "CheckpointMismatch"
+      , "blockNo" .= String (Text.pack $ show blockNumber)
+      , "expected" .= String (Text.pack $ show hdrHashExpected)
+      , "actual" .= String (Text.pack $ show hdrHashActual)
+      ]
+
   forMachine dtal (OtherHeaderEnvelopeError err) =
     forMachine dtal err
 
@@ -2110,8 +2297,8 @@ instance (   LogFormatting (LedgerError blk)
     forMachine dtal (ExtValidationErrorLedger err) = forMachine dtal err
     forMachine dtal (ExtValidationErrorHeader err) = forMachine dtal err
 
-    forHuman (ExtValidationErrorLedger err) =  forHuman err
-    forHuman (ExtValidationErrorHeader err) =  forHuman err
+    forHuman (ExtValidationErrorLedger err) =  forHumanOrMachine err
+    forHuman (ExtValidationErrorHeader err) =  forHumanOrMachine err
 
     asMetrics (ExtValidationErrorLedger err) =  asMetrics err
     asMetrics (ExtValidationErrorHeader err) =  asMetrics err

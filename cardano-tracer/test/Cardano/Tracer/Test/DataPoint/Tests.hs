@@ -6,27 +6,27 @@ module Cardano.Tracer.Test.DataPoint.Tests
   ( tests
   ) where
 
+import           Cardano.Tracer.Configuration
+import           Cardano.Tracer.MetaTrace
+import           Cardano.Tracer.Run (doRunCardanoTracer)
+import           Cardano.Tracer.Test.Forwarder
+import           Cardano.Tracer.Test.TestSetup
+import           Cardano.Tracer.Test.Utils
+import           Cardano.Tracer.Utils (applyBrake, initDataPointRequestors, initProtocolsBrake)
+
 import           Control.Concurrent.Async (withAsync)
 import           Control.Concurrent.STM (atomically)
 import           Control.Concurrent.STM.TVar (TVar, modifyTVar', newTVarIO, readTVarIO)
 import           Data.Aeson (decode')
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
+import           System.Time.Extra
+
 import           Test.Tasty
 import           Test.Tasty.QuickCheck
-import           System.Time.Extra
 
 import           Trace.Forward.Protocol.DataPoint.Type
 import           Trace.Forward.Utils.DataPoint (askForDataPoints)
-
-import           Cardano.Tracer.Configuration
-import           Cardano.Tracer.MetaTrace
-import           Cardano.Tracer.Run (doRunCardanoTracer)
-import           Cardano.Tracer.Utils (applyBrake, initProtocolsBrake, initDataPointRequestors)
-
-import           Cardano.Tracer.Test.Forwarder
-import           Cardano.Tracer.Test.TestSetup
-import           Cardano.Tracer.Test.Utils
 
 tests :: TestSetup Identity -> TestTree
 tests ts = localOption (QuickCheckTests 1) $ testGroup "Test.DataPoint"
@@ -38,9 +38,9 @@ propDataPoint ts@TestSetup{..} rootDir localSock = do
   stopProtocols <- initProtocolsBrake
   dpRequestors <- initDataPointRequestors
   savedDPValues :: TVar DataPointValues <- newTVarIO []
-  withAsync (doRunCardanoTracer config (Just $ rootDir <> "/../state") stderrShowTracer stopProtocols dpRequestors) . const $ do
+  withAsync (doRunCardanoTracer config (Just $ rootDir <> "/../state") stderrShowTracer stopProtocols dpRequestors) \_ -> do
     sleep 1.0
-    withAsync (launchForwardersSimple ts Initiator localSock 1000 10000) . const $ do
+    withAsync (launchForwardersSimple ts Initiator localSock 1000 10000) \_ -> do
       sleep 1.5
       -- We know that there is one single "node" only (and one single requestor too).
       -- requestors ((_, dpRequestor):_) <- M.toList <$> readTVarIO dpRequestors
@@ -91,5 +91,7 @@ propDataPoint ts@TestSetup{..} rootDir localSock = do
     , rotation       = Nothing
     , verbosity      = Just Minimum
     , metricsComp    = Nothing
+    , metricsHelp    = Nothing
     , hasForwarding  = Nothing
+    , resourceFreq   = Nothing
     }

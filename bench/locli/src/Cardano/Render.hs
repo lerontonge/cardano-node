@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeInType #-}
+{-# LANGUAGE TypeOperators #-}
 
 {- HLINT ignore "Use concatMap" -}
 {- HLINT ignore "Use fromMaybe" -}
@@ -21,7 +21,6 @@ import Data.CDF
 import Cardano.Org
 import Cardano.Util
 import Cardano.Analysis.API
-
 
 data RenderConfig
   = RenderConfig
@@ -361,7 +360,7 @@ renderAnalysisCDFs a fieldSelr _c2a centileSelr rc@RenderConfig{rcFormat=AsOrg} 
     , tExtended       = True
     , tApexHeader     = Just "centile"
     , tColumns        = fields' <&> fmap (T.intercalate ":") . renderFieldCentiles x cdfSamplesProps
-    , tRowHeaders     = percSpecs <&> T.take 6 . T.pack . printf "%.4f" . unCentile
+    , tRowHeaders     = percSpecs <&> (T.take 6 . T.pack . printf "%.4f") . unCentile
     , tSummaryHeaders = ["avg", "samples"]
     , tSummaryValues  = [ fields' <&>
                           \f@Field{..} ->

@@ -11,7 +11,24 @@ module Cardano.Tracing.Peer
   , tracePeers
   ) where
 
+import           Cardano.BM.Data.LogItem (LOContent (..))
+import           Cardano.BM.Trace (traceNamedObject)
+import           Cardano.BM.Tracing
 import           Cardano.Node.Orphans ()
+import           Cardano.Node.Queries
+import           Ouroboros.Consensus.Block (Header)
+import           Ouroboros.Consensus.MiniProtocol.ChainSync.Client (ChainSyncClientHandle,
+                   csCandidate, viewChainSyncState)
+import           Ouroboros.Consensus.Util.NormalForm.StrictTVar (StrictTVar)
+import           Ouroboros.Consensus.Util.Orphans ()
+import qualified Ouroboros.Network.AnchoredFragment as Net
+import           Ouroboros.Network.Block (unSlotNo)
+import qualified Ouroboros.Network.Block as Net
+import qualified Ouroboros.Network.BlockFetch.ClientRegistry as Net
+import           Ouroboros.Network.BlockFetch.ClientState (PeerFetchInFlight (..),
+                   PeerFetchStatus (..), readFetchClientState)
+import           Ouroboros.Network.ConnectionId (remoteAddress)
+import           Ouroboros.Network.NodeToNode (RemoteAddress)
 
 import qualified Control.Concurrent.Class.MonadSTM.Strict as STM
 import           Control.DeepSeq (NFData (..))
@@ -24,26 +41,9 @@ import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           GHC.Generics (Generic)
-import           NoThunks.Class (AllowThunk (..), NoThunks)
 import           Text.Printf (printf)
 
-import           Cardano.BM.Data.LogItem (LOContent (..))
-import           Cardano.BM.Trace (traceNamedObject)
-import           Cardano.BM.Tracing
-
-import           Ouroboros.Consensus.Block (Header)
-import           Ouroboros.Consensus.Util.Orphans ()
-import           Ouroboros.Network.ConnectionId (remoteAddress)
-
-import qualified Ouroboros.Network.AnchoredFragment as Net
-import           Ouroboros.Network.Block (unSlotNo)
-import qualified Ouroboros.Network.Block as Net
-import qualified Ouroboros.Network.BlockFetch.ClientRegistry as Net
-import           Ouroboros.Network.BlockFetch.ClientState (PeerFetchInFlight (..),
-                   PeerFetchStatus (..), readFetchClientState)
-import           Ouroboros.Network.NodeToNode (RemoteAddress)
-
-import           Cardano.Node.Queries
+import           NoThunks.Class (AllowThunk (..), NoThunks)
 
 {- HLINT ignore "Use =<<" -}
 {- HLINT ignore "Use <=<" -}
@@ -97,9 +97,9 @@ getCurrentPeers nkd = mapNodeKernelDataIO extractPeers nkd
   tuple3pop (a, b, _) = (a, b)
 
   getCandidates
-    :: STM.StrictTVar IO (Map peer (STM.StrictTVar IO (Net.AnchoredFragment (Header blk))))
+    :: StrictTVar IO (Map peer (ChainSyncClientHandle IO blk))
     -> STM.STM IO (Map peer (Net.AnchoredFragment (Header blk)))
-  getCandidates var = STM.readTVar var >>= traverse STM.readTVar
+  getCandidates handle = viewChainSyncState handle csCandidate
 
   extractPeers :: NodeKernel IO RemoteAddress LocalConnectionId blk
                 -> IO [Peer blk]
@@ -109,7 +109,7 @@ getCurrentPeers nkd = mapNodeKernelDataIO extractPeers nkd
                                        . Net.readFetchClientsStateVars
                                        . getFetchClientRegistry $ kernel
                                      )
-    candidates <- STM.atomically . getCandidates . getNodeCandidates $ kernel
+    candidates <- STM.atomically . getCandidates . getChainSyncHandles $ kernel
 
     let peers = flip Map.mapMaybeWithKey candidates $ \cid af ->
                   maybe Nothing

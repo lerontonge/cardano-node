@@ -1,13 +1,16 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Cardano.Testnet.Test.Misc where
+
+import           Cardano.Api (docToString)
+
+import           Cardano.CLI.EraBased.Run.Query (renderOpCertIntervalInformation)
+import           Cardano.CLI.Types.Common
+import           Cardano.CLI.Types.Output
 
 import           Prelude
 
 import           Data.List (isInfixOf)
 import qualified GHC.Stack as GHC
-
-import           Cardano.CLI.Shelley.Output
-import           Cardano.CLI.Shelley.Run.Query
-import           Cardano.CLI.Types
 
 import           Hedgehog (success)
 import qualified Hedgehog as H
@@ -16,19 +19,18 @@ import           Hedgehog.Extras.Test.Base (Integration, failMessage, note_)
 -- | This property checks that a given operational certificate has a valid specified KES starting period.
 prop_op_cert_valid_kes_period :: GHC.HasCallStack => FilePath -> QueryKesPeriodInfoOutput -> Integration ()
 prop_op_cert_valid_kes_period opCertFp output =
-  GHC.withFrozenCallStack $
     case qKesOpCertIntervalInformation output of
       OpCertWithinInterval{} -> success
       info@OpCertStartingKesPeriodIsInTheFuture{} ->
-        failMessage GHC.callStack
+        failMessage GHC.callStack . docToString
           $ "Expected OpCertWithinInterval but got: OpCertStartingKesPeriodIsInTheFuture\n"
           <> renderOpCertIntervalInformation opCertFp info
       info@OpCertExpired{} ->
-        failMessage GHC.callStack
+        failMessage GHC.callStack . docToString
           $ "Expected OpCertWithinInterval but got: OpCertExpired\n"
           <> renderOpCertIntervalInformation opCertFp info
       info@OpCertSomeOtherError{} ->
-        failMessage GHC.callStack
+        failMessage GHC.callStack . docToString
           $ "Expected OpCertWithinInterval but got: OpCertSomeOtherError\n"
           <> renderOpCertIntervalInformation opCertFp info
 

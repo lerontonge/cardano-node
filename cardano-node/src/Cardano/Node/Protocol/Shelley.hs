@@ -19,47 +19,35 @@ module Cardano.Node.Protocol.Shelley
   , readLeaderCredentials
   , genesisHashToPraosNonce
   , validateGenesis
+  , checkExpectedGenesisHash
   ) where
-
-import           Cardano.Prelude (ConvertText (..))
-import           Control.Exception (IOException)
-import           Control.Monad.Except (ExceptT, MonadError (..))
 
 import qualified Cardano.Api as Api
 import           Cardano.Api.Shelley hiding (FileError)
 
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
-import qualified Data.Text as T
-
-import           Control.Monad.Trans.Except.Extra (firstExceptT, handleIOExceptT, hoistEither, left,
-                   newExceptT)
-
 import qualified Cardano.Crypto.Hash.Class as Crypto
+import           Cardano.Ledger.BaseTypes (ProtVer (..), natVersion)
 import           Cardano.Ledger.Crypto (StandardCrypto)
 import           Cardano.Ledger.Keys (coerceKeyRole)
-
-import qualified Ouroboros.Consensus.Cardano as Consensus
-import qualified Ouroboros.Consensus.Mempool.Capacity as TxLimits
-import           Ouroboros.Consensus.Protocol.Praos.Common (PraosCanBeLeader (..))
-import           Ouroboros.Consensus.Shelley.Node (Nonce (..), ProtocolParamsShelley (..),
-                   ProtocolParamsShelleyBased (..), ShelleyLeaderCredentials (..))
-
-import           Cardano.Ledger.BaseTypes (ProtVer (..), natVersion)
 import qualified Cardano.Ledger.Shelley.Genesis as Shelley
-
-
-import           Cardano.Node.Types
-
-import           Cardano.Tracing.OrphanInstances.HardFork ()
-import           Cardano.Tracing.OrphanInstances.Shelley ()
-
+import           Cardano.Node.Protocol.Types
 import           Cardano.Node.Tracing.Era.HardFork ()
 import           Cardano.Node.Tracing.Era.Shelley ()
 import           Cardano.Node.Tracing.Formatting ()
 import           Cardano.Node.Tracing.Tracers.ChainDB ()
+import           Cardano.Node.Types
+import           Cardano.Tracing.OrphanInstances.HardFork ()
+import           Cardano.Tracing.OrphanInstances.Shelley ()
+import qualified Ouroboros.Consensus.Cardano as Consensus
+import           Ouroboros.Consensus.Protocol.Praos.Common (PraosCanBeLeader (..))
+import           Ouroboros.Consensus.Shelley.Node (Nonce (..), ProtocolParamsShelleyBased (..),
+                   ShelleyLeaderCredentials (..))
 
-import           Cardano.Node.Protocol.Types
+import           Control.Exception (IOException)
+import           Control.Monad
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
+import qualified Data.Text as T
 
 ------------------------------------------------------------------------------
 -- Shelley protocol
@@ -88,18 +76,14 @@ mkSomeConsensusProtocolShelley NodeShelleyProtocolConfiguration {
                          readLeaderCredentials files
 
     return $ SomeConsensusProtocol Api.ShelleyBlockType $ Api.ProtocolInfoArgsShelley
+      genesis
       Consensus.ProtocolParamsShelleyBased {
-        shelleyBasedGenesis = genesis,
         shelleyBasedInitialNonce = genesisHashToPraosNonce genesisHash,
         shelleyBasedLeaderCredentials =
             leaderCredentials
       }
-      Consensus.ProtocolParamsShelley {
-        shelleyProtVer =
-          ProtVer (natVersion @2) 0,
-        shelleyMaxTxCapacityOverrides =
-          TxLimits.mkOverrides TxLimits.noOverridesMeasure
-      }
+      (ProtVer (natVersion @2) 0)
+
 
 genesisHashToPraosNonce :: GenesisHash -> Nonce
 genesisHashToPraosNonce (GenesisHash h) = Nonce (Crypto.castHash h)
@@ -114,22 +98,23 @@ readGenesisAny :: FromJSON genesis
                => GenesisFile
                -> Maybe GenesisHash
                -> ExceptT GenesisReadError IO (genesis, GenesisHash)
-readGenesisAny (GenesisFile file) mbExpectedGenesisHash = do
-    content <- handleIOExceptT (GenesisReadFileError file) $
-                 BS.readFile file
-    let genesisHash = GenesisHash (Crypto.hashWith id content)
-    checkExpectedGenesisHash genesisHash
+readGenesisAny (GenesisFile file) mExpectedGenesisHash = do
+    content <- handleIOExceptT (GenesisReadFileError file) $ BS.readFile file
+    genesisHash <- checkExpectedGenesisHash content mExpectedGenesisHash
     genesis <- firstExceptT (GenesisDecodeError file) $ hoistEither $
                  Aeson.eitherDecodeStrict' content
     return (genesis, genesisHash)
-  where
-    checkExpectedGenesisHash :: GenesisHash
-                             -> ExceptT GenesisReadError IO ()
-    checkExpectedGenesisHash actual =
-      case mbExpectedGenesisHash of
-        Just expected | actual /= expected
-          -> throwError (GenesisHashMismatch actual expected)
-        _ -> return ()
+
+checkExpectedGenesisHash
+  :: BS.ByteString -- ^ genesis bytes
+  -> Maybe GenesisHash -- ^ expected hash, check for hash match, if provided
+  -> ExceptT GenesisReadError IO GenesisHash
+checkExpectedGenesisHash genesisBytes mExpected = do
+  let actual = GenesisHash $ Crypto.hashWith id genesisBytes
+  forM_ mExpected $ \expected ->
+    when (actual /= expected) $
+      throwError (GenesisHashMismatch actual expected)
+  pure actual
 
 validateGenesis :: ShelleyGenesis StandardCrypto
                 -> ExceptT GenesisValidationError IO ()
@@ -280,9 +265,9 @@ data ShelleyProtocolInstantiationError =
   deriving Show
 
 instance Error ShelleyProtocolInstantiationError where
-  displayError (GenesisReadError err) = displayError err
-  displayError (GenesisValidationError err) = displayError err
-  displayError (PraosLeaderCredentialsError err) = displayError err
+  prettyError (GenesisReadError err) = prettyError err
+  prettyError (GenesisValidationError err) = prettyError err
+  prettyError (PraosLeaderCredentialsError err) = prettyError err
 
 
 data GenesisReadError =
@@ -292,26 +277,25 @@ data GenesisReadError =
   deriving Show
 
 instance Error GenesisReadError where
-  displayError (GenesisReadFileError fp err) =
+  prettyError (GenesisReadFileError fp err) =
         "There was an error reading the genesis file: "
-     <> toS fp <> " Error: " <> show err
+     <> pshow fp <> " Error: " <> pshow err
 
-  displayError (GenesisHashMismatch actual expected) =
-        "Wrong genesis file: the actual hash is " <> show actual
+  prettyError (GenesisHashMismatch actual expected) =
+        "Wrong genesis file: the actual hash is " <> pshow actual
      <> ", but the expected genesis hash given in the node "
-     <> "configuration file is " <> show expected
+     <> "configuration file is " <> pshow expected
 
-  displayError (GenesisDecodeError fp err) =
+  prettyError (GenesisDecodeError fp err) =
         "There was an error parsing the genesis file: "
-     <> toS fp <> " Error: " <> show err
-
+     <> pshow fp <> " Error: " <> pshow err
 
 newtype GenesisValidationError = GenesisValidationErrors [Shelley.ValidationErr]
   deriving Show
 
 instance Error GenesisValidationError where
-  displayError (GenesisValidationErrors vErrs) =
-    T.unpack (T.unlines (map Shelley.describeValidationErr vErrs))
+  prettyError (GenesisValidationErrors vErrs) =
+    pshow (T.unlines (map Shelley.describeValidationErr vErrs))
 
 
 data PraosLeaderCredentialsError =
@@ -331,21 +315,21 @@ data PraosLeaderCredentialsError =
   deriving Show
 
 instance Error PraosLeaderCredentialsError where
-  displayError (CredentialsReadError fp err) =
+  prettyError (CredentialsReadError fp err) =
         "There was an error reading a credentials file: "
-     <> toS fp <> " Error: " <> show err
+     <> pshow fp <> " Error: " <> pshow err
 
-  displayError (EnvelopeParseError fp err) =
+  prettyError (EnvelopeParseError fp err) =
         "There was an error parsing a credentials envelope: "
-     <> toS fp <> " Error: " <> show err
+     <> pshow fp <> " Error: " <> pshow err
 
-  displayError (FileError fileErr) = displayError fileErr
-  displayError (MismatchedKesKey kesFp certFp) =
-       "The KES key provided at: " <> show kesFp
-    <> " does not match the KES key specified in the operational certificate at: " <> show certFp
-  displayError OCertNotSpecified  = missingFlagMessage "shelley-operational-certificate"
-  displayError VRFKeyNotSpecified = missingFlagMessage "shelley-vrf-key"
-  displayError KESKeyNotSpecified = missingFlagMessage "shelley-kes-key"
+  prettyError (FileError fileErr) = prettyError fileErr
+  prettyError (MismatchedKesKey kesFp certFp) =
+       "The KES key provided at: " <> pshow kesFp
+    <> " does not match the KES key specified in the operational certificate at: " <> pshow certFp
+  prettyError OCertNotSpecified  = pshow $ missingFlagMessage "shelley-operational-certificate"
+  prettyError VRFKeyNotSpecified = pshow $ missingFlagMessage "shelley-vrf-key"
+  prettyError KESKeyNotSpecified = pshow $ missingFlagMessage "shelley-kes-key"
 
 missingFlagMessage :: String -> String
 missingFlagMessage flag =

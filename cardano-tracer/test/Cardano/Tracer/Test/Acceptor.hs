@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -6,24 +7,30 @@ module Cardano.Tracer.Test.Acceptor
   , launchAcceptorsSimple
   ) where
 
-import           Control.Concurrent.STM.TVar (newTVarIO, readTVarIO)
-import           Control.Concurrent.Async.Extra (sequenceConcurrently)
+import           Cardano.Tracer.Acceptors.Run
+import           Cardano.Tracer.Configuration
+import           Cardano.Tracer.Environment
+#if RTVIEW
+import           Cardano.Tracer.Handlers.RTView.Run
+import           Cardano.Tracer.Handlers.RTView.State.Historical
+#endif
+import           Cardano.Tracer.MetaTrace
+import           Cardano.Tracer.Types
+import           Cardano.Tracer.Utils
+
 import           Control.Concurrent.Extra (newLock)
-import           Control.Monad (forever, forM_, void)
+#if RTVIEW
+import           Control.Concurrent.STM.TVar (newTVarIO, readTVarIO)
+#else
+import           Control.Concurrent.STM.TVar (readTVarIO)
+#endif
+import           Control.Monad (forM_, forever)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import           System.Time.Extra (sleep)
 
-import           Cardano.Tracer.Environment
-import           Cardano.Tracer.Acceptors.Run
-import           Cardano.Tracer.Configuration
-import           Cardano.Tracer.Handlers.RTView.Run
-import           Cardano.Tracer.Handlers.RTView.State.Historical
-import           Cardano.Tracer.MetaTrace
-import           Cardano.Tracer.Types
-import           Cardano.Tracer.Utils
 import           Trace.Forward.Utils.DataPoint
 
 data AcceptorsMode = Initiator | Responder
@@ -39,9 +46,12 @@ launchAcceptorsSimple mode localSock dpName = do
   connectedNodes <- initConnectedNodes
   connectedNodesNames <- initConnectedNodesNames
   acceptedMetrics <- initAcceptedMetrics
+#if RTVIEW
   savedTO <- initSavedTraceObjects
+#endif
   currentLogLock <- newLock
   currentDPLock <- newLock
+#if RTVIEW
   eventsQueues <- initEventsQueues Nothing connectedNodesNames dpRequestors currentDPLock
 
   chainHistory <- initBlockchainHistory
@@ -49,32 +59,43 @@ launchAcceptorsSimple mode localSock dpName = do
   txHistory <- initTransactionsHistory
 
   rtViewPageOpened <- newTVarIO False
+#endif
 
   tr <- mkTracerTracer $ SeverityF $ Just Warning
 
-  let tracerEnv =
-        TracerEnv
-          { teConfig                = mkConfig
-          , teConnectedNodes        = connectedNodes
-          , teConnectedNodesNames   = connectedNodesNames
-          , teAcceptedMetrics       = acceptedMetrics
-          , teSavedTO               = savedTO
-          , teBlockchainHistory     = chainHistory
-          , teResourcesHistory      = resourcesHistory
-          , teTxHistory             = txHistory
-          , teCurrentLogLock        = currentLogLock
-          , teCurrentDPLock         = currentDPLock
-          , teEventsQueues          = eventsQueues
-          , teDPRequestors          = dpRequestors
-          , teProtocolsBrake        = protocolsBrake
-          , teRTViewPageOpened      = rtViewPageOpened
-          , teRTViewStateDir        = Nothing
-          , teTracer                = tr
-          , teReforwardTraceObjects = \_-> pure ()
-          }
+  registry <- newRegistry
+
+  let tracerEnv :: TracerEnv
+      tracerEnv = TracerEnv
+        { teConfig                = mkConfig
+        , teConnectedNodes        = connectedNodes
+        , teConnectedNodesNames   = connectedNodesNames
+        , teAcceptedMetrics       = acceptedMetrics
+        , teCurrentLogLock        = currentLogLock
+        , teCurrentDPLock         = currentDPLock
+        , teDPRequestors          = dpRequestors
+        , teProtocolsBrake        = protocolsBrake
+        , teTracer                = tr
+        , teReforwardTraceObjects = \_-> pure ()
+        , teRegistry              = registry
+        , teStateDir              = Nothing
+        , teMetricsHelp           = []
+        }
+
+      tracerEnvRTView :: TracerEnvRTView
+      tracerEnvRTView = TracerEnvRTView
+#if RTVIEW
+        { teSavedTO           = savedTO
+        , teBlockchainHistory = chainHistory
+        , teResourcesHistory  = resourcesHistory
+        , teTxHistory         = txHistory
+        , teEventsQueues      = eventsQueues
+        , teRTViewPageOpened  = rtViewPageOpened
+        }
+#endif
             -- NOTE: no reforwarding in this acceptor.
-  void . sequenceConcurrently $
-    [ runAcceptors tracerEnv
+  sequenceConcurrently_
+    [ runAcceptors tracerEnv tracerEnvRTView
     , runDataPointsPrinter dpName dpRequestors
     ]
  where
@@ -92,7 +113,9 @@ launchAcceptorsSimple mode localSock dpName = do
     , rotation       = Nothing
     , verbosity      = Just Minimum
     , metricsComp    = Nothing
+    , metricsHelp    = Nothing
     , hasForwarding  = Nothing
+    , resourceFreq   = Nothing
     }
 
 -- | To be able to ask any 'DataPoint' by the name without knowing the actual type,

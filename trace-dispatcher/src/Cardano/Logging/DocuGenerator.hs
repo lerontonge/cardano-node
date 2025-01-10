@@ -1,3 +1,5 @@
+{-# LANGUAGE DerivingVia #-}
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -10,6 +12,7 @@ module Cardano.Logging.DocuGenerator (
     documentTracer
   , documentTracer'
   , docuResultsToText
+  , docuResultsToMetricsHelptext
   -- Callbacks
   , docTracer
   , docTracerDatapoint
@@ -17,44 +20,51 @@ module Cardano.Logging.DocuGenerator (
   , addFiltered
   , addLimiter
   , addSilent
-  -- Convenience functions
-  , showT
   , addDocumentedNamespace
 
   , DocuResult
-  , DocTracer
+  , DocTracer(..)
 ) where
 
+import           Cardano.Logging.ConfigurationParser ()
+import           Cardano.Logging.Types
 
+import           Prelude hiding (lines, unlines)
+
+import           Control.Monad.IO.Class (MonadIO, liftIO)
+import qualified Control.Tracer as TR
+import           Data.Aeson (ToJSON)
+import qualified Data.Aeson.Encode.Pretty as AE
 import           Data.IORef (modifyIORef, newIORef, readIORef)
 import           Data.List (groupBy, intersperse, nub, sortBy)
 import qualified Data.Map.Strict as Map
 import           Data.Maybe (fromMaybe, mapMaybe)
-import           Data.Text (Text, pack, toLower)
-import qualified Data.Text as T
+import           Data.Text as T (Text, empty, intercalate, lines, pack, split, stripPrefix, toLower,
+                   unlines)
 import           Data.Text.Internal.Builder (toLazyText)
 import           Data.Text.Lazy (toStrict)
 import           Data.Text.Lazy.Builder (Builder, fromString, fromText, singleton)
 import           Data.Time (getZonedTime)
 
-import           Cardano.Logging.Types
-import           Control.Monad.IO.Class (MonadIO, liftIO)
-import qualified Control.Tracer as T
-
 import           Trace.Forward.Utils.DataPoint (DataPoint (..))
 
+type InconsistencyWarning = Text
 
+utf16CircledT :: Text
+utf16CircledT = "\x24E3"
+
+utf16CircledS :: Text
+utf16CircledS = "\x24E2"
+
+utf16CircledM :: Text
+utf16CircledM = "\x24DC"
 
 -- | Convenience function for adding a namespace prefix to a documented
 addDocumentedNamespace  :: [Text] -> Documented a -> Documented a
-addDocumentedNamespace  tl (Documented list) =
+addDocumentedNamespace  out (Documented list) =
   Documented $ map
-    (\ dm@DocMsg {} -> dm {dmNamespace = nsReplacePrefix (dmNamespace dm) tl})
+    (\ dm@DocMsg {} -> dm {dmNamespace = nsReplacePrefix out (dmNamespace dm)})
     list
-
--- | Convenience function
-showT :: Show a => a -> Text
-showT = pack . show
 
 data DocuResult =
   DocuTracer Builder
@@ -67,6 +77,7 @@ data DocTracer = DocTracer {
     , dtSilent      :: [[Text]]
     , dtNoMetrics   :: [[Text]]
     , dtBuilderList :: [([Text], DocuResult)]
+    , dtWarnings    :: [InconsistencyWarning]
 } deriving (Show)
 
 instance Semigroup DocTracer where
@@ -75,6 +86,7 @@ instance Semigroup DocTracer where
                  (dtSilent dtl <> dtSilent dtr)
                  (dtNoMetrics dtl <> dtNoMetrics dtr)
                  (dtBuilderList dtl <> dtBuilderList dtr)
+                 (dtWarnings dtl <> dtWarnings dtr)
 
 isTracer :: DocuResult -> Bool
 isTracer DocuTracer {} = True
@@ -127,11 +139,16 @@ documentTracer tracer = do
                       ((_i, ld) : _) -> ldSilent ld
                       [] -> False
         hasNoMetrics = null metricsItems
+        warnings = concatMap (\(i, ld) -> case ldNamespace ld of
+                                            (_,_): _       -> warningItem (i, ld)
+                                            []             -> (pack "No ns for " <> ldDoc ld) :
+                                              warningItem (i, ld)) sortedItems
     pure $ DocTracer
             [tracerName]
             [tracerName | silent]
             [tracerName | hasNoMetrics]
             (messageDocs ++ metricsDocs)
+            warnings
 
   where
     documentItem :: (Int, LogDoc) -> DocuResult
@@ -149,6 +166,13 @@ documentTracer tracer = do
                       , propertiesBuilder ld
                       , configBuilder ld
                       ]
+
+    warningItem :: (Int, LogDoc) -> [InconsistencyWarning]
+    warningItem (_idx, ld@LogDoc {..}) =
+      case ldBackends of
+        [DatapointBackend] -> namespacesWarning (nub ldNamespace) ld
+        _ -> namespacesWarning (nub ldNamespace) ld
+                ++ propertiesWarning ld
 
     documentMetrics :: [LogDoc] -> [([Text],DocuResult)]
     documentMetrics logDocs =
@@ -189,6 +213,10 @@ documentTracer tracer = do
     namespaceMetricsBuilder (nsPr, nsPo) = mconcat (intersperse (singleton '.')
                                                       (map fromText (nsPr ++ nsPo)))
 
+    namespacesWarning :: [([Text], [Text])] -> LogDoc -> [InconsistencyWarning]
+    namespacesWarning [] ld  = ["Namespace missing " <> ldDoc ld]
+    namespacesWarning _ _  = []
+
     propertiesBuilder :: LogDoc -> Builder
     propertiesBuilder LogDoc {..} =
         case ldSeverityCoded of
@@ -197,11 +225,25 @@ documentTracer tracer = do
       <>
         case ldPrivacyCoded of
           Just p  -> fromText "Privacy:   " <> asCode (fromString (show p)) <> "\n"
-          Nothing -> fromText "nPrivacy missing" <> "\n"
+          Nothing -> fromText "Privacy missing" <> "\n"
       <>
         case ldDetailsCoded of
           Just d  -> fromText "Details:   " <> asCode (fromString (show d)) <> "\n"
-          Nothing -> fromText "nPrivacy missing" <> "\n"
+          Nothing -> fromText "Details missing" <> "\n"
+
+    propertiesWarning :: LogDoc ->[InconsistencyWarning]
+    propertiesWarning LogDoc {..} =
+        case ldSeverityCoded of
+          Just _s -> []
+          Nothing -> map (\ns -> pack "Severity missing" <> nsRawToText ns) ldNamespace
+      <>
+        case ldPrivacyCoded of
+          Just _p -> []
+          Nothing -> map (\ns -> pack "Privacy missing" <> nsRawToText ns) ldNamespace
+      <>
+        case ldDetailsCoded of
+          Just _d -> []
+          Nothing -> map (\ns -> pack "Details missing" <> nsRawToText ns) ldNamespace
 
     configBuilder :: LogDoc -> Builder
     configBuilder LogDoc {..} =
@@ -281,8 +323,8 @@ documentTracersRun tracers = do
       mapM_
         (\ (ns, idx) -> do
             let condDoc = documentFor ns
-                -- TODO YUP: add error reporting
                 doc = fromMaybe mempty condDoc
+
             modifyIORef docRef
                         (Map.insert
                           idx
@@ -293,7 +335,7 @@ documentTracersRun tracers = do
                             , ldPrivacyCoded  = privacyFor ns Nothing
                             , ldDetailsCoded  = detailsFor ns Nothing
                           }))
-            T.traceWith tr (emptyLoggingContext {lcNSInner = nsGetInner ns},
+            TR.traceWith tr (emptyLoggingContext {lcNSInner = nsInner ns},
                             Left (TCDocument idx dc)))
         nsIdx
 
@@ -302,7 +344,7 @@ documentTracersRun tracers = do
 docTracer :: MonadIO m =>
      BackendConfig
   -> Trace m FormattedMessage
-docTracer backendConfig = Trace $ T.arrow $ T.emit output
+docTracer backendConfig = Trace $ TR.arrow $ TR.emit output
   where
     output p@(_, Left TCDocument {}) =
       docIt backendConfig p
@@ -311,7 +353,7 @@ docTracer backendConfig = Trace $ T.arrow $ T.emit output
 docTracerDatapoint :: MonadIO m =>
      BackendConfig
   -> Trace m DataPoint
-docTracerDatapoint backendConfig = Trace $ T.arrow $ T.emit output
+docTracerDatapoint backendConfig = Trace $ TR.arrow $ TR.emit output
   where
     output p@(_, Left TCDocument {}) =
       docItDatapoint backendConfig p
@@ -435,8 +477,16 @@ docuResultsToText dt@DocTracer {..} configuration = do
       header4  = fromText "\n## Datapoints\n\n"
       contentD = mconcat $ intersperse (fromText "\n\n")
                               (map (unpackDocu . snd) datapointBuilders)
-      config  = fromString $ "\n\nConfiguration: " <> show configuration <> "\n\n"
-      numbers = fromString $  show (length dtBuilderList) <> " log messages." <> "\n\n"
+      config  = fromText "\n## Configuration: \n```\n"
+                        <> AE.encodePrettyToTextBuilder configuration
+                        <> fromText "\n```\n"
+      numbers = fromString $  show (length traceBuilders) <> " log messages, " <> "\n" <>
+                              show (length metricsBuilders) <> " metrics," <> "\n" <>
+                              show (length datapointBuilders) <> " datapoints." <> "\n\n"
+
+      legend  = fromText $ utf16CircledT <> "- This is the root of a tracer\n\n" <>
+                           utf16CircledS <> "- This is the root of a tracer that is silent because of the current configuration\n\n" <>
+                           utf16CircledM <> "- This is the root of a tracer, that provides metrics\n\n"
       ts      = fromString $ "Generated at " <> show time <> ".\n"
   pure $ toStrict $ toLazyText (
          header
@@ -450,6 +500,7 @@ docuResultsToText dt@DocTracer {..} configuration = do
       <> contentD
       <> config
       <> numbers
+      <> legend
       <> ts)
 
 
@@ -458,6 +509,7 @@ generateTOC dt traces metrics datapoints =
        generateTOCTraces
     <> generateTOCMetrics
     <> generateTOCDatapoints
+    <> generateTOCRest
   where
     generateTOCTraces =
       fromText "### [Trace Messages](#trace-messages)\n\n"
@@ -471,6 +523,10 @@ generateTOC dt traces metrics datapoints =
       fromText "### [Datapoints](#datapoints)\n\n"
       <> mconcat (reverse (fst (foldl (namespaceToToc Nothing) ([], []) datapoints)))
       <> fromText "\n"
+    generateTOCRest =
+         fromText "### [Configuration](#configuration)\n\n"
+      <> fromText "\n"
+
 
     namespaceToToc :: Maybe DocTracer -> ([Builder], [Text]) -> [Text]-> ([Builder], [Text])
     namespaceToToc condDocTracer (builders, context) ns =
@@ -481,7 +537,7 @@ generateTOC dt traces metrics datapoints =
                       let symbolsText = case condDocTracer of
                                           Nothing -> ""
                                           Just docTracers -> getSymbolsOf ns docTracers
-                      in ( fromString (concat (replicate (length context) "\t"))
+                      in ( fromString (concat (replicate (length context) "    "))
                           <> fromText "1. "
                           <> fromText "["
                           <> fromText (last ns)
@@ -507,7 +563,7 @@ generateTOC dt traces metrics datapoints =
         [single] -> let symbolsText = case condDocTracer of
                               Nothing -> ""
                               Just docTracers -> getSymbolsOf (context ++ [single]) docTracers
-                    in ((fromString (concat (replicate (length context) "\t"))
+                    in ((fromString (concat (replicate (length context) "    "))
                                 <> fromText "1. "
                                 <> fromText "["
                                 <> fromText single
@@ -519,7 +575,7 @@ generateTOC dt traces metrics datapoints =
           let symbolsText = case condDocTracer of
                               Nothing -> ""
                               Just docTracers -> getSymbolsOf (context ++ [hdn]) docTracers
-              builder = fromString (concat (replicate (length context) "\t"))
+              builder = fromString (concat (replicate (length context) "    "))
                         <> fromText "1. __"
                         <> fromText hdn
                         <> fromText symbolsText
@@ -529,9 +585,8 @@ generateTOC dt traces metrics datapoints =
         [] -> error "inpossible"
 
     splitToNS :: [Text] -> [Text]
-    splitToNS [sym] = T.split (== '.') sym
+    splitToNS [sym] = split (== '.') sym
     splitToNS other = other
-
 
     getSymbolsOf :: [Text] -> DocTracer -> Text
     getSymbolsOf ns DocTracer {..} =
@@ -540,8 +595,8 @@ generateTOC dt traces metrics datapoints =
             then
               let isSilent  = elem ns dtSilent
                   noMetrics = elem ns dtNoMetrics
-              in "\9443" <> if isSilent then "\9442" else ""
-                      <> if noMetrics then "" else "\9436"
+              in utf16CircledT <> if isSilent then utf16CircledS else ""
+                      <> if noMetrics then "" else utf16CircledM
             else ""
 
     commonPrefixLength :: Eq a => [a] -> [a] -> Int
@@ -561,4 +616,30 @@ accentuated :: Text -> Builder
 accentuated t = if t == ""
                   then fromText "\n"
                   else fromText "\n"
-                        <> fromText (T.unlines $ map ("> " <>) (T.lines t))
+                        <> fromText (unlines $ map addAccent (lines t))
+  where
+    addAccent :: Text -> Text
+    addAccent t' = if t' == ""
+                    then ">"
+                    else "> " <> t'
+
+-- this reflects the type cardano-tracer expects the metrics help texts to be serialized from:
+-- simple key-value map
+newtype MetricsHelp = MH (Map.Map Text Text)
+        deriving ToJSON via (Map.Map Text Text)
+
+docuResultsToMetricsHelptext :: DocTracer -> Text
+docuResultsToMetricsHelptext DocTracer{dtBuilderList} =
+  toStrict $ toLazyText $
+    AE.encodePrettyToTextBuilder' conf mh
+  where
+    conf = AE.defConfig { AE.confCompare = compare, AE.confTrailingNewline = True }
+    mh = MH $ Map.fromList
+      [(intercalate "." ns, fromMaybe T.empty x)
+        | (ns, DocuMetric helpDescr) <- dtBuilderList
+
+        -- for now, just extract the helptext (if any) from the markdown paragraph:
+        -- it's the line that starts with "> "
+        , let xs  = T.lines $ toStrict $ toLazyText helpDescr
+        , let x   = mconcat $ map (stripPrefix "> ") xs
+      ]

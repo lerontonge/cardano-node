@@ -13,7 +13,8 @@ import           Control.Concurrent.MVar
 import           Control.Monad.IO.Class (MonadIO, liftIO)
 import qualified Control.Tracer as T
 import qualified Data.Map.Strict as Map
-import           Data.Text (Text, pack)
+import           Data.Text (Text, intercalate, pack)
+
 import qualified System.Metrics as Metrics
 import qualified System.Metrics.Counter as Counter
 import qualified System.Metrics.Gauge as Gauge
@@ -21,8 +22,10 @@ import qualified System.Metrics.Label as Label
 import           System.Remote.Monitoring (Server, getCounter, getGauge, getLabel)
 
 
-ekgTracer :: MonadIO m => Either Metrics.Store Server-> m (Trace m FormattedMessage)
-ekgTracer storeOrServer = liftIO $ do
+-- | It is mandatory to construct only one standard tracer in any application!
+-- Throwing away a standard tracer and using a new one will result in an exception
+ekgTracer :: MonadIO m => TraceConfig -> Either Metrics.Store Server-> m (Trace m FormattedMessage)
+ekgTracer config storeOrServer = liftIO $ do
     rgsGauges   <- newMVar Map.empty
     rgsLabels   <- newMVar Map.empty
     rgsCounters <- newMVar Map.empty
@@ -51,17 +54,29 @@ ekgTracer storeOrServer = liftIO $ do
       -> [Text]
       -> Metric
       -> IO ()
-    setIt rgsGauges _rgsLabels _rgsCounters _namespace
-      (IntM name theInt) = do
-      gauge <- modifyMVar rgsGauges (setFunc Metrics.createGauge getGauge name)
-      Gauge.set gauge (fromIntegral theInt)
-    setIt _rgsGauges rgsLabels _rgsCounters _namespace
-      (DoubleM name theDouble) = do
-        label <- modifyMVar rgsLabels (setFunc Metrics.createLabel getLabel name)
+    setIt rgsGauges _rgsLabels _rgsCounters _namespace (IntM name theInt) = do
+        let fullName = case tcMetricsPrefix config of
+                          Just prefix -> prefix <> name <> "_int"
+                          Nothing -> name <> "_int"
+        gauge <- modifyMVar rgsGauges (setFunc Metrics.createGauge getGauge fullName)
+        Gauge.set gauge (fromIntegral theInt)
+    setIt _rgsGauges rgsLabels _rgsCounters _namespace (DoubleM name theDouble) = do
+        let fullName = case tcMetricsPrefix config of
+                          Just prefix -> prefix <> name <> "_real"
+                          Nothing -> name <> "_real"
+        label <- modifyMVar rgsLabels (setFunc Metrics.createLabel getLabel fullName)
         Label.set label ((pack . show) theDouble)
-    setIt _rgsGauges _rgsLabels rgsCounters _namespace
-      (CounterM name mbInt) = do
-        counter <- modifyMVar rgsCounters (setFunc Metrics.createCounter getCounter name)
+    setIt _rgsGauges rgsLabels _rgsCounters _namespace (PrometheusM name keyLabels) = do
+        let fullName = case tcMetricsPrefix config of
+                          Just prefix -> prefix <> name
+                          Nothing -> name
+        label <- modifyMVar rgsLabels (setFunc Metrics.createLabel getLabel fullName)
+        Label.set label (presentPrometheusM keyLabels)
+    setIt _rgsGauges _rgsLabels rgsCounters _namespace (CounterM name mbInt) = do
+        let fullName = case tcMetricsPrefix config of
+                          Just prefix -> prefix <> name <> "_counter"
+                          Nothing -> name <> "_counter"
+        counter <- modifyMVar rgsCounters (setFunc Metrics.createCounter getCounter fullName)
         case mbInt of
           Nothing -> Counter.inc counter
           Just i  -> Counter.add counter (fromIntegral i)
@@ -82,3 +97,11 @@ ekgTracer storeOrServer = liftIO $ do
                         Right server -> creator2 name server
             let rgsMap' = Map.insert name gauge rgsMap
             pure (rgsMap', gauge)
+
+presentPrometheusM :: [(Text, Text)] -> Text
+presentPrometheusM =
+  label . map pair
+  where
+    label pairs = "{" <> intercalate "," pairs <> "} 1"
+    pair (k, v) = k <> "=\"" <> v <> "\""
+

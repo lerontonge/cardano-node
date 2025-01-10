@@ -30,38 +30,62 @@ fi
 
 case "$op" in
     idle )
-        backend start                "$dir"
+        backend start-tracers        "$dir"
+
+        scenario_setup_exit_trap              "$dir"
+        # Trap start
+        ############
         backend start-nodes          "$dir"
+        # Trap end
+        ##########
+        scenario_cleanup_termination
+
+        backend stop-all             "$dir"
         ;;
 
     tracer-only )
-        backend start                "$dir"
+        backend start-tracers        "$dir"
         ;;
 
     fixed )
-        backend start                "$dir"
+        backend start-tracers        "$dir"
 
-        scenario_setup_exit_trap     "$dir"
+        scenario_setup_exit_trap              "$dir"
         scenario_setup_workload_termination   "$dir"
+        # Trap start
+        ############
         backend start-nodes          "$dir"
         backend wait-pools-stopped   "$dir"
+        # Trap end
+        ##########
         scenario_cleanup_termination
 
-        backend stop-cluster         "$dir"
+        backend stop-all             "$dir"
         ;;
 
     fixed-loaded )
-        backend start                "$dir"
+        backend start-tracers        "$dir"
 
         scenario_setup_exit_trap     "$dir"
+        # Trap start
+        ############
         backend start-nodes          "$dir"
         backend start-generator      "$dir"
-
-        scenario_setup_workload_termination   "$dir"
-        backend wait-pools-stopped   "$dir"
+        backend start-workloads      "$dir"
+        backend start-healthchecks   "$dir"
+        if     jqtest '.workloads == []'              "$dir"/profile.json \
+            || jqtest '.workloads | any(.wait_pools)' "$dir"/profile.json
+        then
+            scenario_setup_workload_termination   "$dir"
+            backend wait-pools-stopped "$dir"
+        else
+            backend wait-workloads-stopped "$dir"
+        fi
+        # Trap end
+        ##########
         scenario_cleanup_termination
 
-        backend stop-cluster         "$dir"
+        backend stop-all             "$dir"
         ;;
 
     chainsync )
@@ -69,12 +93,12 @@ case "$op" in
         # `backend start` because the node-#, generator and tracer directories
         # may be created after the nomad job has started (are symlinks to the
         # containers directories).
-        backend start "$dir"
+        backend start-tracers "$dir"
 
         # `chaindb` explorer:
         local explorer=(
             mainnet-chunks-with-snapshot-at-slot
-            "$dir"/node-1/run/current/node-1/db-testnet
+            "$dir"/node-1/db
             $(jq '.chaindb.ledger_snapshot.explorer'       $p)
             $(jq '.chaindb.mainnet_chunks.explorer'        $p)
         )
@@ -83,7 +107,7 @@ case "$op" in
         # `chaindb` server:
         local chaindb_server=(
             mainnet-chunks-with-snapshot-at-slot
-            "$dir"/node-0/run/current/node-0/db-testnet
+            "$dir"/node-0/db
             $(jq '.chaindb.ledger_snapshot.chaindb_server' $p)
             $(jq '.chaindb.mainnet_chunks.chaindb_server'  $p)
         )
@@ -103,7 +127,7 @@ case "$op" in
         backend wait-node-stopped "$dir" 'node-1'
         scenario_cleanup_exit_trap
 
-        backend stop-cluster      "$dir"
+        backend stop-all          "$dir"
 
         analysis_trace_frequencies 'current'
         ;;
@@ -115,7 +139,15 @@ __scenario_exit_trap_dir=
 scenario_exit_trap() {
     echo >&2
     msg "scenario:  $(with_color yellow exit trap triggered)"
+    backend stop-all     "$__scenario_exit_trap_dir"
+    (
+      # This step is resource intensive so we use a lockfile to avoid
+      # running it in parallel to a benchmark.
+      acquire_lock
+      backend fetch-logs   "$__scenario_exit_trap_dir"
+    )
     backend stop-cluster "$__scenario_exit_trap_dir"
+    msg "scenario:  $(with_color yellow exit trap finished)"
 }
 
 scenario_setup_exit_trap() {

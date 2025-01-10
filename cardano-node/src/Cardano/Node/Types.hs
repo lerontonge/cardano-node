@@ -4,6 +4,8 @@
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Cardano.Node.Types
   ( -- * Configuration
@@ -22,6 +24,7 @@ module Cardano.Node.Types
     -- * Consensus protocol configuration
   , NodeByronProtocolConfiguration(..)
   , NodeHardForkProtocolConfiguration(..)
+  , npcTestStartingEra
   , NodeProtocolConfiguration(..)
   , NodeShelleyProtocolConfiguration(..)
   , NodeAlonzoProtocolConfiguration(..)
@@ -30,28 +33,36 @@ module Cardano.Node.Types
   , renderVRFPrivateKeyFilePermissionError
   ) where
 
-import           Data.Aeson
-import           Data.ByteString (ByteString)
-import           Data.Monoid (Last)
-import           Data.String (IsString)
-import           Data.Text (Text)
-import qualified Data.Text as Text
-import           Data.Word (Word16, Word8)
-
 import           Cardano.Api
+
 import           Cardano.Crypto (RequiresNetworkMagic (..))
 import qualified Cardano.Crypto.Hash as Crypto
 import           Cardano.Node.Configuration.Socket (SocketConfig (..))
-
---TODO: things will probably be clearer if we don't use these newtype wrappers and instead
--- use records with named fields in the CLI code.
 import           Ouroboros.Network.NodeToNode (DiffusionMode (..))
+
+import           Control.Exception
+import           Data.Aeson
+import           Data.ByteString (ByteString)
+import           Data.Monoid (Last (..))
+import           Data.String (IsString)
+import           Data.Text (Text)
+import qualified Data.Text as Text
+import           Data.Typeable
+import           Data.Word (Word16, Word8)
 
 -- | Errors for the cardano-config module.
 data ConfigError =
     ConfigErrorFileNotFound FilePath
   | ConfigErrorNoEKG
     deriving Show
+
+instance Exception ConfigError where
+  displayException = docToString . prettyError
+
+instance Error ConfigError where
+  prettyError ConfigErrorNoEKG = "ConfigErrorNoEKG"
+  prettyError (ConfigErrorFileNotFound fp) =
+    mconcat ["ConfigErrorFileNotFound: ", pretty fp]
 
 -- | Filepath of the configuration yaml file. This file determines
 -- all the configuration settings required for the cardano node
@@ -119,13 +130,12 @@ newtype GenesisHash = GenesisHash (Crypto.Hash Crypto.Blake2b_256 ByteString)
   deriving newtype (Eq, Show, ToJSON, FromJSON)
 
 data NodeProtocolConfiguration =
-       NodeProtocolConfigurationByron   NodeByronProtocolConfiguration
-     | NodeProtocolConfigurationShelley NodeShelleyProtocolConfiguration
-     | NodeProtocolConfigurationCardano NodeByronProtocolConfiguration
-                                        NodeShelleyProtocolConfiguration
-                                        NodeAlonzoProtocolConfiguration
-                                        NodeConwayProtocolConfiguration
-                                        NodeHardForkProtocolConfiguration
+  NodeProtocolConfigurationCardano
+    NodeByronProtocolConfiguration
+    NodeShelleyProtocolConfiguration
+    NodeAlonzoProtocolConfiguration
+    NodeConwayProtocolConfiguration
+    NodeHardForkProtocolConfiguration
   deriving (Eq, Show)
 
 data NodeShelleyProtocolConfiguration =
@@ -145,6 +155,9 @@ data NodeAlonzoProtocolConfiguration =
 data NodeConwayProtocolConfiguration =
      NodeConwayProtocolConfiguration {
        npcConwayGenesisFile     :: !GenesisFile
+       -- ^ If no conway genesis file is provided, we want
+       -- to enforce a maximum protocol version of 8 to avoid
+       -- a permanent hard fork.
      , npcConwayGenesisFileHash :: !(Maybe GenesisHash)
      }
   deriving (Eq, Show)
@@ -274,24 +287,70 @@ data NodeHardForkProtocolConfiguration =
      }
   deriving (Eq, Show)
 
+-- | Find the starting era for the test network, if it was configured.
+--
+-- Starting eras have zero defined as a forking epoch. So here we're taking the last zeroed configuration value.
+-- Returns 'Nothing' if no @HardForkAt@ option is present, or all of them have non-zero value - meaning we are
+-- starting from the very first era: Byron.
+--
+-- In mainnet config, the starting era is not configured, so this function will return 'Nothing'.
+--
+-- Introduced in https://github.com/IntersectMBO/cardano-node/pull/5896 as a part of the fix of reading
+-- Plutus V2 cost model. Can be removed when era-sensitive AlonzoGenesis decoding gets removed.
+npcTestStartingEra :: NodeHardForkProtocolConfiguration -> Maybe AnyShelleyBasedEra
+npcTestStartingEra NodeHardForkProtocolConfiguration
+  { npcTestShelleyHardForkAtEpoch
+  , npcTestShelleyHardForkAtVersion
+  , npcTestAllegraHardForkAtEpoch
+  , npcTestAllegraHardForkAtVersion
+  , npcTestMaryHardForkAtEpoch
+  , npcTestMaryHardForkAtVersion
+  , npcTestAlonzoHardForkAtEpoch
+  , npcTestAlonzoHardForkAtVersion
+  , npcTestBabbageHardForkAtEpoch
+  , npcTestBabbageHardForkAtVersion
+  , npcTestConwayHardForkAtEpoch
+  , npcTestConwayHardForkAtVersion
+  } =
+    getLast . mconcat $
+      [ checkIfInstantFork ShelleyBasedEraShelley (EpochNo 0) npcTestShelleyHardForkAtEpoch
+      , checkIfInstantFork ShelleyBasedEraShelley 0 npcTestShelleyHardForkAtVersion
+      , checkIfInstantFork ShelleyBasedEraAllegra (EpochNo 0) npcTestAllegraHardForkAtEpoch
+      , checkIfInstantFork ShelleyBasedEraAllegra 0 npcTestAllegraHardForkAtVersion
+      , checkIfInstantFork ShelleyBasedEraMary (EpochNo 0) npcTestMaryHardForkAtEpoch
+      , checkIfInstantFork ShelleyBasedEraMary 0 npcTestMaryHardForkAtVersion
+      , checkIfInstantFork ShelleyBasedEraAlonzo (EpochNo 0) npcTestAlonzoHardForkAtEpoch
+      , checkIfInstantFork ShelleyBasedEraAlonzo 0 npcTestAlonzoHardForkAtVersion
+      , checkIfInstantFork ShelleyBasedEraBabbage (EpochNo 0) npcTestBabbageHardForkAtEpoch
+      , checkIfInstantFork ShelleyBasedEraBabbage 0 npcTestBabbageHardForkAtVersion
+      , checkIfInstantFork ShelleyBasedEraConway (EpochNo 0) npcTestConwayHardForkAtEpoch
+      , checkIfInstantFork ShelleyBasedEraConway 0 npcTestConwayHardForkAtVersion
+      ]
+  where
+    checkIfInstantFork :: Typeable era
+                       => Eq v
+                       => ShelleyBasedEra era
+                       -> v  -- ^ value indicating instant fork
+                       -> Maybe v -- ^ config param
+                       -> Last AnyShelleyBasedEra -- ^ Just era if instantly forking
+    checkIfInstantFork _ _ Nothing = Last Nothing
+    checkIfInstantFork sbe v (Just tv)
+      | tv == v = Last . Just $ AnyShelleyBasedEra sbe
+      | otherwise = Last Nothing
+
+
 newtype TopologyFile = TopologyFile
   { unTopology :: FilePath }
   deriving newtype (Show, Eq)
 
 instance AdjustFilePaths NodeProtocolConfiguration where
-
-  adjustFilePaths f (NodeProtocolConfigurationByron pc) =
-    NodeProtocolConfigurationByron (adjustFilePaths f pc)
-
-  adjustFilePaths f (NodeProtocolConfigurationShelley pc) =
-    NodeProtocolConfigurationShelley (adjustFilePaths f pc)
-
   adjustFilePaths f (NodeProtocolConfigurationCardano pcb pcs pca pcc pch) =
-    NodeProtocolConfigurationCardano (adjustFilePaths f pcb)
-                                     (adjustFilePaths f pcs)
-                                     (adjustFilePaths f pca)
-                                     (adjustFilePaths f pcc)
-                                     pch
+    NodeProtocolConfigurationCardano
+      (adjustFilePaths f pcb)
+      (adjustFilePaths f pcs)
+      (adjustFilePaths f pca)
+      (adjustFilePaths f pcc)
+      pch
 
 instance AdjustFilePaths NodeByronProtocolConfiguration where
   adjustFilePaths f x@NodeByronProtocolConfiguration {
@@ -335,6 +394,12 @@ data VRFPrivateKeyFilePermissionError
   | GroupPermissionsExist FilePath
   | GenericPermissionsExist FilePath
   deriving Show
+
+instance Exception VRFPrivateKeyFilePermissionError where
+  displayException = Text.unpack . renderVRFPrivateKeyFilePermissionError
+
+instance Error VRFPrivateKeyFilePermissionError where
+  prettyError = pretty . renderVRFPrivateKeyFilePermissionError
 
 renderVRFPrivateKeyFilePermissionError :: VRFPrivateKeyFilePermissionError -> Text
 renderVRFPrivateKeyFilePermissionError err =

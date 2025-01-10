@@ -6,19 +6,20 @@ module Test.Cardano.Config.Mainnet
   ( tests
   ) where
 
-import           Cardano.Api (File (..), initialLedgerState, renderInitialLedgerStateError)
-import           Control.Monad.Trans.Except
-import           Hedgehog (Property, (===))
-import           System.FilePath ((</>))
+import           Cardano.Api (File (..), initialLedgerState)
+import           Cardano.Api.Error (displayError)
 
+import           Control.Monad.Trans.Except
 import qualified Data.Aeson as J
-import qualified Data.Text as T
 import qualified Data.Yaml as Y
 import qualified GHC.Stack as GHC
+import qualified System.Directory as IO
+import           System.FilePath ((</>))
+
+import           Hedgehog (Property, (===))
 import qualified Hedgehog as H
 import qualified Hedgehog.Extras.Test.Base as H
 import qualified Hedgehog.Extras.Test.Process as H
-import qualified System.Directory as IO
 
 hprop_configMainnetHash :: Property
 hprop_configMainnetHash = H.propertyOnce $ do
@@ -26,7 +27,7 @@ hprop_configMainnetHash = H.propertyOnce $ do
   result <- H.evalIO $ runExceptT $ initialLedgerState $ File $ base </> "configuration/cardano/mainnet-config.json"
   case result of
     Right (_, _) -> return ()
-    Left e -> H.failWithCustom GHC.callStack Nothing (T.unpack (renderInitialLedgerStateError e))
+    Left e -> H.failWithCustom GHC.callStack Nothing (displayError e)
 
 hprop_configMainnetYaml :: Property
 hprop_configMainnetYaml = H.propertyOnce $ do

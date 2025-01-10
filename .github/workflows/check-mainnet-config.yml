@@ -15,11 +15,10 @@ jobs:
     steps:
 
     - name: Install Nix
-      uses: cachix/install-nix-action@v18
+      uses: cachix/install-nix-action@v27
       with:
         # Use last stable nixos channel and the same nix as in channel:
-        install_url: https://releases.nixos.org/nix/nix-2.11.1/install
-        nix_path: nixpkgs=channel:nixos-22.11
+        nix_path: nixpkgs=channel:nixos-24.05
         github_access_token: ${{ secrets.GITHUB_TOKEN }}
         extra_nix_config: |
           access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
@@ -41,7 +40,6 @@ jobs:
         test_files=(
           'mainnet-alonzo-genesis.json'
           'mainnet-byron-genesis.json'
-          'mainnet-conway-genesis.json'
           'mainnet-config.json'
           'mainnet-shelley-genesis.json'
           'mainnet-topology.json'
@@ -50,10 +48,9 @@ jobs:
         for f in "${test_files[@]}"; do
           nix_file="result/$f"
           repo_file="configuration/cardano/$f"
-          if ! jq -e --argfile nix "$nix_file" --argfile repo "$repo_file" -n '$repo | reduce keys[] as $k (true; . and $repo[$k] == $nix[$k])' &>/dev/null ; then
+          if ! jq -e --slurpfile nix "$nix_file" --slurpfile repo "$repo_file" -n '$repo | reduce keys[] as $k (true; . and $repo[$k] == $nix[$k])' &>/dev/null ; then
             echo "Nix file $nix_file does not have all the same top-level entries as the file from repository $repo_file"
             diff "$nix_file" "$repo_file"
             exit 1
           fi
         done
-

@@ -15,14 +15,16 @@ module Cardano.TxGenerator.Fund
     -- $Accessors
     , getFundTxIn
     , getFundKey
-    , getFundLovelace
+    , getFundCoin
     , getFundWitness
     )
     where
 
-import           Data.Function (on)
-
 import           Cardano.Api as Api
+
+import qualified Cardano.Ledger.Coin as L
+
+import           Data.Function (on)
 
 
 -- $Types
@@ -66,11 +68,10 @@ getFundTxIn (Fund (InAnyCardanoEra _ a)) = _fundTxIn a
 getFundKey :: Fund -> Maybe (SigningKey PaymentKey)
 getFundKey (Fund (InAnyCardanoEra _ a)) = _fundSigningKey a
 
--- | Converting a `TxOutValue` to `Lovelace` requires case analysis.
-getFundLovelace :: Fund -> Lovelace
-getFundLovelace (Fund (InAnyCardanoEra _ a)) = case _fundVal a of
-  TxOutAdaOnly _era l -> l
-  TxOutValue _era v -> selectLovelace v
+getFundCoin :: Fund -> L.Coin
+getFundCoin (Fund (InAnyCardanoEra _ a)) = case _fundVal a of
+  TxOutValueByron l -> l
+  TxOutValueShelleyBased era v -> selectLovelace $ Api.fromLedgerValue era v
 
 -- TODO: facilitate casting KeyWitnesses between eras -- Note [Era transitions]
 -- | The `Fund` alternative is checked against `cardanoEra`, but
@@ -83,6 +84,7 @@ getFundWitness fund = case (cardanoEra @era, fund) of
   (MaryEra    , Fund (InAnyCardanoEra MaryEra    a)) -> _fundWitness a
   (AlonzoEra  , Fund (InAnyCardanoEra AlonzoEra  a)) -> _fundWitness a
   (BabbageEra , Fund (InAnyCardanoEra BabbageEra a)) -> _fundWitness a
+  (ConwayEra  , Fund (InAnyCardanoEra ConwayEra  a)) -> _fundWitness a
   _                                                  -> error "getFundWitness: era mismatch"
 
 {-

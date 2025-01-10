@@ -13,9 +13,35 @@ module Cardano.Tracer.Test.Forwarder
   , mkTestDataPoint
   ) where
 
+import           Cardano.Logging (DetailLevel (..), SeverityS (..), TraceObject (..))
+import           Cardano.Logging.Version (ForwardingVersion (..), ForwardingVersionData (..),
+                   forwardingCodecCBORTerm, forwardingVersionCodec)
+import           Cardano.Tracer.Configuration (Verbosity (..))
+import           Cardano.Tracer.Test.TestSetup
+import           Cardano.Tracer.Test.Utils
+import           Cardano.Tracer.Utils
+import           Ouroboros.Network.Driver.Limits (ProtocolTimeLimits)
+import           Ouroboros.Network.ErrorPolicy (nullErrorPolicies)
+import           Ouroboros.Network.IOManager (IOManager, withIOManager)
+import           Ouroboros.Network.Mux (MiniProtocol (..), MiniProtocolLimits (..),
+                   MiniProtocolNum (..), MuxMode (..), OuroborosApplication (..),
+                   RunMiniProtocol (..), miniProtocolLimits, miniProtocolNum, miniProtocolRun)
+import           Ouroboros.Network.Protocol.Handshake.Codec (cborTermVersionDataCodec,
+                   codecHandshake, noTimeLimitsHandshake)
+import           Ouroboros.Network.Protocol.Handshake.Type (Handshake)
+import           Ouroboros.Network.Protocol.Handshake.Version (acceptableVersion, queryVersion,
+                   simpleSingletonVersions)
+import           Ouroboros.Network.Snocket (MakeBearer, Snocket, localAddressFromPath, localSnocket,
+                   makeLocalBearer)
+import           Ouroboros.Network.Socket (AcceptedConnectionsLimit (..), HandshakeCallbacks (..),
+                   SomeResponderApplication (..), cleanNetworkMutableState, connectToNode,
+                   newNetworkMutableState, nullNetworkConnectTracers, nullNetworkServerTracers,
+                   withServerNode)
+
 import           Codec.CBOR.Term (Term)
 import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async
+import           Control.DeepSeq (NFData)
 import           Control.Monad (forever)
 import           "contra-tracer" Control.Tracer (contramap, nullTracer, stdoutTracer)
 import           Data.Aeson (FromJSON, ToJSON)
@@ -26,27 +52,6 @@ import           Data.Word (Word16)
 import           GHC.Generics
 import           System.Directory
 import qualified System.Metrics as EKG
-
-import           Cardano.Logging (DetailLevel (..), SeverityS (..), TraceObject (..))
-import           Cardano.Logging.Version (ForwardingVersion (..), ForwardingVersionData (..),
-                   forwardingCodecCBORTerm, forwardingVersionCodec)
-import           Ouroboros.Network.Driver.Limits (ProtocolTimeLimits)
-import           Ouroboros.Network.ErrorPolicy (nullErrorPolicies)
-import           Ouroboros.Network.IOManager (IOManager, withIOManager)
-import           Ouroboros.Network.Mux (MiniProtocol (..), MiniProtocolLimits (..),
-                   MiniProtocolNum (..), MuxMode (..), OuroborosApplication (..),
-                   RunMiniProtocol (..), miniProtocolLimits, miniProtocolNum, miniProtocolRun)
-import           Ouroboros.Network.Protocol.Handshake.Codec (cborTermVersionDataCodec,
-                   codecHandshake, noTimeLimitsHandshake)
-import           Ouroboros.Network.Protocol.Handshake.Type (Handshake)
-import           Ouroboros.Network.Protocol.Handshake.Version (acceptableVersion,
-                   queryVersion, simpleSingletonVersions)
-import           Ouroboros.Network.Snocket (MakeBearer, Snocket, makeLocalBearer,
-                   localAddressFromPath, localSnocket)
-import           Ouroboros.Network.Socket (AcceptedConnectionsLimit (..), HandshakeCallbacks (..),
-                   SomeResponderApplication (..), cleanNetworkMutableState, connectToNode,
-                   newNetworkMutableState, nullNetworkConnectTracers, nullNetworkServerTracers,
-                   withServerNode)
 import qualified System.Metrics.Configuration as EKGF
 import           System.Metrics.Network.Forwarder
 
@@ -57,18 +62,13 @@ import           Trace.Forward.Run.TraceObject.Forwarder
 import           Trace.Forward.Utils.DataPoint
 import           Trace.Forward.Utils.TraceObject
 
-import           Cardano.Tracer.Configuration (Verbosity (..))
-import           Cardano.Tracer.Test.TestSetup
-import           Cardano.Tracer.Test.Utils
-import           Cardano.Tracer.Utils
-
 data ForwardersMode = Initiator | Responder
 
 data TestDataPoint = TestDataPoint
   { tdpName    :: !String
   , tdpCommit  :: !String
   , tdpVersion :: !Int
-  } deriving (Generic, Eq, FromJSON, ToJSON)
+  } deriving (Generic, NFData, Eq, FromJSON, ToJSON)
 
 mkTestDataPoint :: TestDataPoint
 mkTestDataPoint = TestDataPoint
@@ -153,7 +153,7 @@ doConnectToAcceptor
 doConnectToAcceptor TestSetup{..} snocket muxBearer address timeLimits (ekgConfig, tfConfig, dpfConfig) = do
   store <- EKG.newStore
   EKG.registerGcMetrics store
-  sink <- initForwardSink tfConfig
+  sink <- initForwardSink tfConfig (\ _ -> pure ())
   dpStore <- initDataPointStore
   writeToStore dpStore "test.data.point" $ DataPoint mkTestDataPoint
   withAsync (traceObjectsWriter sink) $ \_ -> do
@@ -179,10 +179,10 @@ doConnectToAcceptor TestSetup{..} snocket muxBearer address timeLimits (ekgConfi
       address
  where
   forwarderApp
-    :: [(RunMiniProtocol 'InitiatorMode LBS.ByteString IO () Void, Word16)]
-    -> OuroborosApplication 'InitiatorMode addr LBS.ByteString IO () Void
+    :: [(RunMiniProtocol 'InitiatorMode initCtx respCtx LBS.ByteString IO () Void, Word16)]
+    -> OuroborosApplication 'InitiatorMode initCtx respCtx LBS.ByteString IO () Void
   forwarderApp protocols =
-    OuroborosApplication $ \_connectionId _shouldStopSTM ->
+    OuroborosApplication
       [ MiniProtocol
          { miniProtocolNum    = MiniProtocolNum num
          , miniProtocolLimits = MiniProtocolLimits { maximumIngressQueue = maxBound }
@@ -208,7 +208,7 @@ doListenToAcceptor TestSetup{..}
 
   store <- EKG.newStore
   EKG.registerGcMetrics store
-  sink <- initForwardSink tfConfig
+  sink <- initForwardSink tfConfig (\ _ -> pure ())
   dpStore <- initDataPointStore
   writeToStore dpStore "test.data.point" $ DataPoint mkTestDataPoint
   withAsync (traceObjectsWriter sink) $ \_ -> do
@@ -240,10 +240,10 @@ doListenToAcceptor TestSetup{..}
               $ \_ serverAsync -> wait serverAsync -- Block until async exception.
  where
   forwarderApp
-    :: [(RunMiniProtocol 'ResponderMode LBS.ByteString IO Void (), Word16)]
-    -> OuroborosApplication 'ResponderMode addr LBS.ByteString IO Void ()
+    :: [(RunMiniProtocol 'ResponderMode initCtx respCtx LBS.ByteString IO Void (), Word16)]
+    -> OuroborosApplication 'ResponderMode initCtx respCtx LBS.ByteString IO Void ()
   forwarderApp protocols =
-    OuroborosApplication $ \_connectionId _shouldStopSTM ->
+    OuroborosApplication
       [ MiniProtocol
          { miniProtocolNum    = MiniProtocolNum num
          , miniProtocolLimits = MiniProtocolLimits { maximumIngressQueue = maxBound }
@@ -259,7 +259,7 @@ traceObjectsWriter sink = forever $ do
  where
   mkTraceObject now = TraceObject
     { toHuman     = Just "Human Message for testing if our mechanism works as we expect"
-    , toMachine   = Just "{\"msg\": \"Very big message forMachine because we have to check if it works\"}"
+    , toMachine   = "{\"msg\": \"Very big message forMachine because we have to check if it works\"}"
     , toNamespace = ["demoNamespace"]
     , toSeverity  = Info
     , toDetails   = DNormal

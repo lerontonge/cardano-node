@@ -12,18 +12,8 @@ module Cardano.Node.Protocol.Byron
   , readLeaderCredentials
   ) where
 
-import           Cardano.Prelude (ConvertText (..), canonicalDecodePretty)
-
-import           Control.Monad.Except (throwError)
-import           Control.Monad.IO.Class (MonadIO (..))
-import           Control.Monad.Trans.Except (ExceptT)
-import           Control.Monad.Trans.Except.Extra (bimapExceptT, firstExceptT, hoistEither, left)
-import qualified Data.ByteString.Lazy as LB
-import           Data.Maybe (fromMaybe)
-import           Data.Text (Text)
-import qualified Data.Text as Text
-
 import           Cardano.Api.Byron
+
 import qualified Cardano.Chain.Genesis as Genesis
 import qualified Cardano.Chain.Update as Update
 import qualified Cardano.Chain.UTxO as UTxO
@@ -34,14 +24,17 @@ import           Cardano.Node.Protocol.Types
 import           Cardano.Node.Tracing.Era.Byron ()
 import           Cardano.Node.Tracing.Era.HardFork ()
 import           Cardano.Node.Tracing.Tracers.ChainDB ()
-import           Cardano.Node.Types
+import           Cardano.Node.Types as Node
+import           Cardano.Prelude (canonicalDecodePretty)
 import           Cardano.Tracing.OrphanInstances.Byron ()
 import           Cardano.Tracing.OrphanInstances.HardFork ()
 import           Cardano.Tracing.OrphanInstances.Shelley ()
-
 import           Ouroboros.Consensus.Cardano
 import qualified Ouroboros.Consensus.Cardano as Consensus
-import qualified Ouroboros.Consensus.Mempool.Capacity as TxLimits
+
+import qualified Data.ByteString.Lazy as LB
+import           Data.Maybe (fromMaybe)
+import           Data.Text (Text)
 
 
 ------------------------------------------------------------------------------
@@ -86,13 +79,11 @@ mkSomeConsensusProtocolByron NodeByronProtocolConfiguration {
             npcByronSupportedProtocolVersionAlt,
         byronSoftwareVersion = softwareVersion,
         byronLeaderCredentials =
-          optionalLeaderCredentials,
-        byronMaxTxCapacityOverrides =
-          TxLimits.mkOverrides TxLimits.noOverridesMeasure
+          optionalLeaderCredentials
         }
 
 readGenesis :: GenesisFile
-            -> Maybe GenesisHash
+            -> Maybe Node.GenesisHash
             -> RequiresNetworkMagic
             -> ExceptT ByronProtocolInstantiationError IO
                        Genesis.Config
@@ -119,9 +110,9 @@ readGenesis (GenesisFile file) mbExpectedGenesisHash ncReqNetworkMagic = do
 
         _ -> return ()
 
-    fromByronGenesisHash :: Genesis.GenesisHash -> GenesisHash
+    fromByronGenesisHash :: Genesis.GenesisHash -> Node.GenesisHash
     fromByronGenesisHash (Genesis.GenesisHash h) =
-        GenesisHash
+        Node.GenesisHash
       . fromMaybe impossible
       . Crypto.hashFromBytes
       . Byron.Crypto.hashToBytes
@@ -163,7 +154,7 @@ readLeaderCredentials genesisConfig
 
 data ByronProtocolInstantiationError =
     CanonicalDecodeFailure !FilePath !Text
-  | GenesisHashMismatch !GenesisHash !GenesisHash -- actual, expected
+  | GenesisHashMismatch !Node.GenesisHash !Node.GenesisHash -- actual, expected
   | DelegationCertificateFilepathNotSpecified
   | GenesisConfigurationError !FilePath !Genesis.ConfigurationError
   | GenesisReadError !FilePath !Genesis.GenesisDataError
@@ -173,26 +164,26 @@ data ByronProtocolInstantiationError =
   deriving Show
 
 instance Error ByronProtocolInstantiationError where
-  displayError (CanonicalDecodeFailure fp failure) =
-        "Canonical decode failure in " <> fp
-     <> " Canonical failure: " <> Text.unpack failure
-  displayError (GenesisHashMismatch actual expected) =
-        "Wrong Byron genesis file: the actual hash is " <> show actual
+  prettyError (CanonicalDecodeFailure fp failure) =
+        "Canonical decode failure in " <> pshow fp
+     <> " Canonical failure: " <> pshow failure
+  prettyError (GenesisHashMismatch actual expected) =
+        "Wrong Byron genesis file: the actual hash is " <> pshow actual
      <> ", but the expected Byron genesis hash given in the node configuration "
-     <> "file is " <> show expected
-  displayError DelegationCertificateFilepathNotSpecified =
+     <> "file is " <> pshow expected
+  prettyError DelegationCertificateFilepathNotSpecified =
         "Delegation certificate filepath not specified"
     --TODO: Implement configuration error render function in cardano-ledger
-  displayError (GenesisConfigurationError fp genesisConfigError) =
-        "Genesis configuration error in: " <> toS fp
-     <> " Error: " <> show genesisConfigError
-  displayError (GenesisReadError fp err) =
-        "There was an error parsing the genesis file: " <> toS fp
-     <> " Error: " <> show err
+  prettyError (GenesisConfigurationError fp genesisConfigError) =
+        "Genesis configuration error in: " <> pshow fp
+     <> " Error: " <> pshow genesisConfigError
+  prettyError (GenesisReadError fp err) =
+        "There was an error parsing the genesis file: " <> pshow fp
+     <> " Error: " <> pshow err
     -- TODO: Implement ByronLeaderCredentialsError render function in ouroboros-network
-  displayError (CredentialsError byronLeaderCredentialsError) =
-        "Byron leader credentials error: " <> show byronLeaderCredentialsError
-  displayError (SigningKeyDeserialiseFailure fp) =
-        "Signing key deserialisation error in: " <> toS fp
-  displayError SigningKeyFilepathNotSpecified =
+  prettyError (CredentialsError byronLeaderCredentialsError) =
+        "Byron leader credentials error: " <> pshow byronLeaderCredentialsError
+  prettyError (SigningKeyDeserialiseFailure fp) =
+        "Signing key deserialisation error in: " <> pshow fp
+  prettyError SigningKeyFilepathNotSpecified =
         "Signing key filepath not specified"

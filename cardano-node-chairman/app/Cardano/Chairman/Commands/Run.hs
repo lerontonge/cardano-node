@@ -2,18 +2,27 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Cardano.Chairman.Commands.Run
   ( cmdRun
   ) where
 
-import           Cardano.Prelude (ConvertText (..))
-
+import           Cardano.Api
 import qualified Cardano.Api as Api
 
+import           Cardano.Chairman (chairmanTest)
+import           Cardano.Node.Configuration.POM (PartialNodeConfiguration (..),
+                   parseNodeConfigurationFP)
+import           Cardano.Node.Protocol
+import           Cardano.Node.Types
+import           Cardano.Prelude (ConvertText (..))
+import qualified Ouroboros.Consensus.Config as Consensus
+import           Ouroboros.Consensus.Config.SecurityParam (SecurityParam (..))
+import           Ouroboros.Consensus.Config.SupportsNode
+import           Ouroboros.Consensus.Node.ProtocolInfo
+
 import           Control.Monad.Class.MonadTime.SI (DiffTime)
-import           Control.Monad.IO.Class (MonadIO (..))
-import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Tracer (Tracer (..), stdoutTracer)
 import           Data.Monoid (Last (..))
 import           Data.Text (Text)
@@ -22,20 +31,6 @@ import           Options.Applicative
 import qualified Options.Applicative as Opt
 import           System.Exit (exitFailure)
 import qualified System.IO as IO
-
-import           Cardano.Node.Configuration.NodeAddress
-import           Cardano.Node.Configuration.POM (PartialNodeConfiguration (..),
-                   parseNodeConfigurationFP)
-import           Cardano.Node.Protocol
-import           Cardano.Node.Types
-import qualified Ouroboros.Consensus.Config as Consensus
-import           Ouroboros.Consensus.Config.SecurityParam (SecurityParam (..))
-import           Ouroboros.Consensus.Config.SupportsNode
-import           Ouroboros.Consensus.Node.ProtocolInfo
-
-
-import           Cardano.Api
-import           Cardano.Chairman (chairmanTest)
 
 data RunOpts = RunOpts
   { -- | Stop the test after given number of seconds. The chairman will
@@ -115,12 +110,12 @@ run RunOpts
 
   p :: SomeConsensusProtocol <-
     case eitherSomeProtocol of
-      Left err -> putStrLn (displayError err) >> exitFailure
+      Left err -> putStrLn (docToString $ prettyError err) >> exitFailure
       Right p  -> pure p
 
   let (k , nId) = case p of
             SomeConsensusProtocol _ runP ->
-              let ProtocolInfo { pInfoConfig } = Api.protocolInfo runP
+              let ProtocolInfo { pInfoConfig } = fst $ Api.protocolInfo @IO runP
               in ( Consensus.configSecurityParam pInfoConfig
                  , fromNetworkMagic . getNetworkMagic $ Consensus.configBlock pInfoConfig
                  )
@@ -138,15 +133,11 @@ run RunOpts
 
   return ()
  where
-  getConsensusMode :: SecurityParam -> NodeProtocolConfiguration -> AnyConsensusModeParams
+  getConsensusMode :: SecurityParam -> NodeProtocolConfiguration -> ConsensusModeParams
   getConsensusMode (SecurityParam k) ncProtocolConfig =
     case ncProtocolConfig of
-      NodeProtocolConfigurationByron{} ->
-        AnyConsensusModeParams $ ByronModeParams $ EpochSlots k
-      NodeProtocolConfigurationShelley{} ->
-        AnyConsensusModeParams ShelleyModeParams
       NodeProtocolConfigurationCardano{} ->
-        AnyConsensusModeParams $ CardanoModeParams $ EpochSlots k
+        CardanoModeParams $ EpochSlots k
 
   getProtocolConfiguration
     :: PartialNodeConfiguration

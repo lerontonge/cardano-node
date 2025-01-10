@@ -10,6 +10,13 @@
 with pkgs.lib;
 
 let
+  # If there is an "explorer" node, the generator will run there!
+  # TODO: Repeated code, add the generator's node name to profile.json
+  runningNode = if builtins.hasAttr "explorer" nodeSpecs
+    then "explorer"
+    else "node-0"
+  ;
+
   # We're reusing configuration from a cluster node.
   exemplarNode = node-services."node-0";
 
@@ -20,26 +27,21 @@ let
   finaliseGeneratorService =
     profile: svc: recursiveUpdate svc
       ({
-        sigKey         = "../genesis/utxo-keys/utxo1.skey";
-        runScriptFile  = "run-script.json";
+        sigKey              = "../genesis/utxo-keys/utxo1.skey";
+        runScriptFile       = "run-script.json";
         ## path to the config and socket of the locally running node.
-        nodeConfigFile = "../node-0/config.json";
-        localNodeSocketPath = "../node-0/node.socket";
+        nodeConfigFile      = "../${runningNode}/config.json";
+        localNodeSocketPath = "../${runningNode}/node.socket";
+        ## Relative paths to use for the Plutus redeemer and datum properties.
+        ## These two properties override the default that is "plutus.redeemer"
+        ## and "plutus.datum" being file paths to the Nix Store that may or may
+        ## exist depending on the workbench's backend requested.
+        plutusRedeemerFile  = "plutus-redeemer.json";
+        plutusDatumFile     = "plutus-datum.json";
       } // optionalAttrs profile.node.tracer {
         tracerSocketPath = "../tracer/tracer.socket";
       } // optionalAttrs backend.useCabalRun {
         executable     = "tx-generator";
-      });
-
-  finaliseGeneratorConfig =
-    cfg: recursiveUpdate cfg
-      ({
-        AlonzoGenesisFile    = "../genesis/genesis.alonzo.json";
-        ShelleyGenesisFile   = "../genesis/genesis-shelley.json";
-        ByronGenesisFile     = "../genesis/byron/genesis.json";
-        ConwayGenesisFile    = "../genesis/genesis.conway.json";
-      } // optionalAttrs backend.useCabalRun {
-        executable           = "tx-generator";
       });
 
   ##
@@ -50,7 +52,7 @@ let
     let
       generatorNodeConfigDefault =
         (__fromJSON (__readFile ../../../bench/tx-generator-config-base.json))
-        // { inherit (exemplarNode.nodeConfig.value)
+        // { inherit (exemplarNode.config.value)
                Protocol
                ByronGenesisFile
                ShelleyGenesisFile
@@ -65,17 +67,11 @@ let
 
           targetNodes = __mapAttrs
             (name: { name, port, ...}@nodeSpec:
-              { inherit port;
+              { inherit name port;
                 ip = let ip = nodePublicIP nodeSpec; # getPublicIp resources nodes name
                      in __trace "generator target:  ${name}/${ip}:${toString port}" ip;
               })
             (filterAttrs (_: spec: spec.isProducer) nodeSpecs);
-
-          ## nodeConfig of the locally running node.
-          localNodeConf = removeAttrs exemplarNode.serviceConfig.value ["executable"];
-
-          ## The nodeConfig of the Tx generator itself.
-          nodeConfig = finaliseGeneratorConfig generatorNodeConfigDefault;
 
           dsmPassthrough = {
             # rtsOpts = ["-xc"];
@@ -93,30 +89,32 @@ let
   ##
   generatorServiceConfigService =
     serviceConfig:
-    let
-    systemdCompat.options = {
-      systemd.services = mkOption {};
-      systemd.sockets = mkOption {};
-      users = mkOption {};
-      assertions = mkOption {};
-    };
-    eval = let
-      extra = {
-        services.tx-generator = {
-          enable = true;
-        } // serviceConfig;
-      };
-    in evalModules {
-      prefix = [];
-      modules = import ../../nixos/module-list.nix
-                ++ [ (import ../../nixos/tx-generator-service.nix pkgs)
-                     systemdCompat extra
-                     { config._module.args = { inherit pkgs; }; }
-                   ]
-                ++ [ backend.service-modules.generator or {} ];
-      # args = { inherit pkgs; };
-    };
-    in eval.config.services.tx-generator;
+      let
+        systemdCompat.options = {
+          systemd.services = mkOption {};
+          systemd.sockets = mkOption {};
+          users = mkOption {};
+          assertions = mkOption {};
+          environment = mkOption {};
+        };
+        eval =
+          let
+            extra = {
+              services.tx-generator = {enable = true;} // serviceConfig;
+            };
+          in evalModules {
+            prefix = [];
+            modules =    import ../../nixos/module-list.nix
+                      ++ [
+                            (import ../../nixos/tx-generator-service.nix pkgs)
+                              systemdCompat extra
+                              {config._module.args = {inherit pkgs;};}
+                         ]
+                      ++ [ backend.service-modules.generator or {} ]
+                      ;
+            # args = { inherit pkgs; };
+          };
+      in eval.config.services.tx-generator;
 
   ##
   ## generator-service :: (ServiceConfig, Service, NodeConfig, Script)
@@ -127,43 +125,85 @@ let
       serviceConfig = generatorServiceConfig nodeSpecs;
       service       = generatorServiceConfigService serviceConfig;
     in {
-      serviceConfig = {
-        value = serviceConfig;
-        JSON  = jsonFilePretty "generator-service-config.json"
-                (__toJSON serviceConfig);
-      };
-
-      service = {
-        value = service;
-        JSON  = jsonFilePretty "generator-service.json"
-                (__toJSON service);
-      };
-
-      nodeConfig = {
-        value = service.nodeConfig;
-        JSON  = jsonFilePretty "generator-config.json"
-                (__toJSON service.nodeConfig);
-      };
-
-      runScript = {
-        # TODO / FIXME
-        # the string '...' is not allowed to refer to a store path (such as '')
-        # value = service.decideRunScript service;
-        JSON  = jsonFilePretty "generator-run-script.json"
-                (service.decideRunScript service);
-      };
-
-      startupScript = rec {
-        JSON = pkgs.writeScript "startup-generator.sh" value;
+      start = rec {
         value = ''
           #!${pkgs.stdenv.shell}
 
+          ###########################################
+          # Extra workloads start ###################
+          ###########################################
+          ${builtins.concatStringsSep "" (builtins.map (workload:
+              let workload_name = workload.name;
+                  entrypoint = workload.entrypoints.pre_generator;
+                  node_name = if profile.composition.with_explorer
+                              then "explorer"
+                              else "node-0"
+                  ;
+              in
+                  ''
+                  ###########################################
+                  ########## workload start: ${workload_name}
+                  ###########################################
+                  ${if entrypoint != null
+                    then
+                      ''
+                      ${import ../workload/${workload_name}.nix
+                        {inherit pkgs profile nodeSpecs workload;}
+                      }
+                      (cd ../workloads/${workload_name} && ${entrypoint} ${node_name})
+                      ''
+                    else
+                      ''
+                      ''
+                  }
+                  ###########################################
+                  ########## workload end:   ${workload_name}
+                  ###########################################
+                  ''
+            ) (profile.workloads or []))
+          }
+          #############################################
+          # Extra workloads end #######################
+          #############################################
+
           ${service.script}
           '';
+        JSON = pkgs.writeScript "startup-generator.sh" value;
+      };
+
+      config = rec {
+        value = __fromJSON (__readFile JSON);
+        JSON  = jsonFilePretty "generator-run-script.json"
+          (service.decideRunScript service);
+      };
+
+      # The Plutus redeemer file is handled as an extra service file to deploy.
+      plutus-redeemer = rec {
+        # Not present on every profile.
+        value = if serviceConfig.plutus == null
+                then null
+                else serviceConfig.plutus.redeemer or null
+        ;
+        # Always creates a file, even if it just contains "null".
+        # Easier to handle if always every service properties is not null.
+        JSON = jsonFilePretty "plutus-redeemer.json" (__toJSON value)
+        ;
+      };
+
+      # The Plutus datum file is handled as an extra service file to deploy.
+      plutus-datum = rec {
+        # Not present on every profile.
+        value = if serviceConfig.plutus == null
+                then null
+                else serviceConfig.plutus.datum or null
+        ;
+        # Always creates a file, even if it just contains "null".
+        # Easier to handle if always every service properties is not null.
+        JSON = jsonFilePretty "plutus-datum.json" (__toJSON value);
       };
     })
     nodeSpecs;
 in
 {
-  inherit generator-service mkGeneratorScript;
+  inherit generator-service;
 }

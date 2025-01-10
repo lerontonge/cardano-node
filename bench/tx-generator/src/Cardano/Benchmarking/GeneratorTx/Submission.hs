@@ -47,7 +47,7 @@ import           Cardano.Tracing.OrphanInstances.Shelley ()
 
 import           Ouroboros.Network.Protocol.TxSubmission2.Type (TokBlockingStyle (..))
 
-import           Cardano.Api
+import           Cardano.Api hiding (Active)
 import           Cardano.TxGenerator.Types (TPSRate, TxGenError)
 
 import           Cardano.Benchmarking.LogTypes
@@ -95,11 +95,10 @@ submitSubmissionThreadStats reportRef strStats = do
   return ()
 
 mkSubmissionSummary ::
-     String
-  -> UTCTime
+     UTCTime
   -> [ReportRef]
   -> IO SubmissionSummary
-mkSubmissionSummary ssThreadName startTime reportsRefs
+mkSubmissionSummary startTime reportsRefs
  = do
   results <- mapM (STM.atomically . STM.readTMVar) reportsRefs
   let (failures, reports) = partitionEithers results

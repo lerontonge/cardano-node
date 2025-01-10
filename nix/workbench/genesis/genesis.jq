@@ -5,28 +5,14 @@ def fmt_decimal_10_5($x):
 
 def profile_cli_args($p):
 { common:
-  { createSpec:
-    [ "--supply",                  fmt_decimal_10_5($p.derived.supply_total)
-    , "--testnet-magic",           $p.genesis.network_magic
-    , "--gen-genesis-keys",        $p.composition.n_bft_hosts
-    , "--gen-utxo-keys",           1
-    ]
- , createFinalIncremental:
-    ([ "--supply",                 $p.genesis.funds_balance
-     , "--gen-utxo-keys",          1
-     ] +
-     if $p.composition.dense_pool_density != 1
-     then
-     [  ]
-     else [] end)
-  , createFinalBulk:
-    ([ "--supply",                 fmt_decimal_10_5($p.genesis.funds_balance)
-     , "--gen-utxo-keys",          1
+  { createStakedArgs:
+    ([ "--testnet-magic",          $p.genesis.network_magic
+     , "--supply",                 fmt_decimal_10_5($p.genesis.funds_balance)
+     , "--gen-utxo-keys",          $p.genesis.utxo_keys
      , "--gen-genesis-keys",       $p.composition.n_bft_hosts
      , "--supply-delegated",       fmt_decimal_10_5($p.derived.supply_delegated)
      , "--gen-pools",              $p.composition.n_pools
      , "--gen-stake-delegs",       $p.derived.delegators_effective
-     , "--testnet-magic",          $p.genesis.network_magic
      , "--num-stuffed-utxo",       fmt_decimal_10_5($p.derived.utxo_stuffed)
      ] +
      if $p.composition.dense_pool_density != 1
@@ -34,6 +20,17 @@ def profile_cli_args($p):
      [ "--bulk-pool-cred-files",   $p.composition.n_dense_hosts
      , "--bulk-pools-per-file",    $p.composition.dense_pool_density ]
      else [] end)
+  , createTestnetDataArgs:
+    ([ "--testnet-magic",          $p.genesis.network_magic
+     , "--total-supply",           fmt_decimal_10_5($p.genesis.funds_balance + $p.derived.supply_delegated)
+     , "--utxo-keys",              $p.genesis.utxo_keys
+     , "--genesis-keys",           $p.composition.n_bft_hosts
+     , "--delegated-supply",       fmt_decimal_10_5($p.derived.supply_delegated)
+     , "--pools",                  $p.composition.n_pools
+     , "--stake-delegators",       $p.derived.delegators_effective
+     , "--drep-keys",              $p.genesis.dreps
+     , "--stuffed-utxo",           fmt_decimal_10_5($p.derived.utxo_stuffed)
+     ])
   , pools:
     [ "--argjson"
     , "initialPoolCoin",           fmt_decimal_10_5($p.genesis.pool_coin)
@@ -68,6 +65,7 @@ def profile_genesis_cache_key($p; $profile_file):
 
   , delegators
   , utxo_stuffed
+  , dreps
 
   } as $genesis_crypto_affecting_data
 
@@ -88,8 +86,11 @@ then [ "k\(.composition.n_pools)" ]
      else
      [ "d\(.composition.dense_pool_density)" ] end
      +
-     [ "\(.genesis.delegators / 1000)kD"
-     , "\(.derived.utxo_stuffed / 1000)kU"
+     [ "\(.genesis.delegators / 1000)kD" ]
+     +
+     if .genesis.dreps != 0 then ["\(.genesis.dreps)Dr"] else [] end
+     +
+     [ "\(.derived.utxo_stuffed / 1000)kU"
      , "\($params_hash)" ]
 else [ "preset"
      , $profile[0].preset ]

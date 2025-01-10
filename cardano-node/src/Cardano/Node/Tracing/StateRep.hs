@@ -3,6 +3,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE StandaloneDeriving #-}
 
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -21,14 +22,11 @@ module Cardano.Node.Tracing.StateRep
 import           Cardano.Api (textShow)
 
 import           Cardano.Logging
-
-import           Data.Aeson
-import           Data.Text (Text)
-import           Data.Time.Clock
-import           Data.Time.Clock.POSIX
-import           GHC.Generics (Generic)
-
+import           Cardano.Node.Handlers.Shutdown (ShutdownTrace)
 import           Cardano.Node.Protocol.Types (SomeConsensusProtocol (..))
+import qualified Cardano.Node.Startup as Startup
+import           Cardano.Slotting.Slot (EpochNo, SlotNo (..), WithOrigin)
+import           Cardano.Tracing.OrphanInstances.Network ()
 import qualified Ouroboros.Consensus.Block.RealPoint as RP
 import qualified Ouroboros.Consensus.Node.NetworkProtocolVersion as NPV
 import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
@@ -36,14 +34,18 @@ import           Ouroboros.Consensus.Storage.ImmutableDB.Chunks.Internal
 import qualified Ouroboros.Consensus.Storage.LedgerDB as LgrDb
 import           Ouroboros.Network.Block (pointSlot)
 
-import           Cardano.Node.Handlers.Shutdown (ShutdownTrace)
-import qualified Cardano.Node.Startup as Startup
-import           Cardano.Slotting.Slot (EpochNo, SlotNo (..), WithOrigin)
-import           Cardano.Tracing.OrphanInstances.Network ()
+import           Control.DeepSeq (NFData)
+import           Data.Aeson
+import           Data.Text (Text)
+import           Data.Time.Clock
+import           Data.Time.Clock.POSIX
+import           GHC.Generics (Generic)
 
-instance FromJSON ChunkNo
+deriving instance FromJSON ChunkNo
 
-instance ToJSON ChunkNo
+deriving instance ToJSON ChunkNo
+
+deriving instance NFData ChunkNo
 
 data OpeningDbs
   = StartedOpeningImmutableDB
@@ -54,16 +56,22 @@ data OpeningDbs
   | OpenedLgrDB
   deriving (Generic, FromJSON, ToJSON)
 
+deriving instance (NFData OpeningDbs)
+
 data Replays
   = ReplayFromGenesis  (WithOrigin SlotNo)
-  | ReplayFromSnapshot SlotNo (WithOrigin SlotNo) (WithOrigin SlotNo)
+  | ReplayFromSnapshot (WithOrigin SlotNo) (WithOrigin SlotNo)
   | ReplayedBlock      SlotNo (WithOrigin SlotNo) (WithOrigin SlotNo)
   deriving (Generic, FromJSON, ToJSON)
+
+deriving instance (NFData Replays)
 
 data InitChainSelection
   = InitChainStartedSelection
   | InitChainSelected
   deriving (Generic, FromJSON, ToJSON)
+
+deriving instance (NFData InitChainSelection)
 
 type SyncPercentage = Double
 
@@ -71,15 +79,19 @@ data AddedToCurrentChain
   = AddedToCurrentChain !EpochNo !SlotNo !SyncPercentage
   deriving (Generic, FromJSON, ToJSON)
 
+deriving instance (NFData AddedToCurrentChain)
+
 data StartupState
   = StartupSocketConfigError Text
   | StartupDBValidation
   | NetworkConfigUpdate
   | NetworkConfigUpdateError Text
-  | P2PWarning
+  | NonP2PWarning
   | WarningDevelopmentNodeToNodeVersions [NPV.NodeToNodeVersion]
   | WarningDevelopmentNodeToClientVersions [NPV.NodeToClientVersion]
   deriving (Generic, FromJSON, ToJSON)
+
+deriving instance (NFData StartupState)
 
 -- | The representation of the current state of node.
 --   All node states prior to tracing system going online are effectively invisible.
@@ -94,22 +106,24 @@ data NodeState
   | NodeShutdown ShutdownTrace
   deriving (Generic, FromJSON, ToJSON)
 
+deriving instance (NFData NodeState)
+
 instance LogFormatting NodeState where
   forMachine _ = \case
     NodeOpeningDbs x -> mconcat
-      ["openingDb" .= toJSON x]
+      [ "kind" .= String "NodeOpeningDbs",         "openingDb" .= toJSON x]
     NodeReplays x -> mconcat
-      ["replays"   .= toJSON x]
+      [ "kind" .= String "NodeReplays",            "replays"   .= toJSON x]
     NodeInitChainSelection x -> mconcat
-      ["chainSel"  .= toJSON x]
+      [ "kind" .= String "NodeInitChainSelection", "chainSel"  .= toJSON x]
     NodeKernelOnline -> mconcat
-      []
+      [ "kind" .= String "NodeInitChainSelection"]
     NodeAddBlock x -> mconcat
-      ["addBlock"  .= toJSON x]
+      [ "kind" .= String "NodeAddBlock",           "addBlock"  .= toJSON x]
     NodeStartup x -> mconcat
-      ["startup"   .= toJSON x]
+      [ "kind" .= String "NodeStartup",            "startup"   .= toJSON x]
     NodeShutdown x -> mconcat
-      ["shutdown"  .= toJSON x]
+      [ "kind" .= String "NodeShutdown",           "shutdown"  .= toJSON x]
     _ -> mempty
 
 instance MetaTrace NodeState where
@@ -194,7 +208,7 @@ traceNodeStateChainDB _scp tr ev =
           traceWith tr $ NodeOpeningDbs $ OpenedImmutableDB (pointSlot p) chunk
         ChainDB.StartedOpeningVolatileDB ->
           traceWith tr $ NodeOpeningDbs StartedOpeningVolatileDB
-        ChainDB.OpenedVolatileDB ->
+        ChainDB.OpenedVolatileDB _maxSlotN ->
           traceWith tr $ NodeOpeningDbs OpenedVolatileDB
         ChainDB.StartedOpeningLgrDB ->
           traceWith tr $ NodeOpeningDbs StartedOpeningLgrDB
@@ -205,20 +219,20 @@ traceNodeStateChainDB _scp tr ev =
       case ev' of
         LgrDb.ReplayFromGenesis (LgrDb.ReplayGoal p) ->
           traceWith tr $ NodeReplays $ ReplayFromGenesis (pointSlot p)
-        LgrDb.ReplayFromSnapshot _ (RP.RealPoint s _) (LgrDb.ReplayStart rs) (LgrDb.ReplayGoal rp) ->
-          traceWith tr $ NodeReplays $ ReplayFromSnapshot s (pointSlot rs) (pointSlot rp)
+        LgrDb.ReplayFromSnapshot _ (LgrDb.ReplayStart rs) (LgrDb.ReplayGoal rp) ->
+          traceWith tr $ NodeReplays $ ReplayFromSnapshot (pointSlot rs) (pointSlot rp)
         LgrDb.ReplayedBlock (RP.RealPoint s _) _ (LgrDb.ReplayStart rs) (LgrDb.ReplayGoal rp) ->
           traceWith tr $ NodeReplays $ ReplayedBlock s (pointSlot rs) (pointSlot rp)
     ChainDB.TraceInitChainSelEvent ev' ->
       case ev' of
         ChainDB.StartedInitChainSelection ->
           traceWith tr $ NodeInitChainSelection InitChainStartedSelection
-        ChainDB.InitalChainSelected ->
+        ChainDB.InitialChainSelected ->
           traceWith tr $ NodeInitChainSelection InitChainSelected
         _ -> return ()
     ChainDB.TraceAddBlockEvent ev' ->
       case ev' of
-        ChainDB.AddedToCurrentChain _ (ChainDB.NewTipInfo currentTip ntEpoch sInEpoch _) _ _ -> do
+        ChainDB.AddedToCurrentChain _ (ChainDB.SelectionChangedInfo currentTip ntEpoch sInEpoch _ _ _) _ _ -> do
           -- The slot of the latest block consumed (our progress).
           let RP.RealPoint ourSlotSinceSystemStart _ = currentTip
           -- The slot corresponding to the latest wall-clock time (our target).
@@ -246,8 +260,8 @@ traceNodeStateStartup tr ev =
       traceWith tr $ NodeStartup NetworkConfigUpdate
     Startup.NetworkConfigUpdateError e ->
       traceWith tr $ NodeStartup $ NetworkConfigUpdateError e
-    Startup.P2PWarning ->
-      traceWith tr $ NodeStartup P2PWarning
+    Startup.NonP2PWarning ->
+      traceWith tr $ NodeStartup NonP2PWarning
     Startup.WarningDevelopmentNodeToNodeVersions ntnVersions ->
       traceWith tr $ NodeStartup (WarningDevelopmentNodeToNodeVersions ntnVersions)
     Startup.WarningDevelopmentNodeToClientVersions ntcVersions ->

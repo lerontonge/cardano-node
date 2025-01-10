@@ -7,10 +7,60 @@ with lib; with builtins;
 let
   cfg = config.services.cardano-node;
   envConfig = cfg.environments.${cfg.environment};
-  runtimeDir = i : if cfg.runtimeDir i == null then cfg.stateDir i else "/run/${cfg.runtimeDir i}";
+  runtimeDir = i : if cfg.runtimeDir i == null then cfg.stateDir i else "${cfg.runDirBase}${lib.removePrefix cfg.runDirBase (cfg.runtimeDir i)}";
   suffixDir = base: i: "${base}${optionalString (i != 0) "-${toString i}"}";
   nullOrStr = types.nullOr types.str;
   funcToOr = t: types.either t (types.functionTo t);
+
+  newTopology = i: {
+    localRoots = map (g: {
+      accessPoints = map (e: builtins.removeAttrs e ["valency"]) g.accessPoints;
+      advertise = g.advertise or false;
+      valency = g.valency or (length g.accessPoints);
+      trustable = g.trustable or false;
+    }) (cfg.producers ++ (cfg.instanceProducers i));
+    publicRoots = map (g: {
+      accessPoints = map (e: builtins.removeAttrs e ["valency"]) g.accessPoints;
+      advertise = g.advertise or false;
+    }) (cfg.publicProducers ++ (cfg.instancePublicProducers i));
+    bootstrapPeers = cfg.bootstrapPeers;
+  } // optionalAttrs (cfg.usePeersFromLedgerAfterSlot != null) {
+    useLedgerAfterSlot = cfg.usePeersFromLedgerAfterSlot;
+  };
+
+  oldTopology = i: {
+    Producers = concatMap (g: map (a: {
+        addr = a.address;
+        inherit (a) port;
+        valency = a.valency or 1;
+      }) g.accessPoints) (
+      cfg.producers ++ (cfg.instanceProducers i) ++ cfg.publicProducers ++ (cfg.instancePublicProducers i)
+    );
+  };
+
+  assertNewTopology = i:
+    let
+      checkEval = tryEval (
+        assert
+          if cfg.bootstrapPeers == [] && all (e: e.trustable != true) ((newTopology i).localRoots)
+          then false
+          else true;
+      newTopology i);
+    in
+      if checkEval.success
+      then checkEval.value
+      else abort "When bootstrapPeers is an empty list, at least one localRoot must be trustable, otherwise cardano node will fail to start.";
+
+  selectTopology = i:
+    if cfg.topology != null
+    then cfg.topology
+    else toFile "topology.yaml" (toJSON (if (cfg.useNewTopology) then assertNewTopology i else oldTopology i));
+
+  topology = i:
+    if cfg.useSystemdReload
+    then "/etc/cardano-node/topology-${toString i}.yaml"
+    else selectTopology i;
+
   mkScript = cfg:
     let baseConfig =
           recursiveUpdate
@@ -39,6 +89,9 @@ let
                  options = {};
                }
           else baseConfig //
+               {
+                 UseTraceDispatcher = false;
+               } //
                (optionalAttrs (baseConfig ? hasEKG) {
                   hasEKG = baseConfig.hasEKG + i;
                }) //
@@ -49,32 +102,6 @@ let
     instanceConfig = recursiveUpdate (baseInstanceConfig i) (cfg.extraNodeInstanceConfig i);
     nodeConfigFile = if (cfg.nodeConfigFile != null) then cfg.nodeConfigFile
       else toFile "config-${toString cfg.nodeId}-${toString i}.json" (toJSON instanceConfig);
-    newTopology = {
-      localRoots = map (g: {
-        accessPoints = map (e: builtins.removeAttrs e ["valency"]) g.accessPoints;
-        advertise = g.advertise or false;
-        valency = g.valency or (length g.accessPoints);
-      }) (cfg.producers ++ (cfg.instanceProducers i));
-      publicRoots = map (g: {
-        accessPoints = map (e: builtins.removeAttrs e ["valency"]) g.accessPoints;
-        advertise = g.advertise or false;
-      }) (cfg.publicProducers ++ (cfg.instancePublicProducers i));
-    } // optionalAttrs (cfg.usePeersFromLedgerAfterSlot != null) {
-      useLedgerAfterSlot = cfg.usePeersFromLedgerAfterSlot;
-    };
-    oldTopology = {
-      Producers = concatMap (g: map (a: {
-          addr = a.address;
-          inherit (a) port;
-          valency = a.valency or 1;
-        }) g.accessPoints) (
-        cfg.producers ++ (cfg.instanceProducers i) ++ cfg.publicProducers ++ (cfg.instancePublicProducers i)
-      );
-    };
-    topology = if cfg.topology != null then cfg.topology else toFile "topology.yaml" (toJSON (
-      if (cfg.useNewTopology) then newTopology
-      else oldTopology
-    ));
     consensusParams = {
       RealPBFT = [
         "${lib.optionalString (cfg.signingKey != null)
@@ -104,14 +131,18 @@ let
       ];
     };
     instanceDbPath = cfg.databasePath i;
+    utxoLmdbParams = ["--utxos-on-disk"]
+      ++ lib.optionals (cfg.lmdbDatabasePath i != null)
+        [ "--utxos-database-path ${cfg.lmdbDatabasePath i}"
+        ];
     cmd = builtins.filter (x: x != "") [
       "${cfg.executable} run"
       "--config ${nodeConfigFile}"
       "--database-path ${instanceDbPath}"
-      "--topology ${topology}"
+      "--topology ${topology i}"
     ] ++ lib.optionals (!cfg.systemdSocketActivation) ([
       "--host-addr ${cfg.hostAddr}"
-      "--port ${toString (cfg.port + i)}"
+      "--port ${if (cfg.shareIpv4port || cfg.shareIpv6port) then toString cfg.port else toString (cfg.port + i)}"
       "--socket-path ${cfg.socketPath i}"
     ] ++ lib.optionals (cfg.ipv6HostAddr i != null) [
       "--host-ipv6-addr ${cfg.ipv6HostAddr i}"
@@ -119,7 +150,8 @@ let
       "--tracer-socket-path-accept ${cfg.tracerSocketPathAccept i}"
     ] ++ lib.optionals (cfg.tracerSocketPathConnect i != null) [
       "--tracer-socket-path-connect ${cfg.tracerSocketPathConnect i}"
-    ] ++ consensusParams.${cfg.nodeConfig.Protocol} ++ cfg.extraArgs ++ cfg.rtsArgs;
+    ] ++ lib.optionals (cfg.withUtxoHdLmdb i) utxoLmdbParams
+      ++ consensusParams.${cfg.nodeConfig.Protocol} ++ cfg.extraArgs ++ cfg.rtsArgs;
     in ''
       echo "Starting: ${concatStringsSep "\"\n   echo \"" cmd}"
       echo "..or, once again, in a single line:"
@@ -143,6 +175,7 @@ in {
           (the blockchain protocols running cardano).
         '';
       };
+
       instances = mkOption {
         type = types.int;
         default = 1;
@@ -157,7 +190,7 @@ in {
       };
 
       profiling = mkOption {
-        type = types.enum ["none" "time" "space" "space-cost" "space-module" "space-closure" "space-type" "space-retainer" "space-bio" "space-heap"];
+        type = types.enum ["none" "time" "time-detail" "space" "space-cost" "space-module" "space-closure" "space-type" "space-retainer" "space-bio" "space-heap"];
         default = "none";
       };
 
@@ -300,21 +333,37 @@ in {
         '';
       };
 
+      stateDirBase = mkOption {
+        type = types.str;
+        default = "/var/lib/";
+        description = ''
+          Base directory to store blockchain data, for each instance.
+        '';
+      };
+
       stateDir = mkOption {
         type = funcToOr types.str;
-        default = "/var/lib/cardano-node";
+        default = "${cfg.stateDirBase}cardano-node";
         apply = x : if (builtins.isFunction x) then x else i: x;
         description = ''
           Directory to store blockchain data, for each instance.
         '';
       };
 
+      runDirBase = mkOption {
+        type = types.str;
+        default = "/run/";
+        description = ''
+          Base runtime directory, for each instance.
+        '';
+      };
+
       runtimeDir = mkOption {
         type = funcToOr nullOrStr;
-        default = suffixDir "cardano-node";
-        apply = x : if builtins.isFunction x then x else if x == null then _: null else suffixDir x;
+        default = i: ''${cfg.runDirBase}${suffixDir "cardano-node" i}'';
+        apply = x : if builtins.isFunction x then x else if x == null then _: null else "${cfg.runDirBase}${suffixDir "cardano-node" x}";
         description = ''
-          Runtime directory relative to /run, for each instance
+          Runtime directory relative to ${cfg.runDirBase}, for each instance
         '';
       };
 
@@ -323,6 +372,16 @@ in {
         default = i : "${cfg.stateDir i}/${cfg.dbPrefix i}";
         apply = x : if builtins.isFunction x then x else _ : x;
         description = ''Node database path, for each instance.'';
+      };
+
+      lmdbDatabasePath = mkOption {
+        type = funcToOr nullOrStr;
+        default = null;
+        apply = x : if builtins.isFunction x then x else if x == null then _: null else _: x;
+        description = ''
+          Node UTxO-HD LMDB path for performant disk I/O, for each instance.
+          This could point to a direct-access SSD, with a specifically created journal-less file system and optimized mount options.
+        '';
       };
 
       socketPath = mkOption {
@@ -413,7 +472,7 @@ in {
         default = cfg.systemdSocketActivation;
         description = ''
           Should instances on same machine share ipv4 port.
-          Default: true if systemd activated socket. Otherwise always false.
+          Default: true if systemd activated socket. Otherwise false.
           If false use port increments starting from `port`.
         '';
       };
@@ -423,8 +482,7 @@ in {
         default = cfg.systemdSocketActivation;
         description = ''
           Should instances on same machine share ipv6 port.
-          Only works with systemd socket.
-          Default: true if systemd activated socket. Otherwise always false.
+          Default: true if systemd activated socket. Otherwise false.
           If false use port increments starting from `port`.
         '';
       };
@@ -439,7 +497,8 @@ in {
 
       publicProducers = mkOption {
         type = types.listOf types.attrs;
-        default = [{
+        default = [];
+        example = [{
           accessPoints = [{
             address = envConfig.relaysNew;
             port = envConfig.edgePort;
@@ -504,11 +563,36 @@ in {
         '';
       };
 
+      bootstrapPeers = mkOption {
+        type = types.nullOr (types.listOf types.attrs);
+        default = map (e: {address = e.addr; inherit (e) port;}) envConfig.edgeNodes;
+        description = ''
+          If set, it will enable bootstrap peers.
+          To disable, set this to null.
+          To enable, set this to a list of attributes of address and port, example: [{ address = "addr"; port = 3001; }]
+        '';
+      };
+
       topology = mkOption {
         type = types.nullOr (types.either types.str types.path);
         default = null;
         description = ''
           Cluster topology. If not set `producers` array is used to generated topology file.
+        '';
+      };
+
+      useSystemdReload = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          If set, systemd will reload cardano-node service units instead of restarting them
+          if only the topology file has changed and p2p is in use.
+
+          Cardano-node topology files will be stored in /etc as:
+            /etc/cardano-node/topology-''${toString i}.yaml
+
+          Enabling this option will also allow direct topology edits for tests when a full
+          service re-deployment is not desired.
         '';
       };
 
@@ -588,17 +672,30 @@ in {
         default = false;
       };
 
+      withUtxoHdLmdb = mkOption {
+        type = funcToOr types.bool;
+        default = false;
+        apply = x: if builtins.isFunction x then x else _: x;
+        description = ''On an UTxO-HD enabled node, the in-memory backend is the default. This activates the on-disk backend (LMDB) instead.'';
+      };
+
       extraArgs = mkOption {
         type = types.listOf types.str;
         default = [];
         description = ''Extra CLI args for 'cardano-node'.'';
       };
 
+      rts_flags_override = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = ''RTS flags override from profile content.'';
+      };
+
       rtsArgs = mkOption {
         type = types.listOf types.str;
         default = [ "-N2" "-I0" "-A16m" "-qg" "-qb" "--disable-delayed-os-memory-return" ];
-        apply = args: if (args != [] || cfg.profilingArgs != []) then
-          ["+RTS"] ++ cfg.profilingArgs ++ args ++ ["-RTS"]
+        apply = args: if (args != [] || cfg.profilingArgs != [] || cfg.rts_flags_override != []) then
+          ["+RTS"] ++ cfg.profilingArgs ++ args ++ cfg.rts_flags_override ++ ["-RTS"]
           else [];
         description = ''Extra CLI args for 'cardano-node', to be surrounded by "+RTS"/"-RTS"'';
       };
@@ -608,6 +705,7 @@ in {
         default = let commonProfilingArgs = ["--machine-readable" "-tcardano-node.stats" "-pocardano-node"]
           ++ lib.optional (cfg.eventlog) "-l";
           in if cfg.profiling == "time" then ["-p"] ++ commonProfilingArgs
+            else if cfg.profiling == "time-detail" then ["-P"] ++ commonProfilingArgs
             else if cfg.profiling == "space" then ["-h"] ++ commonProfilingArgs
             else if cfg.profiling == "space-cost" then ["-hc"] ++ commonProfilingArgs
             else if cfg.profiling == "space-module" then ["-hm"] ++ commonProfilingArgs
@@ -623,8 +721,7 @@ in {
   };
 
   config = mkIf cfg.enable ( let
-    stateDirBase = "/var/lib/";
-    runDirBase = "/run/";
+    lmdbPaths = filter (x: x != null) (map (e: cfg.lmdbDatabasePath e) (builtins.genList lib.trivial.id cfg.instances));
     genInstanceConf = f: listToAttrs (if cfg.instances > 1
       then genList (i: let n = "cardano-node-${toString i}"; in nameValuePair n (f n i)) cfg.instances
       else [ (nameValuePair "cardano-node" (f "cardano-node" 0)) ]); in lib.mkMerge [
@@ -636,6 +733,10 @@ in {
         group = "cardano-node";
         isSystemUser = true;
       };
+
+      environment.etc = mkIf cfg.useSystemdReload (foldl'
+        (acc: i: recursiveUpdate acc {"cardano-node/topology-${toString i}.yaml".source = selectTopology i;}) {}
+      (range 0 (cfg.instances - 1)));
 
       ## TODO:  use http://hackage.haskell.org/package/systemd for:
       ##   1. only declaring success after we perform meaningful init (local state recovery)
@@ -650,17 +751,19 @@ in {
         wants = [ "network-online.target" ];
         wantedBy = [ "multi-user.target" ];
         partOf = mkIf (cfg.instances > 1) ["cardano-node.service"];
+        reloadTriggers = mkIf (cfg.useSystemdReload && cfg.useNewTopology) [ (selectTopology i) ];
         script = mkScript cfg i;
         serviceConfig = {
           User = "cardano-node";
           Group = "cardano-node";
+          ExecReload = mkIf (cfg.useSystemdReload && cfg.useNewTopology) "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
           Restart = "always";
           RuntimeDirectory = lib.mkIf (!cfg.systemdSocketActivation)
-            (lib.removePrefix runDirBase (runtimeDir i));
+            (lib.removePrefix cfg.runDirBase (runtimeDir i));
           WorkingDirectory = cfg.stateDir i;
-          # This assumes /var/lib/ is a prefix of cfg.stateDir.
+          # This assumes cfg.stateDirBase is a prefix of cfg.stateDir.
           # This is checked as an assertion below.
-          StateDirectory =  lib.removePrefix stateDirBase (cfg.stateDir i);
+          StateDirectory =  lib.removePrefix cfg.stateDirBase (cfg.stateDir i);
           NonBlocking = lib.mkIf cfg.systemdSocketActivation true;
           # time to sleep before restarting a service
           RestartSec = 1;
@@ -676,8 +779,7 @@ in {
             ++ optional (cfg.ipv6HostAddr i != null) "[${cfg.ipv6HostAddr i}]:${toString (if cfg.shareIpv6port then cfg.port else cfg.port + i)}"
             ++ (cfg.additionalListenStream i)
             ++ [(cfg.socketPath i)];
-          RuntimeDirectory = lib.removePrefix runDirBase
-            (cfg.runtimeDir i);
+          RuntimeDirectory = lib.removePrefix cfg.runDirBase (cfg.runtimeDir i);
           NoDelay = "yes";
           ReusePort = "yes";
           SocketMode = "0660";
@@ -699,17 +801,17 @@ in {
           User = "cardano-node";
           Group = "cardano-node";
           ExecStart = "${pkgs.coreutils}/bin/echo Starting ${toString cfg.instances} cardano-node instances";
-          WorkingDirectory = "/var/lib/cardano-node";
-          StateDirectory = "cardano-node";
+          WorkingDirectory = cfg.stateDir i;
+          StateDirectory =  lib.removePrefix cfg.stateDirBase (cfg.stateDir i);
         };
       };
     }
     {
       assertions = [
         {
-          assertion = builtins.all (i : lib.hasPrefix stateDirBase (cfg.stateDir i))
+          assertion = builtins.all (i : lib.hasPrefix cfg.stateDirBase (cfg.stateDir i))
                                    (builtins.genList lib.trivial.id cfg.instances);
-          message = "The option services.cardano-node.stateDir should have ${stateDirBase}
+          message = "The option services.cardano-node.stateDir should have ${cfg.stateDirBase}
                      as a prefix, for each instance!";
         }
         {
@@ -719,6 +821,10 @@ in {
         {
           assertion = !(cfg.systemdSocketActivation && cfg.useNewTopology);
           message = "Systemd socket activation cannot be used with p2p topology due to a systemd socket re-use issue.";
+        }
+        {
+          assertion = (length lmdbPaths) == (length (lib.lists.unique lmdbPaths));
+          message   = "When configuring multiple LMDB enabled nodes on one instance, lmdbDatabasePath must be unique.";
         }
       ];
     }

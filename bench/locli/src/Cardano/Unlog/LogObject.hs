@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DerivingVia #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
@@ -9,15 +10,13 @@
 {-# OPTIONS_GHC -Wno-partial-fields -Wno-orphans #-}
 
 {- HLINT ignore "Redundant <$>" -}
-{- HLINT ignore "Redundant if" -}
-{- HLINT ignore "Use infix" -}
 
 module Cardano.Unlog.LogObject
   ( HostLogs (..)
+  , TraceFreqs
   , hlRawLogObjects
   , RunLogs (..)
   , rlLogs
-  , runLiftLogObjects
   , LogObject (..)
   , loPretty
   --
@@ -25,48 +24,83 @@ module Cardano.Unlog.LogObject
   , logObjectStreamInterpreterKeys
   , LOBody (..)
   , LOAnyType (..)
+  , fromTextRef
+  , textRefEquals
   )
 where
 
-import           Cardano.Prelude hiding (Text, show)
-import           Prelude (id, show, unzip3)
+import           Cardano.Analysis.API.Ground
+import           Cardano.Logging.Resources.Types
+import           Cardano.Prelude hiding (Text, show, toText)
+import           Cardano.Util
 
-import           Control.Monad (fail)
+import           Prelude (show, unzip3)
+
 import qualified Data.Aeson as AE
 import qualified Data.Aeson.Key as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import           Data.Aeson.Types (Parser)
-import qualified Data.ByteString.Lazy as LBS
+import           Data.Data (Data)
+import           Data.Hashable (hash)
+import qualified Data.Map.Lazy as ML (Map)
 import qualified Data.Map.Strict as Map
+import           Data.Profile
+import           Data.String (IsString (..))
 import qualified Data.Text as LText
 import           Data.Text.Short (ShortText, fromText, toText)
 import qualified Data.Text.Short as Text
+import           Data.Tuple.Extra (fst3, snd3, thd3)
 import           Data.Vector (Vector)
 import qualified Data.Vector as V
 
-import           Cardano.Logging.Resources.Types
 
-import           Data.Profile
+type Text       = ShortText
 
-import           Cardano.Analysis.API.Ground
-import           Cardano.Util
+type TraceFreqs = ML.Map Text Int
 
 
-type Text = ShortText
+-- | Us of the a TextRef replaces commonly expected string parses with references
+--   into a Map, reducing memory footprint - given that large runs can contain
+--   >25mio log objects.
+data TextRef
+    = TextRef {-# UNPACK #-} !Int
+    | TextLit {-# UNPACK #-} !Text
+  deriving Generic
+  deriving anyclass NFData
+
+toTextRef :: Text -> TextRef
+toTextRef t = let h = hash t in if Text.null (lookupTextRef h) then TextLit t else TextRef h
+
+fromTextRef :: TextRef -> Text
+fromTextRef (TextRef i) = lookupTextRef i
+fromTextRef (TextLit t) = t
+
+textRefEquals :: Text -> TextRef -> Bool
+textRefEquals t = (t ==) . fromTextRef
+
+instance Show TextRef where
+  show (TextRef i) = show $ lookupTextRef i
+  show (TextLit t) = show t
+
+instance IsString TextRef where
+  fromString = toTextRef . fromString
+
+instance ToJSON TextRef where
+  toJSON (TextRef i) = toJSON $ lookupTextRef i
+  toJSON (TextLit t) = toJSON t
 
 -- | Input data.
 data HostLogs a
   = HostLogs
     { hlRawLogfiles    :: [FilePath]
     , hlRawLines       :: Int
-    , hlRawSha256      :: Hash
-    , hlRawTraceFreqs  :: Map Text Int
-    , hlMissingTraces  :: [Text]
-    , hlLogs           :: (JsonLogfile, a)
-    , hlFilteredSha256 :: Hash
+    , hlRawTraceFreqs  :: TraceFreqs
+    , hlLogs           :: (LogObjectSource, a)
     , hlProfile        :: [ProfileEntry I]
+    , hlRawFirstAt     :: Maybe UTCTime
+    , hlRawLastAt      :: Maybe UTCTime
     }
-  deriving (Generic)
+  deriving (Generic, NFData)
 
 deriving instance FromJSON a => FromJSON (HostLogs a)
 deriving instance   ToJSON a =>   ToJSON (HostLogs a)
@@ -77,74 +111,19 @@ hlRawLogObjects = sum . Map.elems . hlRawTraceFreqs
 data RunLogs a
   = RunLogs
     { rlHostLogs      :: Map.Map Host (HostLogs a)
-    , rlMissingTraces :: [Text]
-    , rlFilterKeys    :: [Text]
     , rlFilterDate    :: UTCTime
     }
   deriving (Generic, FromJSON, ToJSON)
 
-rlLogs :: RunLogs a -> [(JsonLogfile, a)]
+rlLogs :: RunLogs a -> [(LogObjectSource, a)]
 rlLogs = fmap hlLogs . Map.elems . rlHostLogs
 
-runLiftLogObjects :: RunLogs () -> Bool -> Maybe [LOAnyType]
-                  -> ExceptT LText.Text IO (RunLogs [LogObject])
-runLiftLogObjects rl@RunLogs{..} okDErr loAnyLimit = liftIO $ do
-  forConcurrently (Map.toList rlHostLogs)
-    (uncurry readHostLogs)
-    <&> \kvs -> rl { rlHostLogs = Map.fromList kvs }
- where
-   readHostLogs :: Host -> HostLogs () -> IO (Host, HostLogs [LogObject])
-   readHostLogs h hl@HostLogs{..} =
-     readLogObjectStream (unJsonLogfile $ fst hlLogs) okDErr loAnyLimit
-     <&> (h,) . setLogs hl . fmap (setLOhost h)
-
-   setLogs :: HostLogs a -> b -> HostLogs b
-   setLogs hl x = hl { hlLogs = (fst $ hlLogs hl, x) }
-   setLOhost :: Host -> LogObject -> LogObject
-   setLOhost h lo = lo { loHost = h }
-
-readLogObjectStream :: FilePath -> Bool -> Maybe [LOAnyType] -> IO [LogObject]
-readLogObjectStream f okDErr loAnyLimit =
-  LBS.readFile f
-    <&>
-    (if okDErr then id else
-        filter ((\case
-                    LODecodeError input err -> error
-                      (printf "Decode error while parsing %s:\n%s\non input:\n>>>  %s" f (Text.toString err) (Text.toString input))
-                    _ -> True)
-               . loBody)) .
-    filter ((case loAnyLimit of
-              Nothing -> \case
-                LOAny{} -> False
-                _       -> True
-              Just constraint -> \case
-                LOAny laty obj ->
-                  elem laty constraint
-                  || error (printf "Unexpected LOAny while parsing %s -- %s: %s"
-                                   f (show laty) (show obj))
-                _ -> True)
-             . loBody) .
-    filter (not . isDecodeError "Error in $: not enough input" . loBody) .
-    fmap (\bs ->
-            AE.eitherDecode bs &
-            either
-            (LogObject zeroUTCTime "Cardano.Analysis.DecodeError" "DecodeError" "" (TId "0")
-             . LODecodeError (Text.fromByteString (LBS.toStrict bs)
-                               & fromMaybe "#<ERROR decoding input fromByteString>")
-              . Text.fromText
-              . LText.pack)
-            id)
-    . LBS.split (fromIntegral $ fromEnum '\n')
- where
-   isDecodeError x = \case
-     LODecodeError _ x' -> x == x'
-     _ -> False
 
 data LogObject
   = LogObject
     { loAt   :: !UTCTime
-    , loNS   :: !Text
-    , loKind :: !Text
+    , loNS   :: !TextRef
+    , loKind :: !TextRef
     , loHost :: !Host
     , loTid  :: !TId
     , loBody :: !LOBody
@@ -154,11 +133,8 @@ data LogObject
 
 instance ToJSON LogObject
 
-instance Print ShortText where
-  hPutStr   h = hPutStr   h . toText
-  hPutStrLn h = hPutStrLn h . toText
-
 deriving instance NFData a => NFData (Resources a)
+
 
 loPretty :: LogObject -> LText.Text
 loPretty LogObject{..} = mconcat
@@ -290,7 +266,6 @@ interpreters = map3ple Map.fromList . unzip3 . fmap ent $
             <*> (v .:? "chainLengthDelta"
                 -- Compat for node versions 1.27 and older:
                  <&> fromMaybe 1)
-  -- TODO: we should clarify the distinction between the two cases (^ and v).
   , (,,,) "TraceAdoptedBlock" "Forge.AdoptedBlock" "Forge.Loop.AdoptedBlock" $
     \v -> LOBlockAddedToCurrentChain
             <$> v .: "blockHash"
@@ -300,16 +275,19 @@ interpreters = map3ple Map.fromList . unzip3 . fmap ent $
   -- Ledger snapshots:
   , (,,,) "TraceSnapshotEvent.TookSnapshot" "TraceLedgerEvent.TookSnapshot" "ChainDB.LedgerEvent.TookSnapshot" $
     \_ -> pure LOLedgerTookSnapshot
+  -- If needed, this could track slot and duration (SMaybe):
+  -- {"at":"2024-10-19T10:16:27.459112022Z","ns":"ChainDB.LedgerEvent.TookSnapshot","data":{"enclosedTime":{"tag":"RisingEdge"},"kind":"TookSnapshot","snapshot":{"kind":"snapshot"},"tip":"RealPoint (SlotNo 5319) adefbb19d6284aa68f902d33018face42d37e1a7970415d2a81bd4c2dea585ba"},"sev":"Info","thread":"81","host":"client-us-04"}
+  -- {"at":"2024-10-19T10:16:45.925381225Z","ns":"ChainDB.LedgerEvent.TookSnapshot","data":{"enclosedTime":{"contents":18.466253914,"tag":"FallingEdgeWith"},"kind":"TookSnapshot","snapshot":{"kind":"snapshot"},"tip":"RealPoint (SlotNo 5319) adefbb19d6284aa68f902d33018face42d37e1a7970415d2a81bd4c2dea585ba"},"sev":"Info","thread":"81","host":"client-us-04"}
 
   -- Tx receive path & mempool:
   , (,,,) "TraceBenchTxSubServAck" "TraceBenchTxSubServAck" "TraceBenchTxSubServAck" $
     \v -> LOTxsAcked <$> v .: "txIds"
 
-  , (,,,) "TraceTxSubmissionCollected" "TraceTxSubmissionCollected" "TraceTxSubmissionCollected" $
+  , (,,,) "TraceTxSubmissionCollected" "TraceTxSubmissionCollected" "TxSubmission.TxInbound.Collected" $
     \v -> LOTxsCollected
             <$> v .: "count"
 
-  , (,,,) "TraceTxSubmissionProcessed" "TraceTxSubmissionProcessed" "TraceTxSubmissionProcessed" $
+  , (,,,) "TraceTxSubmissionProcessed" "TraceTxSubmissionProcessed" "TxSubmission.TxInbound.Processed" $
     \v -> LOTxsProcessed
             <$> v .: "accepted"
             <*> v .: "rejected"
@@ -328,7 +306,7 @@ interpreters = map3ple Map.fromList . unzip3 . fmap ent $
     \_ -> pure LOMempoolRejectedTx
 
   -- Generator:
-  , (,,,) "TraceBenchTxSubSummary" "TraceBenchTxSubSummary" "TraceBenchTxSubSummary" $
+  , (,,,) "TraceBenchTxSubSummary" "TraceBenchTxSubSummary" "Benchmark.BenchTxSubSummary" $
     \v -> do
        x :: Object <- v .: "summary"
        LOGeneratorSummary
@@ -347,6 +325,8 @@ interpreters = map3ple Map.fromList . unzip3 . fmap ent $
 
    map3ple :: (a -> b) -> (a,a,a) -> (b,b,b)
    map3ple f (x,y,z) = (f x, f y, f z)
+
+
 
 logObjectStreamInterpreterKeysLegacy, logObjectStreamInterpreterKeys :: [Text]
 logObjectStreamInterpreterKeysLegacy =
@@ -430,7 +410,7 @@ data LOBody
     { loRawText :: !ShortText
     , loError   :: !ShortText
     }
-  deriving (Eq, Generic, Show)
+  deriving (Eq, Generic, Show, Data)
   deriving anyclass NFData
 
 data LOAnyType
@@ -438,9 +418,10 @@ data LOAnyType
   | LANonBlocking
   | LARollback
   | LANoInterpreter
-  deriving (Eq, Generic, NFData, Read, Show, ToJSON)
+  deriving (Eq, Generic, NFData, Read, Show, ToJSON, Data)
 
-deriving instance Eq ResourceStats
+deriving instance Eq       ResourceStats
+deriving instance Data     ResourceStats
 
 instance ToJSON LOBody
 
@@ -457,8 +438,8 @@ instance FromJSON LogObject where
                  "The 'ns' field must be either a string, or a singleton-String vector, was: " <> show x
     LogObject
       <$> v .: "at"
-      <*> pure ns
-      <*> pure kind
+      <*> pure (toTextRef ns)
+      <*> pure (toTextRef kind)
       <*> v .: "host"
       <*> v .: "thread"
       <*> case Map.lookup  ns                                       (thd3 interpreters)
@@ -479,7 +460,7 @@ instance FromJSON LogObject where
        case (kind, wrapped, unwrapped) of
          (Nothing, Just _, Just x) -> (,) <$> pure x <*> (fromText <$> x .: "kind")
          (Just kind0, _, _) -> pure (v, kind0)
-         _ -> fail $ "Unexpected LogObject .data: " <> show v
+         _ -> pure (v, "")
 
 parsePartialResourceStates :: Value -> Parser (Resources Word64)
 parsePartialResourceStates =
@@ -491,13 +472,90 @@ parsePartialResourceStates =
       rGcsMajor   <- o .:  "GcsMajor"
       rGcsMinor   <- o .:  "GcsMinor"
       rAlloc      <- o .:  "Alloc"
-      rLive       <- o .:? "Heap"       <&> fromMaybe 0
-      rHeap       <- o .:  "Live"
+      rLive       <- o .:  "Live"
+      rHeap       <- o .:? "Heap"       .!= 0
       rRSS        <- o .:  "RSS"
       rCentiBlkIO <- o .:  "CentiBlkIO"
-      rNetRd      <- o .:? "NetRd"      <&> fromMaybe 0
-      rNetWr      <- o .:? "NetWr"      <&> fromMaybe 0
-      rFsRd       <- o .:? "FsRd"       <&> fromMaybe 0
-      rFsWr       <- o .:? "FsWr"       <&> fromMaybe 0
+      rNetRd      <- o .:? "NetRd"      .!= 0
+      rNetWr      <- o .:? "NetWr"      .!= 0
+      rFsRd       <- o .:? "FsRd"       .!= 0
+      rFsWr       <- o .:? "FsWr"       .!= 0
       rThreads    <- o .:  "Threads"
       pure Resources{..}
+
+{-# NOINLINE lookupTextRef #-}
+lookupTextRef :: Int -> Text
+lookupTextRef ref = Map.findWithDefault Text.empty ref dict
+  where
+    dict    = Map.fromList [(hash t, t) | t <- concat [allKeys, kinds, legacy, newTr]]
+    kinds   = map ("Cardano.Node." <>) allKeys
+    allKeys = concatMap Map.keys [fst3 interpreters, snd3 interpreters, thd3 interpreters]
+              & filter (not . Text.null)
+
+    -- common string parses from legacy tracing with no known interpreter
+    legacy = map ("cardano.node." <>)
+      [ "BlockFetchClient"
+      , "BlockFetchServer"
+      , "ChainDB"
+      , "ChainSyncClient"
+      , "ChainSyncHeaderServer"
+      , "DnsSubscription"
+      , "Forge"
+      , "IpSubscription"
+      , "LeadershipCheck"
+      , "Mempool"
+      , "resources"
+      , "TxInbound"
+      ]
+
+    -- common string parses from new tracing with no known interpreter
+    newTr =
+      [ "AcknowledgedFetchRequest"
+      , "AddedFetchRequest"
+      , "BlockFetch.Client.AcknowledgedFetchRequest"
+      , "BlockFetch.Client.AddedFetchRequest"
+      , "BlockFetch.Client.CompletedFetchBatch"
+      , "BlockFetch.Client.StartedFetchBatch"
+      , "BlockFetch.Remote.Receive.BatchDone"
+      , "BlockFetch.Remote.Receive.Block"
+      , "BlockFetch.Remote.Receive.StartBatch"
+      , "BlockFetchServer"
+      , "ChainDB.AddBlockEvent.AddBlockValidation.UpdateLedgerDb"
+      , "ChainDB.AddBlockEvent.AddBlockValidation.ValidCandidate"
+      , "ChainDB.AddBlockEvent.AddedBlockToQueue"
+      , "ChainDB.AddBlockEvent.AddedBlockToVolatileDB"
+      , "ChainDB.AddBlockEvent.ChangingSelection"
+      , "ChainDB.AddBlockEvent.IgnoreBlockAlreadyInVolatileDB"
+      , "ChainDB.AddBlockEvent.PipeliningEvent.OutdatedTentativeHeader"
+      , "ChainDB.AddBlockEvent.PipeliningEvent.SetTentativeHeader"
+      , "ChainDB.AddBlockEvent.PoppedBlockFromQueue"
+      , "ChainDB.AddBlockEvent.TryAddToCurrentChain"
+      , "ChainDB.CopyToImmutableDBEvent.CopiedBlockToImmutableDB"
+      , "ChainDB.FollowerEvent.NewFollower"
+      , "ChainDB.GCEvent.ScheduledGC"
+      , "ChainDB.IteratorEvent.StreamFromVolatileDB"
+      , "ChainSyncServer.Update"
+      , "CompletedFetchBatch"
+      , "CopiedBlockToImmutableDB"
+      , "DownloadedHeader"
+      , "Forge.ForgingStats"
+      , "ForgingStats"
+      , "IgnoreBlockAlreadyInVolatileDB"
+      , "Net.Handshake.Local.Receive.ProposeVersions"
+      , "Net.Handshake.Local.Send.AcceptVersion"
+      , "OutdatedTentativeHeader"
+      , "Recv"
+      , "ResourceStats"
+      , "SetTentativeHeader"
+      , "StartedFetchBatch"
+      , "StateQueryServer.Receive.Query"
+      , "StateQueryServer.Receive.Release"
+      , "StreamFromVolatileDB"
+      , "TraceAddBlockEvent.ChangingSelection"
+      , "TraceAddBlockEvent.PoppedBlockFromQueue"
+      , "TraceTxInboundCanRequestMoreTxs"
+      , "TraceTxInboundCannotRequestMoreTxs"
+      , "TxSubmission.TxInbound.CanRequestMoreTxs"
+      , "TxSubmission.TxInbound.CannotRequestMoreTxs"
+      , "UpdateLedgerDbTraceEvent.StartedPushingBlockToTheLedgerDb"
+      ]

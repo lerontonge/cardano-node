@@ -1,13 +1,17 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {- HLINT ignore "Monad law, left identity" -}
 
 module Cardano.Logging.Tracer.Composed (
-    traceTracerInfo
-  , mkCardanoTracer
+    mkCardanoTracer
   , mkCardanoTracer'
   , mkMetricsTracer
+  , traceTracerInfo
+  , traceConfigWarnings
+  , traceEffectiveConfiguration
   ) where
 
 import           Cardano.Logging.Configuration
@@ -16,44 +20,28 @@ import           Cardano.Logging.Trace
 import           Cardano.Logging.TraceDispatcherMessage
 import           Cardano.Logging.Types
 
-
-import           Data.Maybe (fromMaybe)
-import           Data.Text hiding (map)
-import qualified Control.Tracer as NT
-import qualified Data.List as L
-import qualified Data.Set as Set
+import           Control.Concurrent.MVar
+import           Control.Monad (when)
+import           Control.Monad.IO.Class (MonadIO, liftIO)
+import qualified Control.Tracer as T
 import           Data.IORef
+import qualified Data.List as L
+import qualified Data.Map as Map
+import           Data.Maybe (fromMaybe, isNothing)
+import qualified Data.Set as Set
+import           Data.Text hiding (map)
 
 
-traceTracerInfo ::
-     Trace IO FormattedMessage
-  -> Trace IO FormattedMessage
-  -> ConfigReflection
-  -> IO ()
-traceTracerInfo trStdout trForward (ConfigReflection silentRef metricsRef) = do
-    internalTr <- backendsAndFormat
-                      trStdout
-                      trForward
-                      (Just [Forwarder, Stdout MachineFormat])
-                      (Trace NT.nullTracer)
-    silentSet <- readIORef silentRef
-    metricSet <- readIORef metricsRef
-    let silentList  = map (intercalate (singleton '.')) (Set.toList silentSet)
-    let metricsList = map (intercalate (singleton '.')) (Set.toList metricSet)
-    traceWith (withInnerNames (appendPrefixNames ["Reflection"] internalTr))
-              (TracerInfo silentList metricsList)
-    writeIORef silentRef Set.empty
-    writeIORef metricsRef Set.empty
 
 -- | Construct a tracer according to the requirements for cardano node.
 -- The tracer gets a 'name', which is appended to its namespace.
--- The tracer has to be an instance of LogFormat-ting for the display of
+-- The tracer has to be an instance of LogFormatting for the display of
 -- messages and an instance of MetaTrace for meta information such as
 -- severity, privacy, details and backends'.
 -- The tracer gets the backends': 'trStdout', 'trForward' and 'mbTrEkg'
 -- as arguments.
--- The returned tracer needs to be configured with a configuration.
-
+-- The returned tracer needs to be configured with a configuration
+-- before it is used.
 mkCardanoTracer :: forall evt.
      ( LogFormatting evt
      , MetaTrace evt)
@@ -71,7 +59,8 @@ mkCardanoTracer trStdout trForward mbTrEkg tracerPrefix =
 -- | Adds the possibility to add special tracers via the hook function
 mkCardanoTracer' :: forall evt evt1.
      ( LogFormatting evt1
-     , MetaTrace evt1)
+     , MetaTrace evt1
+     )
   => Trace IO FormattedMessage
   -> Trace IO FormattedMessage
   -> Maybe (Trace IO FormattedMessage)
@@ -80,39 +69,68 @@ mkCardanoTracer' :: forall evt evt1.
   -> IO (Trace IO evt)
 mkCardanoTracer' trStdout trForward mbTrEkg tracerPrefix hook = do
 
-    internalTr <- fmap (appendPrefixNames ["Reflection"])
-                       (withBackendsFromConfig (backendsAndFormat trStdout trForward))
+    !internalTr <-  backendsAndFormat
+                      trStdout
+                      trForward
+                      Nothing
+                      (Trace T.nullTracer)
+                    >>= addContextAndFilter
 
     -- handle the messages
-    messageTrace <- withBackendsFromConfig (backendsAndFormat trStdout trForward)
+    !messageTrace <- withBackendsFromConfig (backendsAndFormat trStdout trForward)
                     >>= withLimitersFromConfig internalTr
-                    >>= addContextAndFilter internalTr
+                    >>= traceNamespaceErrors internalTr
+                    >>= addContextAndFilter
                     >>= maybeSilent isSilentTracer tracerPrefix False
                     >>= hook
 
     -- handle the metrics
-    metricsTrace <- (maybeSilent hasNoMetrics tracerPrefix True
-                        . filterTrace (\ (_, v) -> not (Prelude.null (asMetrics v))))
-                        (case mbTrEkg of
-                            Nothing -> Trace NT.nullTracer
-                            Just ekgTrace -> metricsFormatter "Cardano" ekgTrace)
-                    >>= hook
+    !metricsTrace <- case mbTrEkg of
+                      Nothing -> pure $ Trace T.nullTracer
+                      Just ekgTrace ->
+                        pure (metricsFormatter ekgTrace)
+--                      >>= recordMetricsStatistics internalTr
+                        >>= maybeSilent hasNoMetrics tracerPrefix True
+                        >>= hook
+
     pure (messageTrace <> metricsTrace)
 
-
   where
-    -- TODO YUP: More flexible error handling
-    addContextAndFilter ::
+    {-# INLINE addContextAndFilter #-}
+    addContextAndFilter :: MetaTrace a => Trace IO a -> IO (Trace IO a)
+    addContextAndFilter tr = do
+      tr'  <- withDetailsFromConfig
+                $ withPrivacy
+                  $ withDetails tr
+      tr'' <- filterSeverityFromConfig tr'
+      pure $ withNames tracerPrefix
+             $ withSeverity tr''
+
+    traceNamespaceErrors ::
          Trace IO TraceDispatcherMessage
       -> Trace IO evt1
       -> IO (Trace IO evt1)
-    addContextAndFilter tri tr = do
-      tr' <- withDetailsFromConfig tr
-              >>= filterSeverityFromConfig
-              >>= withSeverity' (traceWith tri)
-              >>= withPrivacy' (traceWith tri)
-              >>= withDetails' (traceWith tri)
-      pure $ withInnerNames $ appendPrefixNames tracerPrefix tr'
+    traceNamespaceErrors internalTr (Trace tr) = do
+        pure $ Trace (T.arrow (T.emit
+          (\case
+            (lc, Right e) -> process lc (Right e)
+            (lc, Left e) -> T.traceWith tr (lc, Left e))))
+      where
+        process :: LoggingContext -> Either TraceControl evt1 -> IO ()
+        process lc cont = do
+          when (isNothing (lcPrivacy lc)) $
+                  traceWith
+                    (appendPrefixNames ["Reflection"] internalTr)
+                    (UnknownNamespace (lcNSPrefix lc) (lcNSInner lc) UKFPrivacy)
+          when (isNothing (lcSeverity lc)) $
+                  traceWith
+                    (appendPrefixNames ["Reflection"] internalTr)
+                    (UnknownNamespace (lcNSPrefix lc) (lcNSInner lc) UKFSeverity)
+          when (isNothing (lcDetails lc)) $
+                  traceWith
+                    (appendPrefixNames ["Reflection"] internalTr)
+                    (UnknownNamespace (lcNSPrefix lc) (lcNSInner lc) UKFDetails)
+          T.traceWith tr (lc, cont)
 
 backendsAndFormat ::
      LogFormatting a
@@ -123,29 +141,107 @@ backendsAndFormat ::
   -> IO (Trace IO a)
 backendsAndFormat trStdout trForward mbBackends _ =
   let backends' = fromMaybe
-                  [EKGBackend, Forwarder, Stdout HumanFormatColoured]
-                  mbBackends
+                    [Forwarder, Stdout MachineFormat]
+                    mbBackends
   in do
-    mbForwardTrace <- if Forwarder `L.elem` backends'
-                        then fmap (Just . filterTraceByPrivacy (Just Public))
-                              (forwardFormatter Nothing trForward)
-                        else pure Nothing
-    mbStdoutTrace  <-  if Stdout HumanFormatColoured `L.elem` backends'
-                        then fmap Just
-                            (humanFormatter True Nothing trStdout)
-                        else if Stdout HumanFormatUncoloured `L.elem` backends'
-                          then fmap Just
-                              (humanFormatter False Nothing trStdout)
-                          else if Stdout MachineFormat `L.elem` backends'
-                            then fmap Just
-                              (machineFormatter Nothing trStdout)
-                            else pure Nothing
+    let mbForwardTrace  = if Forwarder `L.elem` backends'
+                            then Just $ filterTraceByPrivacy (Just Public)
+                                (forwardFormatter' Nothing trForward)
+                            else Nothing
+        mbStdoutTrace   | Stdout HumanFormatColoured `L.elem` backends'
+                        = Just (humanFormatter' True Nothing trStdout)
+                        | Stdout HumanFormatUncoloured `L.elem` backends'
+                        = Just (humanFormatter' False Nothing trStdout)
+                        | Stdout MachineFormat `L.elem` backends'
+                        = Just (machineFormatter' Nothing trStdout)
+                        | otherwise = Nothing
     case mbForwardTrace <> mbStdoutTrace of
-      Nothing -> pure $ Trace NT.nullTracer
-      Just tr -> pure $ preFormatted backends' tr
+      Nothing -> pure $ Trace T.nullTracer
+      Just tr -> preFormatted backends' tr
 
--- A basic ttracer just for metrics
+traceConfigWarnings ::
+     Trace IO FormattedMessage
+  -> Trace IO FormattedMessage
+  -> [Text]
+  -> IO ()
+traceConfigWarnings trStdout trForward errs = do
+    internalTr <- backendsAndFormat
+                      trStdout
+                      trForward
+                      Nothing
+                      (Trace T.nullTracer)
+    traceWith ((withInnerNames . appendPrefixNames ["Reflection"]. withSeverity)
+                  internalTr)
+              (TracerConsistencyWarnings errs)
+
+traceEffectiveConfiguration ::
+     Trace IO FormattedMessage
+  -> Trace IO FormattedMessage
+  -> TraceConfig
+  -> IO ()
+traceEffectiveConfiguration trStdout trForward trConfig = do
+    internalTr <- backendsAndFormat
+                      trStdout
+                      trForward
+                      Nothing
+                      (Trace T.nullTracer)
+    traceWith ((withInnerNames . appendPrefixNames ["Reflection"]. withSeverity)
+                  internalTr)
+              (TracerInfoConfig trConfig)
+
+traceTracerInfo ::
+     Trace IO FormattedMessage
+  -> Trace IO FormattedMessage
+  -> ConfigReflection
+  -> IO ()
+traceTracerInfo trStdout trForward cr = do
+    internalTr <- backendsAndFormat
+                      trStdout
+                      trForward
+                      Nothing
+                      (Trace T.nullTracer)
+    silentSet <- readIORef (crSilent cr)
+    metricSet <- readIORef (crNoMetrics cr)
+    allTracerSet <- readIORef (crAllTracers cr)
+    let silentList  = map (intercalate (singleton '.')) (Set.toList silentSet)
+    let metricsList = map (intercalate (singleton '.')) (Set.toList metricSet)
+    let allTracersList = map (intercalate (singleton '.')) (Set.toList allTracerSet)
+    traceWith ((withInnerNames . appendPrefixNames ["Reflection"]. withSeverity)
+                  internalTr)
+              (TracerInfo silentList metricsList allTracersList)
+    writeIORef (crSilent cr) Set.empty
+    writeIORef (crNoMetrics cr) Set.empty
+    writeIORef (crAllTracers cr) Set.empty
+
+-- A basic tracer just for metrics
 mkMetricsTracer :: Maybe (Trace IO FormattedMessage) -> Trace IO FormattedMessage
 mkMetricsTracer mbTrEkg = case mbTrEkg of
-                          Nothing -> Trace NT.nullTracer
+                          Nothing -> Trace T.nullTracer
                           Just ekgTrace -> ekgTrace
+
+_recordMetricsStatistics :: forall a m . (LogFormatting a, MonadIO m)
+  => Trace m TraceDispatcherMessage
+  -> Trace m a
+  -> m (Trace m a)
+_recordMetricsStatistics internalTr (Trace tr) = do
+    ref <- liftIO $ newMVar (0, Map.empty)
+    pure $ Trace (T.arrow (T.emit
+      (\case
+        (lc, Right e) -> process ref lc e
+        (lc, Left e) -> T.traceWith tr (lc, Left e))))
+  where
+    process :: MVar (Int, Map.Map Text Int) -> LoggingContext -> a -> m ()
+    process ref lc msg = do
+      let metrics = asMetrics msg
+      mapM_ (\m ->
+              let mName = getMetricName m
+              in liftIO $ modifyMVar ref (\ (i', mmap) ->
+                  case Map.lookup mName mmap of
+                    Nothing -> pure ((i' + 1, Map.insert mName 1 mmap), ())
+                    Just _  -> pure ((i' + 1, Map.adjust (+1) mName mmap), ()))) metrics
+      (i,mmap) <- liftIO $ readMVar ref
+      when (i >= 1000) $ do
+        traceWith (withInnerNames (appendPrefixNames ["Reflection"] internalTr))
+                  (MetricsInfo mmap)
+        liftIO $ modifyMVar ref (\ (_i, mmap') -> pure ((0,mmap'), ()))
+      T.traceWith tr (lc, Right msg)

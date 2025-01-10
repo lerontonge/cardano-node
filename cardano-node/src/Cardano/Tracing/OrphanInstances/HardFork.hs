@@ -18,23 +18,9 @@
 
 module Cardano.Tracing.OrphanInstances.HardFork () where
 
-import           Data.Aeson
-import qualified Data.ByteString.Base16 as Base16
-import qualified Data.ByteString.Short as SBS
-import           Data.SOP.Strict
-
+import           Cardano.Slotting.Slot (EpochSize (..))
 import           Cardano.Tracing.OrphanInstances.Common
 import           Cardano.Tracing.OrphanInstances.Consensus ()
-
-import           Cardano.Slotting.Slot (EpochSize (..))
-import           Ouroboros.Consensus.HardFork.Combinator.Serialisation.Common (
-                   HardForkNodeToClientVersion (..),
-                   HardForkSpecificNodeToClientVersion (..),
-                   HardForkSpecificNodeToNodeVersion (..),
-                   EraNodeToClientVersion (..),
-                   EraNodeToNodeVersion (..),
-                   HardForkNodeToNodeVersion (..)
-                   )
 import           Ouroboros.Consensus.Block (BlockProtocol, CannotForge, ForgeStateInfo,
                    ForgeStateUpdateError)
 import           Ouroboros.Consensus.BlockchainTime (getSlotLength)
@@ -43,18 +29,30 @@ import           Ouroboros.Consensus.HardFork.Combinator
 import           Ouroboros.Consensus.HardFork.Combinator.AcrossEras (EraMismatch (..),
                    OneEraCannotForge (..), OneEraEnvelopeErr (..), OneEraForgeStateInfo (..),
                    OneEraForgeStateUpdateError (..), OneEraLedgerError (..),
-                   OneEraLedgerUpdate (..), OneEraLedgerWarning (..), OneEraValidationErr (..),
-                   mkEraMismatch)
+                   OneEraLedgerUpdate (..), OneEraLedgerWarning (..), OneEraSelectView (..),
+                   OneEraValidationErr (..), mkEraMismatch)
 import           Ouroboros.Consensus.HardFork.Combinator.Condense ()
+import           Ouroboros.Consensus.HardFork.Combinator.Serialisation.Common
+                   (EraNodeToClientVersion (..), HardForkNodeToClientVersion (..),
+                   HardForkNodeToNodeVersion (..), HardForkSpecificNodeToClientVersion (..),
+                   HardForkSpecificNodeToNodeVersion (..))
 import           Ouroboros.Consensus.HardFork.History.EraParams (EraParams (..), SafeZone)
 import           Ouroboros.Consensus.HeaderValidation (OtherHeaderEnvelopeError)
 import           Ouroboros.Consensus.Ledger.Abstract (LedgerError)
 import           Ouroboros.Consensus.Ledger.Inspect (LedgerUpdate, LedgerWarning)
 import           Ouroboros.Consensus.Ledger.SupportsMempool (ApplyTxErr)
-import           Ouroboros.Consensus.Node.NetworkProtocolVersion (BlockNodeToClientVersion, BlockNodeToNodeVersion)
-import           Ouroboros.Consensus.Protocol.Abstract (ValidationErr)
+import           Ouroboros.Consensus.Node.NetworkProtocolVersion (BlockNodeToClientVersion,
+                   BlockNodeToNodeVersion)
+import           Ouroboros.Consensus.Protocol.Abstract (SelectView, ValidationErr)
 import           Ouroboros.Consensus.TypeFamilyWrappers
 import           Ouroboros.Consensus.Util.Condense (Condense (..))
+
+import           Data.Aeson
+import qualified Data.ByteString.Base16 as Base16
+import qualified Data.ByteString.Short as SBS
+import           Data.Proxy (Proxy (..))
+import           Data.SOP (All, Compose, K (..))
+import           Data.SOP.Strict
 
 
 --
@@ -398,6 +396,7 @@ instance ( ToJSON (BlockNodeToClientVersion x)
 instance ToJSON HardForkSpecificNodeToClientVersion where
     toJSON HardForkSpecificNodeToClientVersion1 = String "HardForkSpecificNodeToClientVersion1"
     toJSON HardForkSpecificNodeToClientVersion2 = String "HardForkSpecificNodeToClientVersion2"
+    toJSON HardForkSpecificNodeToClientVersion3 = String "HardForkSpecificNodeToClientVersion3"
 
 instance (ToJSON (BlockNodeToClientVersion blk)) => ToJSON (EraNodeToClientVersion blk) where
     toJSON EraNodeToClientDisabled = String "EraNodeToClientDisabled"
@@ -407,7 +406,7 @@ instance (ToJSON (BlockNodeToClientVersion blk)) => ToJSON (EraNodeToClientVersi
 -- Instances for HardForkNodeToNodeVersion
 --
 instance ( ToJSON (BlockNodeToNodeVersion x)
-         , All (ToJSON `Compose` EraNodeToNodeVersion) (x ': xs)
+         , All (ToJSON `Compose` WrapNodeToNodeVersion) (x ': xs)
          ) => ToJSON (HardForkNodeToNodeVersion (x ': xs)) where
     toJSON (HardForkNodeToNodeDisabled blockNodeToNodeVersion) =
         object [ "tag" .= String "HardForkNodeToNodeDisabled"
@@ -420,13 +419,30 @@ instance ( ToJSON (BlockNodeToNodeVersion x)
                ]
       where
         eraNodeToNodeVersionsAsJSON :: NP (K Value) (x ': xs)
-        eraNodeToNodeVersionsAsJSON = hcmap (Proxy @(ToJSON `Compose` EraNodeToNodeVersion))
+        eraNodeToNodeVersionsAsJSON = hcmap (Proxy @(ToJSON `Compose` WrapNodeToNodeVersion))
                                             (K . toJSON)
                                             eraNodeToNodeVersions
 
 instance ToJSON HardForkSpecificNodeToNodeVersion where
     toJSON HardForkSpecificNodeToNodeVersion1 = "HardForkSpecificNodeToNodeVersion1"
 
-instance (ToJSON (BlockNodeToNodeVersion blk)) => ToJSON (EraNodeToNodeVersion blk) where
-    toJSON EraNodeToNodeDisabled = String "EraNodeToNodeDisabled"
-    toJSON (EraNodeToNodeEnabled blockNodeToNodeVersion) = toJSON blockNodeToNodeVersion
+instance (ToJSON (BlockNodeToNodeVersion blk)) => ToJSON (WrapNodeToNodeVersion blk) where
+    toJSON (WrapNodeToNodeVersion blockNodeToNodeVersion) = toJSON blockNodeToNodeVersion
+
+--
+-- instances for HardForkSelectView
+--
+
+instance All (ToObject `Compose` WrapSelectView) xs => ToObject (HardForkSelectView xs) where
+    -- elide BlockNo as it is already contained in every per-era SelectView
+    toObject verb = toObject verb . dropBlockNo . getHardForkSelectView
+
+instance All (ToObject `Compose` WrapSelectView) xs => ToObject (OneEraSelectView xs) where
+    toObject verb =
+          hcollapse
+        . hcmap (Proxy @(ToObject `Compose` WrapSelectView))
+                (K . toObject verb)
+        . getOneEraSelectView
+
+instance ToObject (SelectView (BlockProtocol blk)) => ToObject (WrapSelectView blk) where
+    toObject verb = toObject verb . unwrapSelectView

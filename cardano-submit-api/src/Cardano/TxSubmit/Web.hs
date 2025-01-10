@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
@@ -10,70 +11,69 @@ module Cardano.TxSubmit.Web
   ( runTxSubmitServer
   ) where
 
-import           Cardano.Api (AllegraEra, AnyCardanoEra (AnyCardanoEra),
-                   AnyConsensusMode (AnyConsensusMode), AnyConsensusModeParams (..), AsType (..),
-                   CardanoEra (..), Error (..), FromSomeType (..), HasTypeProxy (AsType),
-                   InAnyCardanoEra (..),
+import           Cardano.Api (AllegraEra, AnyCardanoEra (AnyCardanoEra), AsType (..),
+                   CardanoEra (..), ConsensusModeParams (..), Error (..), FromSomeType (..),
+                   HasTypeProxy (AsType), InAnyCardanoEra (..), InAnyShelleyBasedEra (..),
+                   IsCardanoEra (..),
                    LocalNodeConnectInfo (LocalNodeConnectInfo, localConsensusModeParams, localNodeNetworkId, localNodeSocketPath),
-                   NetworkId, SerialiseAsCBOR (..), ShelleyEra, SocketPath, ToJSON, Tx, TxId (..),
-                   TxInMode (TxInMode),
-                   TxValidationErrorInMode (TxValidationEraMismatch, TxValidationErrorInMode),
-                   consensusModeOnly, getTxBody, getTxId, submitTxToNodeLocal, toEraInMode)
+                   NetworkId, SerialiseAsCBOR (..), ShelleyBasedEra (..), ShelleyEra, SocketPath,
+                   ToJSON, Tx, TxId (..), TxInMode (TxInMode), TxValidationErrorInCardanoMode (..),
+                   getTxBody, getTxId, submitTxToNodeLocal)
+
 import           Cardano.Binary (DecoderError (..))
 import           Cardano.BM.Trace (Trace, logInfo)
+import qualified Cardano.Crypto.Hash.Class as Crypto
 import           Cardano.TxSubmit.Metrics (TxSubmitMetrics (..))
 import           Cardano.TxSubmit.Rest.Types (WebserverConfig (..), toWarpSettings)
+import qualified Cardano.TxSubmit.Rest.Web as Web
 import           Cardano.TxSubmit.Types (EnvSocketError (..), RawCborDecodeError (..),
-                   TxCmdError (TxCmdEraConsensusModeMismatch, TxCmdTxReadError, TxCmdTxSubmitError, TxCmdTxSubmitErrorEraMismatch),
-                   TxSubmitApi, TxSubmitApiRecord (..), TxSubmitWebApiError (TxSubmitFail),
-                   renderTxCmdError)
+                   TxCmdError (..), TxSubmitApi, TxSubmitApiRecord (..),
+                   TxSubmitWebApiError (TxSubmitFail), renderTxCmdError)
 import           Cardano.TxSubmit.Util (logException)
+import           Ouroboros.Consensus.Cardano.Block (EraMismatch (..))
+import qualified Ouroboros.Network.Protocol.LocalTxSubmission.Client as Net.Tx
+
 import           Control.Applicative (Applicative (pure), (<$>))
 import           Control.Monad (Functor (fmap), Monad (return), (=<<))
-import           Control.Monad.Except (ExceptT, MonadError (throwError), MonadIO (liftIO),
-                   runExceptT)
-import           Control.Monad.IO.Class (liftIO)
+import           Control.Monad.Except (ExceptT, MonadError (throwError), runExceptT)
+import           Control.Monad.IO.Class (MonadIO (liftIO), liftIO)
 import           Control.Monad.Trans.Except.Extra (firstExceptT, handleIOExceptT, hoistEither,
                    hoistMaybe, left, newExceptT)
 import           Data.Aeson (ToJSON (..))
+import qualified Data.Aeson as Aeson
 import           Data.Bifunctor (first, second)
+import qualified Data.ByteString as BS
 import           Data.ByteString.Char8 (ByteString)
+import qualified Data.ByteString.Char8 as B8
+import qualified Data.Char as Char
 import           Data.Either (Either (..), partitionEithers)
 import           Data.Function (($), (.))
+import qualified Data.List as L
+import qualified Data.List.NonEmpty as NEL
 import           Data.Maybe (listToMaybe, maybe)
 import           Data.Proxy (Proxy (..))
 import           Data.Semigroup (Semigroup ((<>)))
 import           Data.String (String)
 import           Data.Text (Text)
-import           Ouroboros.Consensus.Cardano.Block (EraMismatch (..))
-import           Servant (Application, Handler, ServerError (..), err400, throwError)
-import           Servant.API.Generic (toServant)
-import           Servant.Server.Generic (AsServerT)
-import           System.Environment (lookupEnv)
-import           System.IO (IO)
-import           Text.Show (Show (show))
-
-import qualified Cardano.Crypto.Hash.Class as Crypto
-import qualified Cardano.TxSubmit.Rest.Web as Web
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as B8
-import qualified Data.Char as Char
-import qualified Data.List as L
-import qualified Data.List.NonEmpty as NEL
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
-import qualified Ouroboros.Network.Protocol.LocalTxSubmission.Client as Net.Tx
-import qualified Servant
+import           System.Environment (lookupEnv)
 import qualified System.IO as IO
+import           System.IO (IO)
 import qualified System.Metrics.Prometheus.Metric.Gauge as Gauge
+import           Text.Show (Show (show))
+
+import qualified Servant
+import           Servant (Application, Handler, ServerError (..), err400, throwError)
+import           Servant.API.Generic (toServant)
+import           Servant.Server.Generic (AsServerT)
 
 runTxSubmitServer
   :: Trace IO Text
   -> TxSubmitMetrics
   -> WebserverConfig
-  -> AnyConsensusModeParams
+  -> ConsensusModeParams
   -> NetworkId
   -> SocketPath
   -> IO ()
@@ -85,7 +85,7 @@ runTxSubmitServer trace metrics webserverConfig protocol networkId socketPath = 
 txSubmitApp
   :: Trace IO Text
   -> TxSubmitMetrics
-  -> AnyConsensusModeParams
+  -> ConsensusModeParams
   -> NetworkId
   -> SocketPath
   -> Application
@@ -113,34 +113,30 @@ deserialiseAnyOf ts te = getResult . partitionEithers $ fmap (`deserialiseOne` t
     getResult (dErrors, []) = Left $ RawCborDecodeError dErrors
     getResult (_, result:_) = Right result -- take the first successful decode
 
-readByteStringTx :: ByteString -> ExceptT TxCmdError IO (InAnyCardanoEra Tx)
+readByteStringTx :: ByteString -> ExceptT TxCmdError IO (InAnyShelleyBasedEra Tx)
 readByteStringTx = firstExceptT TxCmdTxReadError . hoistEither . deserialiseAnyOf
-  [ FromSomeType (AsTx AsByronEra)   (InAnyCardanoEra ByronEra)
-  , FromSomeType (AsTx AsShelleyEra) (InAnyCardanoEra ShelleyEra)
-  , FromSomeType (AsTx AsAllegraEra) (InAnyCardanoEra AllegraEra)
-  , FromSomeType (AsTx AsMaryEra)    (InAnyCardanoEra MaryEra)
-  , FromSomeType (AsTx AsAlonzoEra)  (InAnyCardanoEra AlonzoEra)
-  , FromSomeType (AsTx AsBabbageEra) (InAnyCardanoEra BabbageEra)
+  [ FromSomeType (AsTx AsShelleyEra) (InAnyShelleyBasedEra ShelleyBasedEraShelley)
+  , FromSomeType (AsTx AsAllegraEra) (InAnyShelleyBasedEra ShelleyBasedEraAllegra)
+  , FromSomeType (AsTx AsMaryEra)    (InAnyShelleyBasedEra ShelleyBasedEraMary)
+  , FromSomeType (AsTx AsAlonzoEra)  (InAnyShelleyBasedEra ShelleyBasedEraAlonzo)
+  , FromSomeType (AsTx AsBabbageEra) (InAnyShelleyBasedEra ShelleyBasedEraBabbage)
+  , FromSomeType (AsTx AsConwayEra)  (InAnyShelleyBasedEra ShelleyBasedEraConway)
   ]
 
 txSubmitPost
   :: Trace IO Text
   -> TxSubmitMetrics
-  -> AnyConsensusModeParams
+  -> ConsensusModeParams
   -> NetworkId
   -> SocketPath
   -> ByteString
   -> Handler TxId
-txSubmitPost trace metrics (AnyConsensusModeParams cModeParams) networkId socketPath txBytes =
+txSubmitPost trace metrics p@(CardanoModeParams cModeParams) networkId socketPath txBytes =
   handle $ do
-    InAnyCardanoEra era tx <- readByteStringTx txBytes
-    let cMode = AnyConsensusMode $ consensusModeOnly cModeParams
-    eraInMode <- hoistMaybe
-                   (TxCmdEraConsensusModeMismatch cMode (AnyCardanoEra era))
-                   (toEraInMode era $ consensusModeOnly cModeParams)
-    let txInMode = TxInMode tx eraInMode
+    InAnyShelleyBasedEra sbe tx <- readByteStringTx txBytes
+    let txInMode = TxInMode sbe tx
         localNodeConnInfo = LocalNodeConnectInfo
-                              { localConsensusModeParams = cModeParams
+                              { localConsensusModeParams = p
                               , localNodeNetworkId = networkId
                               , localNodeSocketPath = socketPath
                               }
@@ -150,10 +146,8 @@ txSubmitPost trace metrics (AnyConsensusModeParams cModeParams) networkId socket
       Net.Tx.SubmitSuccess -> do
         liftIO $ T.putStrLn "Transaction successfully submitted."
         return $ getTxId (getTxBody tx)
-      Net.Tx.SubmitFail reason ->
-        case reason of
-          TxValidationErrorInMode err _eraInMode -> left . TxCmdTxSubmitError . T.pack $ show err
-          TxValidationEraMismatch mismatchErr -> left $ TxCmdTxSubmitErrorEraMismatch mismatchErr
+      Net.Tx.SubmitFail e ->
+        left $ TxCmdTxSubmitValidationError e
     where
       handle :: ExceptT TxCmdError IO TxId -> Handler TxId
       handle f = do

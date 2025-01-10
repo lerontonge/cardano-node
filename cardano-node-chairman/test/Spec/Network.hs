@@ -10,38 +10,39 @@ module Spec.Network
   , hprop_isPortOpen_True
   ) where
 
+import           Prelude (error)
+
 import           Control.Exception (IOException)
 import           Control.Monad
+import qualified Control.Monad.Trans.Resource as IO
 import           Data.Bool
 import           Data.Either
 import           Data.Function
 import           Data.Int
-import           Hedgehog (Property, (===))
-import           Network.Socket (Socket)
-import           Prelude (error)
-import           System.IO (IO)
-
-import qualified Control.Monad.Trans.Resource as IO
 import qualified Data.List as L
-import qualified Hedgehog as H
-import qualified Hedgehog.Extras.Stock.IO.Network.Socket as IO
-import qualified Hedgehog.Extras.Test.Base as H
-import qualified Hedgehog.Extras.Test.Network as H
+import           Network.Socket (Socket)
 import qualified Network.Socket as IO
+import           System.IO (IO)
 import qualified System.Random as IO
+
+import           Hedgehog (Property, (===))
+import qualified Hedgehog as H
+import qualified Hedgehog.Extras as H
+import qualified Hedgehog.Extras.Stock.IO.Network.Socket as IO
+
 import qualified UnliftIO.Exception as IO
 
 hprop_isPortOpen_False :: Property
-hprop_isPortOpen_False = H.propertyOnce . H.workspace "temp-network" $ \_ -> do
+hprop_isPortOpen_False = H.propertyOnce . H.workspace "temp-network" $ \_ -> H.runWithDefaultWatchdog_ $ do
   -- Check multiple random ports and assert that one is closed.
   -- Multiple random ports are checked because there is a remote possibility a random
   -- port is actually open by another program
   ports <- H.evalIO $ fmap (L.take 10 . IO.randomRs @Int (5000, 9000)) IO.getStdGen
   results <- forM ports H.isPortOpen
-  H.assert (False `L.elem` results)
+  H.assertWith results (False `L.elem`)
 
 hprop_isPortOpen_True :: Property
-hprop_isPortOpen_True = H.propertyOnce . H.workspace "temp-network" $ \_ -> do
+hprop_isPortOpen_True = H.propertyOnce . H.workspace "temp-network" $ \_ -> H.runWithDefaultWatchdog_ $ do
   -- Check first random port from multiple possible ports to be successfully bound is open
   -- Multiple random ports are checked because there is a remote possibility a random
   -- port is actually open by another program

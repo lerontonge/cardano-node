@@ -16,18 +16,17 @@ module Cardano.Node.Tracing.Tracers.KESInfo
       traceAsKESInfo
    ) where
 
+import           Cardano.Logging
+import           Cardano.Node.Queries (GetKESInfo (..))
+import           Cardano.Protocol.TPraos.OCert (KESPeriod (KESPeriod))
+import           Ouroboros.Consensus.Block.Forging
+import           Ouroboros.Consensus.Node.Tracers (TraceLabelCreds (..))
+import qualified Ouroboros.Consensus.Protocol.Ledger.HotKey as HotKey
+
 import           Control.Monad.IO.Class (MonadIO)
 import           Data.Aeson (ToJSON (..), Value (..), (.=))
 import           Data.Proxy (Proxy)
 import qualified Data.Text as Text
-
-import           Cardano.Logging
-import           Cardano.Node.Queries (GetKESInfo (..))
-import           Cardano.Protocol.TPraos.OCert (KESPeriod (KESPeriod))
-
-import           Ouroboros.Consensus.Block.Forging
-import           Ouroboros.Consensus.Node.Tracers (TraceLabelCreds (..))
-import qualified Ouroboros.Consensus.Protocol.Ledger.HotKey as HotKey
 
 traceAsKESInfo
   :: forall m blk . (GetKESInfo blk, MonadIO m)
@@ -60,22 +59,23 @@ deriving newtype instance ToJSON KESPeriod
 
 instance LogFormatting HotKey.KESInfo where
   forMachine _dtal forgeStateInfo =
-    let maxKesEvos = endKesPeriod - startKesPeriod
-        oCertExpiryKesPeriod = startKesPeriod + maxKesEvos
-        kesPeriodsUntilExpiry = max 0 (oCertExpiryKesPeriod - currKesPeriod)
+    let currKesPeriod' = currKesPeriod + startKesPeriod
+        maxKesEvos = endKesPeriod - startKesPeriod
+        expiryKesPeriod = startKesPeriod + maxKesEvos
+        kesPeriodsUntilExpiry = max 0 (expiryKesPeriod - currKesPeriod')
     in
       if kesPeriodsUntilExpiry > 7
         then mconcat
               [ "kind" .= String "KESInfo"
               , "startPeriod" .= startKesPeriod
-              , "endPeriod" .= currKesPeriod
+              , "endPeriod" .= currKesPeriod'
               , "evolution" .= endKesPeriod
               ]
         else mconcat
               [ "kind" .= String "ExpiryLogMessage"
               , "keyExpiresIn" .= kesPeriodsUntilExpiry
               , "startPeriod" .= startKesPeriod
-              , "endPeriod" .= currKesPeriod
+              , "endPeriod" .= currKesPeriod'
               , "evolution" .= endKesPeriod
               ]
     where
@@ -86,15 +86,17 @@ instance LogFormatting HotKey.KESInfo where
       } = forgeStateInfo
 
   forHuman forgeStateInfo =
-    let maxKesEvos = endKesPeriod - startKesPeriod
-        oCertExpiryKesPeriod = startKesPeriod + maxKesEvos
-        kesPeriodsUntilExpiry = max 0 (oCertExpiryKesPeriod - currKesPeriod)
+    let currKesPeriod' = currKesPeriod + startKesPeriod
+        maxKesEvos = endKesPeriod - startKesPeriod
+        expiryKesPeriod = startKesPeriod + maxKesEvos
+        kesPeriodsUntilExpiry = max 0 (expiryKesPeriod - currKesPeriod')
     in if kesPeriodsUntilExpiry > 7
       then "KES info startPeriod  " <> (Text.pack . show) startKesPeriod
-            <> " currPeriod " <> (Text.pack . show) currKesPeriod
+            <> " currPeriod " <> (Text.pack . show) currKesPeriod'
             <> " endPeriod " <> (Text.pack . show) endKesPeriod
-             <> (Text.pack . show) kesPeriodsUntilExpiry
-             <> " KES periods."
+            <> ", "
+            <> (Text.pack . show) kesPeriodsUntilExpiry
+            <> " KES periods until expiry."
       else "Operational key will expire in "
              <> (Text.pack . show) kesPeriodsUntilExpiry
              <> " KES periods."
@@ -106,17 +108,15 @@ instance LogFormatting HotKey.KESInfo where
       } = forgeStateInfo
 
   asMetrics forgeStateInfo =
-      let maxKesEvos = endKesPeriod - startKesPeriod
-          oCertExpiryKesPeriod = startKesPeriod + maxKesEvos
+      let currKesPeriod' = currKesPeriod + startKesPeriod
+          maxKesEvos = endKesPeriod - startKesPeriod
+          expiryKesPeriod = startKesPeriod + maxKesEvos
+          kesPeriodsUntilExpiry = max 0 (expiryKesPeriod - currKesPeriod')
       in  [
-            IntM "KESInfo.operationalCertificateStartKESPeriod"
-              (fromIntegral startKesPeriod)
-          , IntM "KESInfo.operationalCertificateExpiryKESPeriod"
-              (fromIntegral (startKesPeriod + maxKesEvos))
-          , IntM "KESInfo.currentKESPeriod"
-              (fromIntegral currKesPeriod)
-          , IntM "KESInfo.remainingKESPeriods"
-              (fromIntegral (max 0 (oCertExpiryKesPeriod - currKesPeriod)))
+            IntM "operationalCertificateStartKESPeriod" (fromIntegral startKesPeriod)
+          , IntM "operationalCertificateExpiryKESPeriod" (fromIntegral expiryKesPeriod)
+          , IntM "currentKESPeriod" (fromIntegral currKesPeriod')
+          , IntM "remainingKESPeriods" (fromIntegral kesPeriodsUntilExpiry)
           ]
     where
     HotKey.KESInfo
@@ -127,12 +127,13 @@ instance LogFormatting HotKey.KESInfo where
 
 
 instance MetaTrace HotKey.KESInfo where
-    namespaceFor HotKey.KESInfo {} = Namespace [] []
+    namespaceFor HotKey.KESInfo {} = Namespace [] ["StateInfo"]
 
     severityFor (Namespace _ _) (Just forgeStateInfo) = Just $
-      let maxKesEvos = endKesPeriod - startKesPeriod
-          oCertExpiryKesPeriod = startKesPeriod + maxKesEvos
-          kesPeriodsUntilExpiry = max 0 (oCertExpiryKesPeriod - currKesPeriod)
+      let currKesPeriod' = currKesPeriod + startKesPeriod
+          maxKesEvos = endKesPeriod - startKesPeriod
+          expiryKesPeriod = startKesPeriod + maxKesEvos
+          kesPeriodsUntilExpiry = max 0 (expiryKesPeriod - currKesPeriod')
       in if kesPeriodsUntilExpiry > 7
         then Info
         else if kesPeriodsUntilExpiry <= 1
@@ -144,20 +145,24 @@ instance MetaTrace HotKey.KESInfo where
         , HotKey.kesEvolution = currKesPeriod
         , HotKey.kesEndPeriod = KESPeriod endKesPeriod
         } = forgeStateInfo
-    severityFor (Namespace _ _) Nothing = Just Info
 
-    documentFor (Namespace _ _) = Just
+    severityFor (Namespace _ ["StateInfo"]) _ = Just Info
+    severityFor _ _ = Nothing
+
+    documentFor (Namespace _ ["StateInfo"]) = Just
       "kesStartPeriod \
        \\nkesEndPeriod is kesStartPeriod + tpraosMaxKESEvo\
        \\nkesEvolution is the current evolution or /relative period/."
+    documentFor _ = Nothing
 
-    metricsDocFor (Namespace _ _) =
-        [ ("KESInfo.operationalCertificateStartKESPeriod", "")
-        , ("KESInfo.operationalCertificateExpiryKESPeriod", "")
-        , ("KESInfo.currentKESPeriod", "")
-        , ("KESInfo.remainingKESPeriods", "")]
+    metricsDocFor (Namespace _ ["StateInfo"]) =
+        [ ("operationalCertificateStartKESPeriod", "")
+        , ("operationalCertificateExpiryKESPeriod", "")
+        , ("currentKESPeriod", "")
+        , ("remainingKESPeriods", "")]
+    metricsDocFor _ = []
 
-    allNamespaces = []
+    allNamespaces = [Namespace [] ["StateInfo"]]
 
 
 

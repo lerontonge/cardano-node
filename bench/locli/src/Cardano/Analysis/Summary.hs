@@ -1,5 +1,6 @@
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
 {-# LANGUAGE UndecidableInstances #-}
+
 {-# OPTIONS_GHC -Wno-name-shadowing -Wno-orphans #-}
 
 {- HLINT ignore "Use mapMaybe" -}
@@ -29,8 +30,8 @@ data SummaryError
   | SEIncoherentRunProfiles      [Data.Aeson.KeyMap.KeyMap Value]
   | SEIncoherentRunEras          [Text]
   | SEIncoherentRunVersions      [Manifest]
-  | SEIncoherentRunIdents        [Text]
   | SEIncoherentRunFilters       [([FilterName], [ChainFilter])]
+  | SEIncoherentCompilerVersions [Text]
   | SECDFError                   CDFError
   deriving Show
 
@@ -65,7 +66,6 @@ summariseMultiSummary sumAnalysisTime centiles xs@(headline:xss) = do
   sumMeta                <- summariseMetadata $ xs <&> sumMeta
   sumFilters             <- allEqOrElse (xs <&> sumFilters) SEIncoherentRunFilters
 
-  cdfLogLinesEmitted     <- sumCDF2 $ xs <&> cdfLogLinesEmitted
   cdfLogObjectsEmitted   <- sumCDF2 $ xs <&> cdfLogObjectsEmitted
   cdfLogObjects          <- sumCDF2 $ xs <&> cdfLogObjects
   cdfRuntime             <- sumCDF2 $ xs <&> cdfRuntime
@@ -97,15 +97,16 @@ summariseMultiSummary sumAnalysisTime centiles xs@(headline:xss) = do
    summariseMetadata :: [Metadata] -> Either SummaryError Metadata
    summariseMetadata [] = Left SEEmptyDataset
    summariseMetadata xs@(headline:_) = do
-     profile         <- allEqOrElse (xs <&> profile)         SEIncoherentRunProfileNames
-     era             <- allEqOrElse (xs <&> era)             SEIncoherentRunEras
-     manifest        <- allEqOrElse (xs <&> manifest)        SEIncoherentRunVersions
-     ident           <- allEqOrElse (xs <&> ident)           SEIncoherentRunIdents
-     profile_content <- allEqOrElse (xs <&> profile_content) SEIncoherentRunProfiles
+     profile          <- allEqOrElse (xs <&> profile)          SEIncoherentRunProfileNames
+     era              <- allEqOrElse (xs <&> era)              SEIncoherentRunEras
+     manifest         <- allEqOrElse (xs <&> manifest)         SEIncoherentRunVersions
+     profile_content  <- allEqOrElse (xs <&> profile_content)  SEIncoherentRunProfiles
+     node_ghc_version <- allEqOrElse (xs <&> node_ghc_version) SEIncoherentCompilerVersions
      -- XXX: magic transformation that happens to match
      --      the logic in 'analyse.sh multi-call' on line with "local run="
      pure Metadata { tag   = multiRunTag (Just "variance") xs
                    , batch = batch headline
+                   , ident = ident headline <> "-variance"
                    , .. }
 
    allEqOrElse :: Eq a => [a] -> ([a] -> SummaryError) -> Either SummaryError a
@@ -165,29 +166,32 @@ computeSummary sumAnalysisTime
   --
   , cdfLogObjects        = cdf stdCentiles (objLists <&> length)
   , cdfLogObjectsEmitted = cdf stdCentiles logObjectsEmitted
-  , cdfLogLinesEmitted   = cdf stdCentiles textLinesEmitted
   , cdfRuntime           = cdf stdCentiles runtimes
   , ..
   }
  where
    cdfLogLineRate       = cdf stdCentiles lineRates
 
-   (,) logObjectsEmitted textLinesEmitted =
-     rlHostLogs
-     & Map.toList
-     & fmap ((hlRawLogObjects &&& hlRawLines) . snd)
+   hostLogs =
+    rlHostLogs
+    & Map.elems
+
+   (logObjectsEmitted, textLinesEmitted) =
+     hostLogs
+     & fmap (hlRawLogObjects &&& hlRawLines)
      & unzip
+
    objLists = rlLogs rl <&> snd
 
    losFirsts, losLasts :: [UTCTime]
-   losFirsts  = objLists <&> loAt . Prelude.head
-   losLasts   = objLists <&> loAt . Prelude.last
+   losFirsts  = hostLogs <&> (\HostLogs{hlLogs, hlRawFirstAt} -> fromMaybe (loAt $ Prelude.head $ snd hlLogs) hlRawFirstAt)
+   losLasts   = hostLogs <&> (\HostLogs{hlLogs, hlRawLastAt}  -> fromMaybe (loAt $ Prelude.last $ snd hlLogs) hlRawLastAt)
    runtimes :: [NominalDiffTime]
    runtimes   = zipWith diffUTCTime losLasts losFirsts
    lineRates  = zipWith (/) (textLinesEmitted <&> fromIntegral)
                             (runtimes <&> fromIntegral @Int . truncate)
 
-   (,,) sumDomainTime sumStartSpread sumStopSpread =
+   (sumDomainTime, sumStartSpread, sumStopSpread) =
      slotDomains sumGenesis (losFirsts, losLasts) mpDomainSlots
 
    sumChainRejectionStats :: [(ChainFilter, Int)]

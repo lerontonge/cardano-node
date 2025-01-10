@@ -1,5 +1,18 @@
 import "epoch-timeline" as timeline;
 
+## For the Nomad perf-ssd cluster, we might want to artificially
+## cap the large RAM resources the instances provide.
+def nomad_memory_limit($limit):
+  { nomad:
+    { resources:
+      { producer:
+        { memory:       $limit
+        , memory_max:   $limit
+        }
+      }
+    }
+  };
+
 def all_profile_variants:
                                          1024    as $Ki
   |                                      1000000 as $M
@@ -45,10 +58,6 @@ def all_profile_variants:
       { utxo:                              (0.5 * $M)
       , delegators:                        (0.1 * $M)
       }
-    , generator:
-      { tps:                               1
-      , tx_count:                          10
-      }
     } as $dataset_miniature
   |
     { genesis:
@@ -56,6 +65,12 @@ def all_profile_variants:
       , delegators:                         (0.2 * $M)
       }
     } as $dataset_small
+  |
+    { genesis:
+      { utxo:                               (24 * $M)
+      , delegators:                         (1.2 * $M)
+      }
+    } as $dataset_24m
   |
     { genesis:
       { utxo:                               (30 * $M)
@@ -70,10 +85,33 @@ def all_profile_variants:
       { tps:                                (1 * $M / (360 * 20))
       }
     } as $dataset_dish
-  |
+  ##
+  ### Definition vocabulary:  dreps
+  ##
+  | { genesis:
+      { dreps: 10
+      }
+    } as $dreps_tiny
+  | { genesis:
+      { dreps: 1000
+      }
+    } as $dreps_small
+  | { genesis:
+      { dreps: 2000
+      }
+    } as $dreps_medium
+  | { genesis:
+      { dreps: 10000
+      }
+    } as $dreps_large
+  | { genesis:
+      { dreps: 100000
+      }
+    } as $dreps_enormous
   ##
   ### Definition vocabulary:  chain
   ##
+  |
     { chaindb:
       { mainnet_chunks:
         { chaindb_server:               10
@@ -85,9 +123,7 @@ def all_profile_variants:
         }
       }
     , node:
-      { shutdown_on_slot_synced:
-        { explorer:                     237599
-        }
+      { shutdown_on_slot_synced:        237599
       }
     } as $chaindb_early_byron
   |
@@ -102,9 +138,7 @@ def all_profile_variants:
         }
       }
     , node:
-      { shutdown_on_slot_synced:
-        { explorer:                     38901589
-        }
+      { shutdown_on_slot_synced:        38901589
       }
     }) as $chaindb_early_alonzo
   |
@@ -173,21 +207,108 @@ def all_profile_variants:
       }
     } as $chainsync_cluster
   |
-    # "qa" class Nomad Nodes in ["eu-central-1", "us-east-2"] datacenters
-    { composition:
-      { locations:                      ["EU", "US"]
-      , topology:                       "torus"
-      , with_explorer:                  true
+  ##
+  ### Definition vocabulary:  cluster
+  ##
+    # P&T exclusive Nomad cluster Nodes: Compute intensive (16 GB, no-SSD)
+    { cluster:
+      { nomad:
+        { namespace: "perf"
+        , class: "perf"
+        , resources:
+          {
+            # Producer nodes use this specs, make sure they are available!
+            # WARNING: Don't use more than roughly 15400, for example 15432,
+            # because some clients show a couple bytes less available.
+            producer: {cores:  8, memory: 15400, memory_max:  16000}
+            # The explorer node uses this specs, make sure they are available!
+          , explorer: {cores: 16, memory: 32000, memory_max:  64000}
+          }
+        , fetch_logs_ssh: true
+        }
+      , aws:
+        { instance_type:
+          { producer: "c5.2xlarge"
+          , explorer: "m5.4xlarge"
+          }
+        , use_public_routing: true
+        }
+      # We are requiring 10.5GB on the explorer node and 9GB on the others.
+      , minimun_storage:
+        { 
+          # 9 GB for the explorer node, that includes the tx-generator.
+          # Plus giving 3 GB for the Nix Store and 1.5GB of margin.
+          producer: 12582912 # 12×1024×1024
+          # 7.5 GB for the nodes without the tx-generator.
+          # Plus giving 3 GB for the Nix Store and 1.5GB of margin.
+        , explorer: 14155776 # 13.5×1024×1024
+        }
+      , keep_running: true
       }
-    } as $cardano_world_qa
+    } as $nomad_perf
   |
-    # "perf" class Nomad Nodes in ["eu-central-1", "us-east-2", "ap-southeast-2"] datacenters
-    { composition:
-      { locations:                      ["EU", "US", "AP"]
-      , topology:                       "torus"
-      , with_explorer:                  true
+    # P&T exclusive Nomad cluster Nodes: Disk intensive (fast SSDs)
+    { cluster:
+      { nomad:
+        { namespace: "perf-ssd"
+        , class: "perf-ssd"
+        , resources:
+          { producer: {cores: 16, memory: 120000, memory_max: 124000}
+          , explorer: {cores: 16, memory: 120000, memory_max: 124000}
+          }
+        , host_volumes: [
+            {source: "ssd1", destination: "/ssd1", read_only: false}
+          , {source: "ssd2", destination: "/ssd2", read_only: false}
+          ]
+        , fetch_logs_ssh: true
+        }
+      , aws:
+        { instance_type:
+          { producer: "r5d.4xlarge"
+          , explorer: "r5d.4xlarge"
+          }
+        , use_public_routing: true
+        }
+      , minimun_storage: null
+      , keep_running: true
       }
-    } as $cardano_world_perf
+    } as $nomad_perfssd
+  |
+    ($nomad_perf *
+      { composition:
+        { locations:                      ["eu-central-1", "us-east-1", "ap-southeast-2"]
+        , topology:                       "torus"
+        , with_explorer:                  true
+        }
+      }
+    ) as $nomad_perf_torus
+  |
+    ($nomad_perf *
+      { composition:
+        { locations:                      ["eu-central-1", "us-east-1", "ap-southeast-2"]
+        , topology:                       "torus-dense"
+        , with_explorer:                  true
+        }
+      }
+    ) as $nomad_perf_dense
+  |
+    ($nomad_perfssd *
+      { composition:
+        { locations:                      ["eu-central-1"]
+        , topology:                       "uni-circle"
+        , with_explorer:                  false
+        }
+      }
+    ) as $nomad_perfssd_unicircle
+  |
+    ($nomad_perfssd *
+      { composition:
+        { locations:                      ["eu-central-1", "us-east-1", "ap-southeast-2"]
+        , topology:                       "torus-dense"
+        , with_explorer:                  true
+        }
+      }
+    ) as $nomad_perfssd_dense
   |
   ##
   ### Definition vocabulary:  filtering
@@ -207,8 +328,8 @@ def all_profile_variants:
     } as $compressed_timescale
   |
     { genesis:
-      { epoch_length:                   1800
-      , parameter_k:                    9
+      { epoch_length:                   1200
+      , parameter_k:                    6
       }
     } as $small_timescale
   |
@@ -232,12 +353,16 @@ def all_profile_variants:
     ) as $for_3ep
   |
     ({} |
-     .generator.epochs                = 4
-    ) as $for_4ep
-  |
-    ({} |
      .generator.epochs                = 7
     ) as $for_7ep
+  |
+    ({} |
+     .generator.epochs                = 8
+    ) as $for_8ep
+  |
+    ({} |
+     .generator.epochs                = 9
+    ) as $for_9ep
   |
     ({} |
      .generator.epochs                = 15
@@ -256,21 +381,25 @@ def all_profile_variants:
     ) as $for_15blk
   |
     ({}
-     | .node.shutdown_on_block_synced   = 30
-    ) as $for_30blk
+     | .node.shutdown_on_block_synced   = 36
+    ) as $for_36blk
   |
     ({}
      | .node.shutdown_on_slot_synced    = 900
     ) as $for_900slot
+  |
+    ({}
+     | .node.shutdown_on_slot_synced    = 1200
+    ) as $for_1200slot
   ##
-  ### Definition vocabulary:  workload
+  ### Definition vocabulary:  generator workload
   ##
   | ({}|
      .generator.tps                   = 15
     ) as $current_tps_saturation_value
   | ({}|
      .generator.tps                   = 12
-    ) as $cw_perf_tps_saturation_value
+    ) as $nomad_perf_tps_saturation_value
   | ({}|
      .generator.tps                   = 9
     ) as $model_tps_saturation_value
@@ -283,6 +412,10 @@ def all_profile_variants:
      | .generator.tps                 = 0.4
     ) as $double_tps_saturation_plutus
   |
+    ({}
+     | .generator.tps                 = 0.48
+    ) as $double_plus_tps_saturation_plutus
+  |
    ($current_tps_saturation_plutus *
     { extra_desc: "with Plutus workload"
     , generator:
@@ -293,6 +426,13 @@ def all_profile_variants:
       { filters:                        ["size-small"]
       }
     }) as $plutus_base
+  |
+    ({ extra_desc: "with DRep voting workload"
+    , generator:
+      { inputs_per_tx:                  1
+      , outputs_per_tx:                 1
+      }
+    }) as $voting_base
   |
    ({ generator:
       { plutus:
@@ -305,6 +445,16 @@ def all_profile_variants:
     }
     | .generator.tx_fee        = 1360000
     ) as $plutus_loop_counter
+  |
+   ($plutus_loop_counter *
+    { generator:
+      { plutus:
+          { script:                     "Loop2024"
+          }
+      }
+    }
+    | .generator.tx_fee        = 1412000
+    ) as $plutus_loop2024_counter
   |
    ({ generator:
       { plutus:
@@ -326,7 +476,7 @@ def all_profile_variants:
           }
       }
     }
-    | .generator.tx_fee        = 1025000
+    | .generator.tx_fee        = 1008000
     ) as $plutus_loop_secp_ecdsa
   |
    ({ generator:
@@ -349,28 +499,130 @@ def all_profile_variants:
           }
       }
     }
-    | .generator.tx_fee        = 1020000
+    | .generator.tx_fee        = 1004000
     ) as $plutus_loop_secp_schnorr
+  |
+   ({ generator:
+      { plutus:
+          { type:                       "LimitTxPerBlock_8"
+          , script:                     "HashOntoG2AndAdd"
+          , redeemer:
+            { "constructor": 0
+            , "fields": [
+                { "int": 1000000 }
+              ## ByteString content is arbitrary
+              , { "list": [
+                    { "bytes": "714805c6" }
+                  , { "bytes": "c413111e" }
+                  , { "bytes": "2d7eb870" }
+                  , { "bytes": "4ecbd6a1" }
+                  ]
+                }
+              ]
+            }
+          }
+      }
+    }
+    | .generator.tx_fee        = 940000
+    ) as $plutus_loop_blst
+  |
+   ({ generator:
+      { plutus:
+          { type:                       "LimitTxPerBlock_8"
+          , script:                     "Ripemd160"
+          , redeemer:
+            { "constructor": 0
+            , "fields": [
+                { "int": 1000000 }
+              ## ByteString content is arbitrary, but should be of the same size as RIPEMD-160 output, i.e. 160 bits
+              , { bytes: "5a56da88e6fd8419181dec4d3dd6997bab953d2f" }
+              ]
+            }
+          }
+      }
+    }
+    | .generator.tx_fee        = 940000
+    ) as $plutus_loop_ripemd
+  ##
+  ### Definition vocabulary:  custom workloads
+  ##
+  |
+    ({  name: "latency"
+      , parameters: {}
+      , entrypoints: {
+          pre_generator: null
+        , producers:     "latency"
+      }
+      , wait_pools: false
+    }) as $latency_workload
+  |
+    ({  name: "voting"
+      , parameters: {}
+      , entrypoints: {
+          pre_generator: "workflow_generator"
+        , producers:     "workflow_producer"
+      }
+      , wait_pools: true
+    }) as $voting_workload
   ##
   ### Definition vocabulary:  genesis variants
   ##
   |
     ({}
-      | .genesis.pparamsEpoch         = timeline::lastKnownEpoch
+      | .genesis.pparamsEpoch         = timeline::lastKnownBabbageEpoch
       | .genesis.pparamsOverlays      = ["v8-preview"]
     ) as $costmodel_v8_preview
   |
     ({}
-      | .genesis.pparamsEpoch         = timeline::lastKnownEpoch
       | .genesis.pparamsOverlays      = ["v8-preview", "stepshalf"]
     ) as $costmodel_v8_preview_stepshalf
   |
     ({}
-      | .genesis.pparamsEpoch         = timeline::lastKnownEpoch
       | .genesis.pparamsOverlays      = ["v8-preview", "doublebudget"]
     ) as $costmodel_v8_preview_doubleb
+  |
+    ({}
+      | .genesis.pparamsEpoch         = timeline::lastKnownBabbageEpoch
+      | .genesis.pparamsOverlays      = ["v8-preview", "v9-preview"]
+    ) as $costmodel_v9_preview
+  |
+    ({}
+      | .genesis.pparamsOverlays      = ["v8-preview", "v9-preview", "stepshalf"]
+    ) as $costmodel_v9_preview_stepshalf
+  |
+    ({}
+      | .genesis.pparamsOverlays      = ["v8-preview", "v9-preview", "doublebudget"]
+    ) as $costmodel_v9_preview_doubleb
+  |
+    ({}
+      | .genesis.pparamsOverlays      = ["stepshalf"]
+    ) as $costmodel_stepshalf
+  |
+    ({}
+      | .genesis.pparamsOverlays      = ["doublebudget"]
+    ) as $costmodel_doubleb
+  |
+    ($costmodel_v9_preview
+      | .genesis.pparamsOverlays      as $ovls
+      | .genesis.pparamsOverlays      = $ovls + ["blocksize64k"]
+    ) as $ovl_conway64kblocksize
+  |
+    ({}
+      | .genesis.pparamsEpoch         = timeline::lastKnownEpoch
+    ) as $genesis_voltaire
+  |
+    ({}
+      | .genesis.pparamsOverlays      = ["v10-preview"]
+    ) as $costmodel_v10_preview
+  |
+    ($genesis_voltaire
+      | .genesis.pparamsOverlays      as $ovls
+      | .genesis.pparamsOverlays      = $ovls + ["v10-preview", "voting"]
+      | .genesis.utxo_keys            = 2
+      | .genesis.funds_balance        = 40000000000000
+    ) as $genesis_voting
   ##
-  ### Definition vocabulary:  node config variants
+  ### Definition vocabulary:  node + tracer config variants
   ##
   |
     ({ extra_desc:                     "without cardano-tracer"
@@ -382,13 +634,18 @@ def all_profile_variants:
     ({ extra_desc:                     "with RTView"
      , suffix:                         "rtvw"
      }|
-     .node.rtview                     = true
+     .tracer.rtview                   = true
     ) as $with_rtview
+  |
+    ({ extra_desc:                     "with resource tracing in cardano-tracer"
+     }|
+     .tracer.withresources            = true
+    ) as $with_resources
   |
     ({ extra_desc:                     "with legacy iohk-monitoring"
      , suffix:                         "iomf"
      }|
-     .node.tracing_backend           = "iohk-monitoring"
+     .node.tracing_backend            = "iohk-monitoring"
     ) as $old_tracing
   |
     ({ extra_desc:                     "with P2P networking"
@@ -396,6 +653,51 @@ def all_profile_variants:
      }|
      .node.verbatim.EnableP2P         = true
     ) as $p2p
+  |
+  ##
+  ### Definition vocabulary:  RTS config variants, overriding the default
+  ##
+    ({ extra_desc:                     "RTSflags A4m"
+     , suffix:                         "rtsA4m"
+     }|
+     .node.rts_flags_override         = ["-A4m"]
+    ) as $rts_A4m
+  |
+    ({ extra_desc:                     "RTSflags A64m"
+     , suffix:                         "rtsA64m"
+     }|
+     .node.rts_flags_override         = ["-A64m"]
+    ) as $rts_A64m
+  |
+    ({ extra_desc:                     "RTSflags N3"
+     , suffix:                         "rtsN3"
+     }|
+     .node.rts_flags_override         = ["-N3"]
+    ) as $rts_N3
+  |
+    ({ extra_desc:                     "RTSflags A4m N3"
+     , suffix:                         "rtsA4mN3"
+     }|
+     .node.rts_flags_override         = ["-A4m", "-N3"]
+    ) as $rts_A4mN3
+  |
+    ({ extra_desc:                     "RTSflags A64m N3"
+     , suffix:                         "rtsA64mN3"
+     }|
+     .node.rts_flags_override         = ["-A64m", "-N3"]
+    ) as $rts_A64mN3
+  |
+    ({ extra_desc:                     "RTSflags nonmoving GC"
+     , suffix:                         "rtsxn"
+     }|
+     .node.rts_flags_override         = ["-xn"]
+    ) as $rts_xn
+  |
+    ({ extra_desc:                     "RTSflags collect all event/profiling data not requiring a -prof build"
+     , suffix:                         "rtsprof"
+     }|
+     .node.rts_flags_override         = ["-l", "-hT"]
+    ) as $rts_prof
   |
   ##
   ### Definition vocabulary:  scenario
@@ -413,9 +715,17 @@ def all_profile_variants:
     { scenario:                        "fixed-loaded"
     }) as $scenario_fixed_loaded
   |
-   ($model_timescale * $cw_perf_tps_saturation_value *
+   ($model_timescale * $nomad_perf_tps_saturation_value *
     { scenario:                        "fixed-loaded"
-    }) as $scenario_cw_perf
+    }) as $scenario_nomad_perf
+  |
+   ($model_timescale * $nomad_perf_tps_saturation_value *
+    { scenario:                        "fixed-loaded"
+    }) as $scenario_nomad_perfssd
+  |
+   ($small_timescale * $nomad_perf_tps_saturation_value *
+    { scenario:                        "fixed-loaded"
+    }) as $scenario_nomad_perfssd_solo
   |
    ($model_timescale * $model_tps_saturation_value *
     { scenario:                        "fixed-loaded"
@@ -442,9 +752,13 @@ def all_profile_variants:
     { desc: "Miniature dataset, CI-friendly duration, bench scale"
     }) as $cibench_base
   |
-   ($scenario_fixed_loaded * $hexagon * $torus * $dataset_empty * $for_15blk * $no_filtering *
+   ($scenario_fixed_loaded * $hexagon * $torus * $dataset_empty * $for_15blk * $no_filtering * $with_resources *
     { desc: "6 low-footprint nodes in a torus topology, 5 minutes runtime"
     }) as $tracebench_base
+  |
+   ($scenario_fixed_loaded * $hexagon * $torus * $dataset_empty * $for_1200slot * $no_filtering * $with_resources *
+    { desc: "6 low-footprint nodes in a torus topology, 20 minutes runtime"
+    }) as $tracefull_base
   |
    ($scenario_fixed_loaded * $doublet * $dataset_empty * $for_900slot * $no_filtering *
     { desc: "2 low-footprint nodes, 15 minutes runtime"
@@ -460,9 +774,9 @@ def all_profile_variants:
       , desc: "Small dataset, honest 15 epochs duration"
     }) as $plutuscall_base
   |
-   ($scenario_cw_perf * $compose_fiftytwo * $dataset_oct2021 * $for_7ep *
+   ($scenario_nomad_perf * $compose_fiftytwo * $dataset_oct2021 * $for_8ep *
     { node:
-        { shutdown_on_slot_synced:        56000
+        { shutdown_on_slot_synced:        64000
         }
       , analysis:
         { filters:                        ["epoch3+", "size-full"]
@@ -475,7 +789,90 @@ def all_profile_variants:
         , max_block_size:                 88000
         }
       , desc: "AWS c5-2xlarge cluster dataset, 7 epochs"
-    }) as $cw_perf_base
+    }) as $nomad_perf_base
+  |
+   ($scenario_nomad_perfssd * $compose_fiftytwo * $dataset_oct2021 * $for_8ep *
+    { node:
+        { shutdown_on_slot_synced:        64000
+        }
+      , analysis:
+        { filters:                        ["epoch3+", "size-full"]
+        }
+      , generator:
+        { init_cooldown:                  45
+        }
+      , genesis:
+        { funds_balance:                  20000000000000
+        , max_block_size:                 88000
+        }
+      , desc: "AWS c5-2xlarge cluster dataset, 7 epochs"
+    }) as $nomad_perfssd_base
+  |
+   ($scenario_nomad_perf * $compose_fiftytwo * $dataset_oct2021 * $for_9ep * $plutus_base *
+    { node:
+        { shutdown_on_slot_synced:        72000
+        }
+      , analysis:
+        { filters:                        ["epoch3+", "size-small"]
+        }
+      , generator:
+        { init_cooldown:                  45
+        , tps:                            0.85
+        }
+      , genesis:
+        { funds_balance:                  20000000000000
+        , max_block_size:                 88000
+        }
+      , desc: "AWS c5-2xlarge cluster dataset, 9 epochs"
+    }) as $nomad_perf_plutus_common_base
+  |
+   ($nomad_perf_plutus_common_base * $plutus_loop_counter
+   ) as $nomad_perf_plutus_base
+  |
+   ($nomad_perf_plutus_common_base * $plutus_loop_blst *
+    { analysis:
+        { filters:                        ["epoch3+", "size-moderate-2"]
+        }
+      , generator:
+        { tps:                            2.0
+        }
+    }) as $nomad_perf_plutusv3blst_base
+  |
+   ($nomad_perf_plutus_common_base *
+    { analysis:
+        { filters:                        ["epoch3+", "size-moderate"]
+        }
+      , generator:
+        { tps:                            2.0
+        }
+    }) as $nomad_perf_plutussecp_base
+  |
+   ($compose_fiftytwo * $dataset_empty * $no_filtering *
+    { desc: "AWS perf class cluster, stop when all latency services stop"
+    , workloads: [ $latency_workload ]
+    }) as $nomad_perf_latency_base
+  |
+   ($compose_fiftytwo * $dataset_empty * $no_filtering *
+    { desc: "AWS perf-ssd class cluster, stop when all latency services stop"
+    , workloads: [ $latency_workload ]
+    }) as $nomad_perfssd_latency_base
+  |
+   ($scenario_nomad_perfssd_solo * $solo * $dataset_24m *
+    { node:
+        { shutdown_on_slot_synced:        7200
+        }
+      , analysis:
+        { filters:                        ["epoch3+", "size-full"]
+        }
+      , generator:
+        { epochs:                         6
+        }
+      , genesis:
+        { funds_balance:                  20000000000000
+        , max_block_size:                 88000
+        }
+      , desc: "AWS c5[d]-9xlarge utxoscale dataset, 6 epochs"
+    }) as $nomad_perfssd_solo_base
   |
    ($scenario_model * $quadruplet * $dataset_current * $for_7ep *
     { node:
@@ -506,6 +903,14 @@ def all_profile_variants:
     , desc: "Oct 2021 dataset size, four epochs."
     }) as $forge_stress_pre_base
   |
+   ($forge_stress_pre_base * $hexagon *
+    { analysis:
+      { filters:                        ["epoch3+"] }
+    , node:
+      { shutdown_on_slot_synced:        4800 }
+    , desc: "Status-quo dataset size, eight epochs, six nodes."
+    }) as $forge_stress_pre_large_base
+  |
    ($scenario_fixed_loaded * $triplet * $dataset_current *
     { node:
       { shutdown_on_slot_synced:        2400
@@ -513,11 +918,18 @@ def all_profile_variants:
     , desc: "Status-quo dataset size, four epochs."
     }) as $forge_stress_base
   |
+   ($scenario_fixed_loaded * $triplet * $dataset_current *
+    { node:
+      { shutdown_on_slot_synced:        1200
+      }
+    , desc: "Status-quo dataset size, two epochs."
+    }) as $forge_stress_short_base
+  |
    ($scenario_fixed_loaded * $triplet * $dataset_oct2021 *
     { node:
-      { shutdown_on_slot_synced:        2400
+      { shutdown_on_slot_synced:        1200
       }
-    , desc: "Status-quo dataset size, four epochs, smaller UTxO/delegation."
+    , desc: "Oct 2021 dataset size, two epochs."
     }) as $forge_stress_light_base
   |
    ($forge_stress_base * $hexagon *
@@ -539,6 +951,61 @@ def all_profile_variants:
   ##
   ### Actual profiles
   ##
+
+  ### Profile templates
+  ###
+  # UTxO scaling on a single node, mainnet blocksize, ~2h runtime (6 epochs) - default: 24mio UTxO, 64GB RAM cap
+    ($nomad_perfssd_solo_base * $nomad_perfssd_unicircle * $costmodel_v8_preview * $p2p
+    ) as $utxoscale_solo_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - value-only workload
+    ($nomad_perf_base * $nomad_perf_dense * $p2p * $costmodel_v8_preview
+    ) as $value_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - Plutus workload
+    ($nomad_perf_plutus_base * $nomad_perf_dense * $p2p * $costmodel_v8_preview
+    ) as $plutus_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - value-only workload
+    ($nomad_perf_base * $nomad_perf_dense * $p2p * $genesis_voltaire
+    ) as $valuevolt_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - value+voting workload
+  # Extra splits, benchmarking from 5th epoch (skip 0,1,2,3 / 533 min / 8.88 hs)
+    ($nomad_perf_base * $nomad_perf_dense * $p2p * $genesis_voting *
+      {analysis: { filters: ["epoch5+", "size-full"] } }
+    ) as $valuevoting_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - Plutus workload
+    ($nomad_perf_plutus_base * $nomad_perf_dense * $p2p * $genesis_voltaire
+    ) as $plutusvolt_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - plutus+voting workload
+    ($nomad_perf_plutus_base * $nomad_perf_dense * $p2p * $genesis_voting
+    ) as $plutusvoting_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - PlutusV3 BLST workload
+    ($nomad_perf_plutusv3blst_base * $nomad_perf_dense * $p2p * $genesis_voltaire
+    ) as $plutusv3blst_nomadperf_template
+  |
+  # P&T Nomad cluster: 52 nodes, P2P by default - Plutus SECP workload
+    ($nomad_perf_plutussecp_base * $nomad_perf_dense * $p2p * $costmodel_v8_preview
+    ) as $plutussecp_nomadperf_template
+  |
+  # This combination of dense topology and reduced block size aims to locally reproduce UTxO-HD in-memory heap size increase on 9.0 and 9.1
+  # runtime: 30mins
+    ($p2p * $dataset_miniature * $ovl_conway64kblocksize *
+      { name: "6-dense"
+      , desc: "6 local nodes, P2P enabled, dense topology, reduced block size"
+      , composition:
+        { topology:                 "torus-dense" }
+      ,  node:
+        { shutdown_on_slot_synced: 1800 }
+      , analysis:
+        { filters:                  ["unitary", "size-full"] }
+      }
+    ) as $default_dense_local_template
+  |
 
   ### First, auto-named profiles:
   ###
@@ -567,6 +1034,52 @@ def all_profile_variants:
   , { name: "default"
     , desc: "Default, as per nix/workbench/profile/prof0-defaults.jq"
     }
+  , $p2p *
+    { name: "default-p2p"
+    , desc: "Default, as per nix/workbench/profile/prof0-defaults.jq with P2P enabled"
+    }
+  , $default_dense_local_template *
+    { name: "6-dense"
+    }
+  , $default_dense_local_template *
+    { name: "6-dense-1h"
+    ,  node:
+      { shutdown_on_slot_synced: 3600 }
+    , generator:
+      { epochs:                  6 }
+    }
+  , $default_dense_local_template *
+    { name: "6-dense-4h"
+    ,  node:
+      { shutdown_on_slot_synced: 14400 }
+    , generator:
+      { epochs:                  24 }
+    }
+  , $default_dense_local_template * $rts_prof *
+    { name: "6-dense-rtsprof"
+    }
+  , $default_dense_local_template * $rts_prof *
+    { name: "6-dense-1h-rtsprof"
+    ,  node:
+      { shutdown_on_slot_synced: 3600 }
+    , generator:
+      { epochs:                  6 }
+    }
+  , $default_dense_local_template * $rts_prof *
+    { name: "6-dense-4h-rtsprof"
+    ,  node:
+      { shutdown_on_slot_synced: 14400 }
+    , generator:
+      { epochs:                  24 }
+    }
+  , $nomad_perf_torus * $p2p *
+    { name: "default-nomadperf"
+    , desc: "Default on P&T exclusive cluster"
+    }
+  , $nomad_perf_torus *
+    { name: "default-nomadperf-nop2p"
+    , desc: "Default on P&T exclusive cluster with P2P disabled"
+    }
   , $plutus_base * $costmodel_v8_preview * $plutus_loop_counter *
     { name: "plutus"
     , desc: "Default with Plutus workload: CPU/memory limit saturation counter loop"
@@ -583,6 +1096,14 @@ def all_profile_variants:
     { name: "oldtracing"
     , desc: "Default in legacy tracing mode"
     }
+  , $nomad_perf_torus * $p2p * $old_tracing *
+    { name: "oldtracing-nomadperf"
+    , desc: "Default in legacy tracing mode on P&T exclusive cluster"
+    }
+  , $nomad_perf_torus * $old_tracing *
+    { name: "oldtracing-nomadperf-nop2p"
+    , desc: "Default in legacy tracing mode on P&T exclusive cluster with P2P disabled"
+    }
   , $scenario_idle *
     { name: "idle"
     , desc: "Idle scenario:  start nodes & detach from tty;  no cluster termination"
@@ -591,14 +1112,13 @@ def all_profile_variants:
     { name: "tracer-only"
     , desc: "Idle scenario:  start only the tracer & detach from tty;  no termination"
     }
-  , $cardano_world_qa *
-    { name: "cw-qa-default"
-    , desc: "Default, but on Cardano World QA"
-    }
 
   ## Fastest profile to pass analysis: just 1 block
   , $fast_base *
     { name: "fast"
+    }
+  , $fast_base * $solo *
+    { name: "fast-solo"
     }
   , $fast_base * $p2p *
     { name: "fast-p2p"
@@ -611,6 +1131,11 @@ def all_profile_variants:
     }
   , $fast_base * $old_tracing *
     { name: "fast-oldtracing"
+    }
+
+  ## Fast variants: single node with large, varying dataset sizes
+  , $fast_base * $solo * $dataset_24m *
+    { name: "faststartup-24M"
     }
 
   ## CI variants: test duration, 3 blocks
@@ -629,9 +1154,21 @@ def all_profile_variants:
   , $citest_base * $with_rtview *
     { name: "ci-test-rtview"
     }
-  , $citest_base * $cardano_world_qa *
-    { name: "cw-qa-ci-test"
-    , desc: "ci-test, but on Cardano World QA"
+  , $citest_base * $nomad_perf_torus * $p2p *
+    { name: "ci-test-nomadperf"
+    , desc: "ci-test on P&T exclusive cluster"
+    }
+  , $citest_base * $nomad_perf_torus * $old_tracing *
+    { name: "ci-test-oldtracing-nomadperf"
+    , desc: "ci-test in legacy tracing mode on P&T exclusive cluster"
+    }
+  , $citest_base * $nomad_perf_torus *
+    { name: "ci-test-nomadperf-nop2p"
+    , desc: "ci-test on P&T exclusive cluster with P2P disabled"
+    }
+  , $citest_base * $plutus_base * $plutus_loop_counter * $costmodel_v8_preview * $p2p *
+    { name: "ci-test-hydra"
+    , desc: "ci-test variant intended for Hydra CI"
     }
 
   ## CI variants: bench duration, 15 blocks
@@ -644,11 +1181,28 @@ def all_profile_variants:
   , $cibench_base * $plutus_base * $costmodel_v8_preview * $plutus_loop_counter *
     { name: "ci-bench-plutus"
     }
-  , $cibench_base * $plutus_base * $costmodel_v8_preview * $plutus_loop_secp_ecdsa *
-    { name: "ci-bench-plutus-secp-ecdsa"
+  , $cibench_base * $plutus_base * $costmodel_v8_preview * $plutus_loop2024_counter *
+    { name: "ci-bench-plutus24"
     }
-  , $cibench_base * $plutus_base * $costmodel_v8_preview * $plutus_loop_secp_schnorr *
+  , $cibench_base * $plutus_base * $double_plus_tps_saturation_plutus * $costmodel_v8_preview * $plutus_loop_secp_ecdsa *
+    { name: "ci-bench-plutus-secp-ecdsa"
+    , analysis:
+      { filters:        ["size-moderate"] }
+    }
+  , $cibench_base * $plutus_base * $double_plus_tps_saturation_plutus * $costmodel_v8_preview * $plutus_loop_secp_schnorr *
     { name: "ci-bench-plutus-secp-schnorr"
+    , analysis:
+      { filters:        ["size-moderate"] }
+    }
+  , $cibench_base * $plutus_base * $double_plus_tps_saturation_plutus * $genesis_voltaire * $plutus_loop_blst *
+    { name: "ci-bench-plutusv3-blst"
+    , analysis:
+      { filters:        ["size-moderate-2"] }
+    }
+  , $cibench_base * $plutus_base * $double_plus_tps_saturation_plutus * $genesis_voltaire * $costmodel_v10_preview * $plutus_loop_ripemd *
+    { name: "ci-bench-plutusv3-ripemd"
+    , analysis:
+      { filters:        ["size-small"] }
     }
   , $cibench_base * $without_tracer *
     { name: "ci-bench-notracer"
@@ -656,9 +1210,25 @@ def all_profile_variants:
   , $cibench_base * $with_rtview *
     { name: "ci-bench-rtview"
     }
-  , $cibench_base * $cardano_world_qa *
-    { name: "cw-qa-ci-bench"
-    , desc: "ci-bench but on Cardano World QA"
+  , $cibench_base * $dreps_tiny *
+    { name: "ci-bench-drep"
+    }
+  , $cibench_base * $p2p *
+    { name: "ci-bench-lmdb"
+    , node:    { utxo_lmdb: true }
+    , cluster: { ssd_directory: "/tmp" }
+    }
+  , $cibench_base * $nomad_perf_torus * $p2p *
+    { name: "ci-bench-nomadperf"
+    , desc: "ci-bench on P&T exclusive cluster"
+    }
+  , $cibench_base * $nomad_perf_torus * $old_tracing *
+    { name: "ci-bench-oldtracing-nomadperf"
+    , desc: "ci-bench in legacy tracing mode on P&T exclusive cluster"
+    }
+  , $cibench_base * $nomad_perf_torus *
+    { name: "ci-bench-nomadperf-nop2p"
+    , desc: "ci-bench on P&T exclusive cluster with P2P disabled"
     }
 
   ## CI variants: test duration, 3 blocks, dense10
@@ -678,6 +1248,14 @@ def all_profile_variants:
     }
   , $tracebench_base * $with_rtview *
     { name: "trace-bench-rtview"
+    }
+
+  ## Full variants: 120 blocks
+  , $tracefull_base *
+    { name: "trace-full"
+    }
+  , $tracefull_base * $with_rtview *
+    { name: "trace-full-rtview"
     }
 
   ## Epoch transition test: 1.5 epochs, 15mins runtime
@@ -714,9 +1292,205 @@ def all_profile_variants:
     { name: "plutuscall-secp-schnorr-double"
     }
 
-## Cardano World QA cluster: 52 nodes, 3 regions, value variant
-  , $cw_perf_base * $cardano_world_perf *
-    { name: "cw-perf-value"
+## Conway / Voltaire era Plutus call variants
+  , $plutus_base * $plutuscall_base * $double_plus_tps_saturation_plutus * $genesis_voltaire * $costmodel_v10_preview * $plutus_loop_ripemd *
+    { name: "plutuscall-volt-ripemd"
+    , analysis:
+      { filters:        ["size-small"] }
+    }
+  , $plutus_base * $plutuscall_base * $double_plus_tps_saturation_plutus * $genesis_voltaire * $costmodel_v10_preview * $plutus_loop_blst *
+    { name: "plutuscall-volt-blst"
+    , analysis:
+      { filters:        ["size-moderate-2"] }
+    }
+  , $plutus_base * $plutuscall_base * $double_plus_tps_saturation_plutus * $genesis_voltaire * $costmodel_v10_preview * $plutus_loop_counter *
+    { name: "plutuscall-volt-loop"
+    , analysis:
+      { filters:        ["size-small"] }
+    }
+
+## P&T Nomad cluster: 52 nodes, 3 regions, value-only (incl. old tracing variant) and Plutus, P2P enabled by default
+  , $value_nomadperf_template *
+    { name: "value-nomadperf"
+    }
+  , $nomad_perfssd_base * $nomad_perfssd_dense * $p2p * $costmodel_v8_preview *
+    { name: "value-nomadperfssd"
+    }
+  , $value_nomadperf_template * $old_tracing *
+    { name: "value-oldtracing-nomadperf"
+    }
+  , $plutus_nomadperf_template *
+    { name: "plutus-nomadperf"
+    }
+  , $plutus_nomadperf_template * $plutus_loop2024_counter *
+    { name: "plutus24-nomadperf"
+    }
+  , $nomad_perf_latency_base * $nomad_perf_dense * $p2p * $costmodel_v8_preview *
+    { name: "latency-nomadperf"
+    }
+  , $nomad_perfssd_latency_base * $nomad_perfssd_dense * $p2p * $costmodel_v8_preview *
+    { name: "latency-nomadperfssd"
+    }
+
+## P&T Nomad cluster: same, but new Voltaire era baseline with 10k DReps, updated cost models and protocol version 9
+  , $valuevolt_nomadperf_template * $dreps_large *
+    { name: "value-volt-nomadperf"
+    }
+  , $plutusvolt_nomadperf_template * $dreps_large *
+    { name: "plutus-volt-nomadperf"
+    }
+
+## As "value" above with an extra voting workload
+  # Split creating 500k UTxO, create the transactions (build-raw) but no submit.
+  , $valuevoting_nomadperf_template * $dreps_large *
+    { name: "value-voting-utxo-volt-nomadperf"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: false
+        }
+      }]
+    }
+  # One vote per voting tx version.
+  , $valuevoting_nomadperf_template * $dreps_large *
+    { name: "value-voting-volt-nomadperf"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: true
+        , votes_per_tx: 1
+        }
+      }]
+    }
+  # Two votes per voting tx version.
+  , $valuevoting_nomadperf_template * $dreps_large *
+    { name: "value-voting-double-volt-nomadperf"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: true
+        , votes_per_tx: 2
+        }
+      }]
+    }
+
+## As "plutus" above with an extra voting workload
+  # Split creating 500k UTxO, create the transactions (build-raw) but no submit.
+  , $plutusvoting_nomadperf_template * $dreps_large *
+    { name: "plutus-voting-utxo-volt-nomadperf"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: false
+        }
+      }]
+    }
+  # One vote per voting tx version.
+  , $plutusvoting_nomadperf_template * $dreps_large *
+    { name: "plutus-voting-volt-nomadperf"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: true
+        , votes_per_tx: 1
+        }
+      }]
+    }
+  # Two votes per voting tx version.
+  , $plutusvoting_nomadperf_template * $dreps_large *
+    { name: "plutus-voting-double-volt-nomadperf"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: true
+        , votes_per_tx: 2
+        }
+      }]
+    }
+
+## P&T Nomad cluster: 52 nodes, PlutusV3 BLST and Plutus SECP workloads
+  , $plutusv3blst_nomadperf_template *
+    { name: "plutusv3-blst-nomadperf"
+    }
+  , $plutusv3blst_nomadperf_template * $costmodel_stepshalf *
+    { name: "plutusv3-blst-half-nomadperf"
+    }
+  , $plutusv3blst_nomadperf_template * $costmodel_doubleb *
+    { name: "plutusv3-blst-double-nomadperf"
+    }
+  , $plutussecp_nomadperf_template * $plutus_loop_secp_ecdsa *
+    { name: "plutus-secp-ecdsa-nomadperf"
+    }
+  , $plutussecp_nomadperf_template * $plutus_loop_secp_schnorr *
+    { name: "plutus-secp-schnorr-nomadperf"
+    }
+
+## P&T Nomad cluster: 52 nodes, value-only and Plutus workloads - DRep injection variants
+  , $value_nomadperf_template * $dreps_small *
+    { name: "value-drep1k-nomadperf"
+    }
+  , $value_nomadperf_template * $dreps_medium *
+    { name: "value-drep2k-nomadperf"
+    }
+  , $value_nomadperf_template * $dreps_large *
+    { name: "value-drep10k-nomadperf"
+    }
+  , $value_nomadperf_template * $dreps_enormous *
+    { name: "value-drep100k-nomadperf"
+    }
+  , $plutus_nomadperf_template * $dreps_small *
+    { name: "plutus-drep1k-nomadperf"
+    }
+  , $plutus_nomadperf_template * $dreps_medium *
+    { name: "plutus-drep2k-nomadperf"
+    }
+  , $plutus_nomadperf_template * $dreps_large *
+    { name: "plutus-drep10k-nomadperf"
+    }
+  , $plutus_nomadperf_template * $dreps_enormous *
+    { name: "plutus-drep100k-nomadperf"
+    }
+
+## P&T Nomad cluster: 52 nodes, 3 regions, value-only (with old tracing variant) and Plutus, no P2P flavour
+  , $nomad_perf_base * $nomad_perf_dense * $costmodel_v8_preview *
+    { name: "value-nomadperf-nop2p"
+    }
+  , $nomad_perf_base * $nomad_perf_dense * $costmodel_v8_preview * $old_tracing *
+    { name: "value-oldtracing-nomadperf-nop2p"
+    }
+  , $nomad_perf_plutus_base * $nomad_perf_dense * $costmodel_v8_preview *
+    { name: "plutus-nomadperf-nop2p"
+    }
+
+## P&T Nomad cluster: 52 nodes, 3 regions, fast, P2P flavour
+  , $fast_base * $compose_fiftytwo * $nomad_perf_dense * $costmodel_v8_preview * $p2p *
+    { name: "fast-nomadperf"
+    }
+  , $fast_base * $compose_fiftytwo * $nomad_perf_dense * $costmodel_v8_preview *
+    { name: "fast-nomadperf-nop2p"
+    }
+  , $fast_base * $compose_fiftytwo * $nomad_perfssd_dense * $costmodel_v8_preview * $p2p *
+    { name: "fast-nomadperfssd"
+    }
+
+## P&T NomadSSD cluster: UTxO scale benchmarks on a single node
+  , $utxoscale_solo_template *
+    { name: "utxoscale-solo-24M64G-nomadperfssd"
+    }
+  , $utxoscale_solo_template *
+    { name: "utxoscale-solo-12M64G-nomadperfssd"
+    , genesis:
+      { utxo:                               (12 * $M)
+      }
+    }
+  , $utxoscale_solo_template *
+    { name: "utxoscale-solo-12M16G-nomadperfssd"
+    , genesis:
+      { utxo:                               (12 * $M)
+      }
+    , node:
+      { heap_limit:                         16384
+      }
     }
 
 ## Model value variant: 7 epochs (128GB RAM needed; 16GB for testing locally)
@@ -777,17 +1551,9 @@ def all_profile_variants:
     { name: "forge-stress-large"
     }
 
-  ## Status-quo (huge) dataset, 1 node
-  , $forge_stress_base * $solo *
-    { name: "forge-stress-solo"
-    }
-
   ## Status-quo (huge) dataset, small cluster (2 nodes)
   , $forge_stress_base *
     { name: "forge-stress"
-    }
-  , $forge_stress_light_base *
-    { name: "forge-stress-light"
     }
   , $forge_stress_base * $plutus_base * $plutus_loop_counter *
     { name: "forge-stress-p2p"
@@ -795,18 +1561,11 @@ def all_profile_variants:
   , $forge_stress_base * $plutus_base * $plutus_loop_counter *
     { name: "forge-stress-plutus"
     }
-  , $forge_stress_base * $plutus_base * $plutus_loop_counter * $solo *
-    { name: "forge-stress-plutus-solo"
-    }
   , $forge_stress_base * $without_tracer *
     { name: "forge-stress-notracer"
     }
-
   , $forge_stress_pre_base *
     { name: "forge-stress-pre"
-    }
-  , $forge_stress_pre_base * $solo *
-    { name: "forge-stress-pre-solo"
     }
   , $forge_stress_pre_base * $plutus_base * $plutus_loop_counter *
     { name: "forge-stress-pre-plutus"
@@ -815,6 +1574,51 @@ def all_profile_variants:
     { name: "forge-stress-pre-notracer"
     }
 
+  # single forger node, larger blocksize, various flavours
+  , $forge_stress_base * $solo * $costmodel_v8_preview *
+    { name: "forge-stress-solo"
+    , extra_desc: "with blocksize bumped to 88k"
+    }
+  , $forge_stress_base * $plutus_base * $plutus_loop_counter * $solo * $costmodel_v8_preview *
+    { name: "forge-stress-plutus-solo"
+    , extra_desc: "with blocksize bumped to 88k"
+    }
+  , $forge_stress_short_base * $solo * $costmodel_v8_preview *
+    { name: "forge-stress-solo-xs"
+    , extra_desc: "with blocksize bumped to 88k"
+    }
+  , $forge_stress_pre_base * $solo * $costmodel_v8_preview *
+    { name: "forge-stress-pre-solo"
+    , extra_desc: "with blocksize bumped to 88k"
+    }
+  , $forge_stress_pre_large_base * $solo * $costmodel_v8_preview *
+    { name: "forge-stress-pre-solo-xl"
+    , extra_desc: "with blocksize bumped to 88k"
+    }
+  , $forge_stress_light_base * $solo * $costmodel_v8_preview *
+    { name: "forge-stress-pre-solo-xs"
+    , extra_desc: "with blocksize bumped to 88k"
+    }
+
+  ## Large dataset, small cluster (3 nodes), variants for RTS parametrization
+  , $forge_stress_pre_base * $rts_A4m *
+    { name: "forge-stress-pre-rtsA4m"
+    }
+  , $forge_stress_pre_base * $rts_A64m *
+    { name: "forge-stress-pre-rtsA64m"
+    }
+  , $forge_stress_pre_base * $rts_N3 *
+    { name: "forge-stress-pre-rtsN3"
+    }
+  , $forge_stress_pre_base * $rts_A4mN3 *
+    { name: "forge-stress-pre-rtsA4mN3"
+    }
+  , $forge_stress_pre_base * $rts_A64mN3 *
+    { name: "forge-stress-pre-rtsA64mN3"
+    }
+  , $forge_stress_pre_base * $rts_xn *
+    { name: "forge-stress-pre-rtsxn"
+    }
   , $scenario_chainsync * $chaindb_early_byron *
     { name: "chainsync-early-byron"
     }
@@ -836,6 +1640,18 @@ def all_profile_variants:
     }
   , $scenario_chainsync * $chaindb_early_alonzo * $p2p *
     { name: "chainsync-early-alonzo-p2p"
+    }
+
+  ## development profile for voting workload: PV9, Conway costmodel, 1000 DReps injected
+  , $scenario_fixed_loaded * $doublet * $dataset_miniature * $for_3ep * $no_filtering * $voting_base * $double_plus_tps_saturation_plutus * $genesis_voting * $dreps_small *
+    { name: "development-voting"
+    , workloads:
+      [ $voting_workload * {parameters:
+        { outs_per_split_transaction: 193
+        , submit_vote: true
+        , votes_per_tx: 2
+        }
+      }]
     }
 
   ## Last, but not least, the profile used by "nix-shell -A devops":

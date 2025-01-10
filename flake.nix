@@ -15,12 +15,14 @@
       flake = false;
     };
     haskellNix = {
-      url = "github:input-output-hk/haskell.nix";
+      # GHC 8.10.7 cross compilation for windows is broken in newer versions of haskell.nix.
+      # Unpin this once we no longer need GHC 8.10.7.
+      url = "github:input-output-hk/haskell.nix/cb139fa956158397aa398186bb32dd26f7318784";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.hackage.follows = "hackageNix";
     };
     CHaP = {
-      url = "github:input-output-hk/cardano-haskell-packages?ref=repo";
+      url = "github:intersectmbo/cardano-haskell-packages?ref=repo";
       flake = false;
     };
     utils.url = "github:numtide/flake-utils";
@@ -54,16 +56,12 @@
 
     cardano-mainnet-mirror.url = "github:input-output-hk/cardano-mainnet-mirror/nix";
 
-    tullia.url = "github:input-output-hk/tullia";
-    std.follows = "tullia/std";
-
-    nix2container.url = "github:nlewo/nix2container";
+    std.url = "github:divnix/std";
 
     cardano-automation = {
       url = "github:input-output-hk/cardano-automation";
       inputs = {
         haskellNix.follows = "haskellNix";
-        tullia.follows = "tullia";
         nixpkgs.follows = "nixpkgs";
       };
     };
@@ -79,18 +77,15 @@
     , iohkNix
     , ops-lib
     , cardano-mainnet-mirror
-    , tullia
     , std
-    , nix2container
     , cardano-automation
     , em
     , ...
     }@input:
     let
       inherit (nixpkgs) lib;
-      inherit (lib) head systems mapAttrs recursiveUpdate mkDefault
-        getAttrs optionalAttrs nameValuePair attrNames;
-      inherit (utils.lib) eachSystem mkApp flattenTree;
+      inherit (lib) head mapAttrs recursiveUpdate optionalAttrs;
+      inherit (utils.lib) eachSystem flattenTree;
       inherit (iohkNix.lib) prefixNamesWith;
       removeRecurse = lib.filterAttrsRecursive (n: _: n != "recurseForDerivations");
 
@@ -106,11 +101,11 @@
         iohkNix.overlays.crypto
         haskellNix.overlay
         iohkNix.overlays.haskell-nix-extra
+        iohkNix.overlays.haskell-nix-crypto
         iohkNix.overlays.cardano-lib
         iohkNix.overlays.utils
         (final: prev: {
-          inherit customConfig nix2container;
-          inherit (tullia.packages.${final.system}) tullia nix-systems;
+          inherit customConfig;
           bench-data-publish = cardano-automation.outputs.packages.${final.system}."bench-data-publish:exe:bench-data-publish";
           em = import em { inherit (final) system;
                            nixpkgsSrcs = nixpkgs.outPath;
@@ -126,12 +121,16 @@
       ] ++ (import ops-lib.outPath {}).overlays;
 
       collectExes = project:
-        let inherit (project.pkgs.stdenv) hostPlatform;
-        in project.exes // (with project.hsPkgs; {
-          inherit (ouroboros-consensus-cardano.components.exes) db-analyser db-synthesizer;
+        let set-git-rev = import ./nix/set-git-rev.nix { inherit (project) pkgs; };
+        in
+        # take all executables from the project local packages
+        project.exes // (with project.hsPkgs; {
+          # add some executables from other relevant packages
           inherit (bech32.components.exes) bech32;
-          inherit (cardano-cli.components.exes) cardano-cli;
-        } // lib.optionalAttrs hostPlatform.isUnix {
+          inherit (ouroboros-consensus-cardano.components.exes) db-analyser db-synthesizer db-truncater;
+          # add cardano-node and cardano-cli with their git revision stamp
+          cardano-node = set-git-rev project.exes.cardano-node;
+          cardano-cli = set-git-rev cardano-cli.components.exes.cardano-cli;
         });
 
       mkCardanoNodePackages = project: (collectExes project) // {
@@ -147,7 +146,10 @@
         project = pkgs.cardanoNodeProject;
 
         # This is used by `nix develop .` to open a devShell
-        devShells = let shell = import ./shell.nix { inherit pkgs customConfig cardano-mainnet-mirror; }; in {
+        devShells =
+        let
+          shell = import ./shell.nix { inherit pkgs customConfig cardano-mainnet-mirror; };
+        in {
           inherit (shell) devops workbench-shell;
           default = shell.dev;
           cluster = shell;
@@ -172,17 +174,7 @@
         });
 
         exes = (collectExes project) // {
-          inherit (pkgs) cabalProjectRegenerate checkCabalProject;
-          "dockerImages/push" = import ./.buildkite/docker-build-push.nix {
-            hostPkgs = import hostNixpkgs { inherit system; };
-            inherit (pkgs) dockerImage submitApiDockerImage;
-          };
-          "dockerImage/node/load" = pkgs.writeShellScript "load-docker-image" ''
-            docker load -i ${pkgs.dockerImage} $@
-          '';
-          "dockerImage/submit-api/load" = pkgs.writeShellScript "load-submit-docker-image" ''
-            docker load -i ${pkgs.submitApiDockerImage} $@
-          '';
+          inherit (pkgs) checkCabalProject;
         } // flattenTree (pkgs.scripts // {
           # `tests` are the test suites which have been built.
           inherit (project) tests;
@@ -204,36 +196,38 @@
                     inherit profileName workbenchStartArgs;
                     backendName = "supervisor";
                     useCabalRun = false;
-                    cardano-node-rev =
-                      if __hasAttr "rev" self
-                      then pkgs.gitrev
-                      else throw "Cannot get git revision of 'cardano-node', unclean checkout?";
+                    cardano-node-rev = pkgs.gitrev;
                   }).workbench-profile-run;
           in
-          rec {
+          {
             "dockerImage/node" = pkgs.dockerImage;
             "dockerImage/submit-api" = pkgs.submitApiDockerImage;
 
             ## This is a very light profile, no caching&pinning needed.
             workbench-ci-test =
-              workbenchTest { profileName        = "ci-test-bage";
+              workbenchTest { profileName        = "ci-test-hydra-coay";
+                              workbenchStartArgs = [ "--create-testnet-data" ];
                             };
             workbench-ci-test-trace =
-              workbenchTest { profileName        = "ci-test-bage";
-                              workbenchStartArgs = [ "--trace" ];
+              workbenchTest { profileName        = "ci-test-hydra-coay";
+                              workbenchStartArgs = [ "--create-testnet-data" "--trace" ];
                             };
 
-            inherit (pkgs) all-profiles-json;
+            inherit (pkgs) all-profiles-json profile-data-nomadperf;
 
             system-tests = pkgs.writeShellApplication {
               name = "system-tests";
               runtimeInputs = with pkgs; [ git gnused ];
               text = ''
-                  NODE_REV="${self.rev or (throw "Sorry, need clean/pushed git revision to run system tests")}"
+                  NODE_REV="${self.rev or ""}"
+                  if [[ -z $NODE_REV ]]; then
+                    echo "Sorry, need clean/pushed git revision to run system tests"
+                    exit 1;
+                  fi
                   MAKE_TARGET=testpr
                   mkdir -p tmp && cd tmp
                   rm -rf cardano-node-tests
-                  git clone https://github.com/input-output-hk/cardano-node-tests.git
+                  git clone https://github.com/intersectmbo/cardano-node-tests.git
                   cd cardano-node-tests
                   sed -i '1 s/^.*$/#! \/usr\/bin\/env bash/' ./.github/regression.sh
                   export NODE_REV
@@ -253,7 +247,7 @@
               (mkFlakeAttrs (pkgs.extend (prev: final: { cardanoNodeProject = p; }))).ciJobs
             ) project.projectVariants;
             ciJobs = {
-              cardano-deployment = pkgs.cardanoLib.mkConfigHtml { inherit (pkgs.cardanoLib.environments) mainnet preview preprod; };
+              cardano-deployment = pkgs.cardanoLib.mkConfigHtml { inherit (pkgs.cardanoLib.environments) mainnet preview preprod shelley_qa; };
             } // optionalAttrs (system == "x86_64-linux") {
               native = packages // {
                 shells = devShells;
@@ -347,6 +341,7 @@
             lib.optionals (system == "x86_64-darwin") [
               #FIXME: make variants nonrequired for macos until CI has more capacity for macos builds
               "native\\.variants\\..*"
+              "native\\.checks/cardano-testnet/cardano-testnet-test"
             ];
           in
           pkgs.callPackages iohkNix.utils.ciJobsAggregates
@@ -363,18 +358,14 @@
             inherit config system overlays;
           };
           inherit (mkFlakeAttrs pkgs) environments packages checks apps project ciJobs devShells workbench;
-          # We use a generic gitrev for PR CI to avoid unecessary rebuilds:
-          ciJobsPrs = (mkFlakeAttrs (pkgs.extend (prev: final: { gitrev = "0000000000000000000000000000000000000000"; }))).ciJobs;
         in
         {
 
-          inherit environments checks project ciJobsPrs devShells workbench;
+          inherit environments checks project ciJobs devShells workbench;
 
           legacyPackages = pkgs // {
             # allows access to hydraJobs without specifying <arch>:
-            hydraJobs = ciJobs // {
-              pr = ciJobsPrs;
-            };
+            hydraJobs = ciJobs;
           };
 
           packages = packages // {
@@ -387,24 +378,15 @@
             default = apps.cardano-node;
           };
 
-        } //
-        tullia.fromSimple system (import ./nix/tullia.nix)
+        }
       );
 
     in
-    removeAttrs flake [ "ciJobsPrs" ] // {
+    removeAttrs flake [ "ciJobs" ] // {
 
-      hydraJobs =
-        # we comment out flake.ciJobsPrs. While this will make debugging on hydra
-        # much easier, it will result in 400+ status updates for each PR.  This
-        # can be a bit excessive.  DevX will work on only reporting failed jobs,
-        # and the required/nonrequired success jobs.  This should make it easier
-        # to handle on GitHub, but also easier on the rate-limits set of status
-        # updates per commit.
-        # flake.ciJobsPrs //
-        (let pkgs = self.legacyPackages.${defaultSystem}; in {
+      hydraJobs = flake.ciJobs // (let pkgs = self.legacyPackages.${defaultSystem}; in {
         inherit (pkgs.callPackages iohkNix.utils.ciJobsAggregates {
-          ciJobs = lib.mapAttrs (_: lib.getAttr "required") flake.ciJobsPrs // {
+          ciJobs = lib.mapAttrs (_: lib.getAttr "required") flake.ciJobs // {
             # ensure hydra notify:
             gitrev = pkgs.writeText "gitrev" pkgs.gitrev;
           };

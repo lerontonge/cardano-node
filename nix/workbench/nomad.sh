@@ -1,29 +1,30 @@
 usage_nomad() {
      usage "nomad" "nomad helpers" <<EOF
-    $(helpcmd dir-path \(vault\|client\|server\|plugin\|webfs\))
+    $(helpcmd dir-path \(client\|server\|webfs\))
                      Gets the corresponding cache directory file path.
 
-    $(helpcmd vault \(ci\|world\) login)
-                     Login with your GitHub token. First copy the token by doing:
-                     Your profile -> Settings -> Developer Settings ->
-                     Tokens (Classic) -> Generate New Token (Classic)
-                     and create a new token with only the "read:org" permission.
-    $(helpcmd vault \(ci\|world\) nomad-token)
-                     Gets the corresponding Nomad token from the chosen Vault
-                     (WARNING: shows secrets!!!).
-    $(helpcmd vault ci pg-user)
-                     Gets SRE's Postgres server username from Vault
-                     (WARNING: shows secrets!!!).
-    $(helpcmd vault ci pg-pass)
-                     Gets SRE's Postgres server password from Vault
-                     (WARNING: shows secrets!!!).
-    $(helpcmd vault world aws-s3-credentials)
-                     Gets Cardano World's AWS S3 crdentials from Vault in JSON
-                     (WARNING: shows secrets!!!).
+    $(helpcmd clients ready)
+                     Creates a JSON array with "id", "name", "datacenter" and
+                     "ip" of all SRE's Nomad client nodes available
+                     (status=ready) for the "class" of the current profile.
+                     Needed envars (NOMAD_TOKEN, NOMAD_ADDR or NOMAD_NAMESPACE)
+                     must be provided by the user.
 
-    $(helpcmd agents start SERVER-NAME CLIENT-NAME TASK-DRIVER-NAME)
+    $(helpcmd clients machines)
+                     Creates a JSON array with all SRE's perf Nomad client nodes
+                     but adds machine info for fingerprinting, to be used to
+                     ensure cloud runs are reproducible.
+                     Needed envars (NOMAD_TOKEN, NOMAD_ADDR or NOMAD_NAMESPACE)
+                     must be provided by the user.
+
+    $(helpcmd clients ssh \(all\|producers\|NAME))
+                     SSH SRE's perf Nomad client nodes.
+                     Needed envars (NOMAD_TOKEN, NOMAD_ADDR or NOMAD_NAMESPACE)
+                     must be provided by the user.
+
+    $(helpcmd agents start SERVER-NAME CLIENT-NAME)
                      Start a default 1 server 1 client Nomad cluster.
-    $(helpcmd agents stop  SERVER-NAME CLIENT-NAME TASK-DRIVER-NAME)
+    $(helpcmd agents stop  SERVER-NAME CLIENT-NAME)
                      Stop the default 1 server 1 client Nomad cluster.
 
     $(helpcmd \(server/client\) state-dir-path           NAME)
@@ -46,13 +47,6 @@ usage_nomad() {
     $(helpcmd \(server/client\) cleanup                  NAME)
                      Deletes all logs and state files
 
-    $(helpcmd plugin nomad-driver-podman socket-path)
-    $(helpcmd plugin nomad-driver-podman pid-filepath)
-    $(helpcmd plugin nomad-driver-podman pid)
-    $(helpcmd plugin nomad-driver-podman is-running)
-    $(helpcmd plugin nomad-driver-podman start)
-    $(helpcmd plugin nomad-driver-podman stop)
-
     $(helpcmd webfs state-dir-path)
     $(helpcmd webfs document-root-path)
     $(helpcmd webfs add-genesis-dir)
@@ -69,17 +63,16 @@ usage_nomad() {
     $(helpcmd job monitor)
     $(helpcmd job monitor-job-evals)
     $(helpcmd job monitor-job-allocs)
-    $(helpcmd job monitor-alloc-tasks)
+    $(helpcmd job monitor-job-alloc-tasks)
     $(helpcmd job check-eval-id-placement-failures)
     $(helpcmd job monitor-eval-id)
     $(helpcmd job monitor-deploy-id)
     $(helpcmd job monitor-alloc-id)
     $(helpcmd job monitor-alloc-id-task-name)
     $(helpcmd job task-name-allocation-id)
+    $(helpcmd job task-name-node-name)
 EOF
 }
-
-publish_default_op='local'
 
 wb_nomad() {
 
@@ -99,18 +92,13 @@ wb_nomad() {
 ### dir-path ) #################################################################
 ################################################################################
     dir-path )
-      local usage="USAGE: wb nomad ${op} vault|server|client|plugin|webfs"
+      local usage="USAGE: wb nomad ${op} server|client|webfs"
       # Calling `wb nomad dir-path  XXX` inside a Nix derivation will fail:
       # "mkdir: cannot create directory '/homeless-shelter': Permission denied"
       local nomad_cache_dir="$(envjqr 'cacheDir')"/nomad
       mkdir -p "${nomad_cache_dir}"
       local subop=${1:?$usage}; shift
       case "${subop}" in
-        vault )
-          local vault_dir="${nomad_cache_dir}"/vault
-          mkdir -p "${vault_dir}"
-          echo "${vault_dir}"
-        ;;
         server )
           local nomad_servers_dir="${nomad_cache_dir}"/server
           mkdir -p "${nomad_servers_dir}"
@@ -121,15 +109,15 @@ wb_nomad() {
           mkdir -p "${nomad_clients_dir}"
           echo "${nomad_clients_dir}"
         ;;
-        plugin )
-          local plugin_dir="${nomad_cache_dir}"/plugin
-          mkdir -p "${plugin_dir}"
-          echo "${plugin_dir}"
-        ;;
         webfs )
           local webfs_dir="${nomad_cache_dir}"/webfs
           mkdir -p "${webfs_dir}"
           echo "${webfs_dir}"
+        ;;
+        ssh )
+          local ssh_dir="${nomad_cache_dir}"/ssh
+          mkdir -p "${ssh_dir}"
+          echo "${ssh_dir}"
         ;;
         * )
           usage_nomad
@@ -137,180 +125,285 @@ wb_nomad() {
       esac
     ;;
 ################################################################################
-### vault ) ####################################################################
+### ssh ) ######################################################################
 ################################################################################
-    vault )
-      local usage="USAGE: wb nomad ${op} world|ci"
-      local vault_dir="$(wb_nomad dir-path vault)"
-      local entity=${1:?$usage}; shift
-      case "${entity}" in
-####### vault -> ci )###########################################################
-        ci )
-          mkdir -p "${vault_dir}"/ci
-          local login_file="${vault_dir}"/ci/login.json
-          local vault_address="https://vault.ci.iog.io"
-          local action=${1:?$usage}; shift
-          case "${action}" in
-            login )
-              msg "First create and copy your GitHub token by doing: "
-              msg "Your profile -> Settings -> Developer Settings -> Tokens (Classic) -> Generate New Token (Classic)"
-              msg "and create a new token with only the \"read:org\" permission."
-              read -p "Hit enter to continue ..."
-              vault login                             \
-                -address="${vault_address}"           \
-                -method=github -path=github-employees \
-                -no-store -format=json                \
-              > "${login_file}"
-            ;;
-            enabled )
-              if test -f "${login_file}"
+    ssh )
+      local usage="USAGE: wb nomad ${op} key"
+      local ssh_dir="$(wb_nomad dir-path ssh)"
+      local subop=${1:?$usage}; shift
+      case "${subop}" in
+####### ssh -> key )############################################################
+        key )
+          local key=${1:?$usage}; shift
+          case "${key}" in
+####### ssh -> key -> server )##################################################
+            server )
+              local key_path="${ssh_dir}"/server.id_ed25519
+              if ! test -f "${key_path}"
               then
-                # Fetch token info from vault
-                local client_token
-                client_token=$(jq -r '.auth.client_token' "${login_file}")
-                local token_lookup_response
-                if token_lookup_response=$(VAULT_TOKEN="${client_token}" vault token lookup -address="${vault_address}" -namespace=perf -format=json)
-                then
-                  local expire_time
-                  expire_time=$(echo "${token_lookup_response}" | jq -r .data.expire_time)
-                  if test "$(date -u -d "${expire_time}" "+%s")" -ge "$(date -u "+%s")"
-                  then
-                    true
-                  else
-                    rm "${login_file}"
-                    false
-                  fi
-                else
-                  fatal "Are you logged in to Vault? Call 'wb nomad vault ${entity} login' with your IOHK GitHub token (classic)"
-                fi
-              else
-                false
+                ssh-keygen -t ed25519 -f "${key_path}" -C "" -N "" >/dev/null
               fi
+              echo "${key_path}"
             ;;
-            nomad-token )
-              if ! wb_nomad vault "${entity}" enabled
+####### ssh -> key -> user )####################################################
+            user )
+              local key_path="${ssh_dir}"/user.id_ed25519
+              if ! test -f "${key_path}"
               then
-                wb_nomad vault "${entity}" login
+                ssh-keygen -t ed25519 -f "${key_path}" -C "" -N "" >/dev/null
               fi
-              local client_token
-              client_token=$(jq -r '.auth.client_token' "${login_file}")
-              local nomad_token_json
-              if nomad_token_json=$(VAULT_TOKEN="${client_token}" vault read -address="${vault_address}" -non-interactive -format=json nomad/creds/perf)
-              then
-                echo "${nomad_token_json}" | jq -r .data.secret_id
-              else
-                fatal "Unable to fetch Nomad token from Vault"
-              fi
+              echo "${key_path}"
             ;;
-            pg-user )
-              if ! wb_nomad vault "${entity}" enabled
-              then
-                wb_nomad vault "${entity}" login
-              fi
-              local client_token
-              client_token=$(jq -r '.auth.client_token' "${login_file}")
-              VAULT_TOKEN="${client_token}" vault kv get \
-                --address="${vault_address}"             \
-                -non-interactive                         \
-                -format=json                             \
-                kv/postgrest/perf                        \
-              | jq -r .data.data.postgrestDbUser
-            ;;
-            pg-pass )
-              if ! wb_nomad vault "${entity}" enabled
-              then
-                wb_nomad vault "${entity}" login
-              fi
-              local client_token
-              client_token=$(jq -r '.auth.client_token' "${login_file}")
-              VAULT_TOKEN="${client_token}" vault kv get \
-                --address="${vault_address}"             \
-                -non-interactive                         \
-                -format=json                             \
-                kv/postgrest/perf                        \
-              | jq -r .data.data.postgrestDbPass
-            ;;
-####### vault -> ci -> * )######################################################
+####### ssh -> key -> * )#######################################################
             * )
               usage_nomad
             ;;
           esac
         ;;
-####### vault -> world )########################################################
-        world )
-          mkdir -p "${vault_dir}"/world
-          local login_file="${vault_dir}"/world/login.json
-          local vault_address="https://vault.world.dev.cardano.org"
-          local action=${1:?$usage}; shift
-          case "${action}" in
-            login )
-              msg "First create and copy your GitHub token by doing: "
-              msg "Your profile -> Settings -> Developer Settings -> Tokens (Classic) -> Generate New Token (Classic)"
-              msg "and create a new token with only the \"read:org\" permission."
-              read -p "Hit enter to continue ..."
-              vault login                             \
-                -address="${vault_address}"           \
-                -method=github -path=github-employees \
-                -no-store -format=json                \
-              > "${login_file}"
-            ;;
-            enabled )
-              if test -f "${login_file}"
-              then
-                local client_token
-                client_token=$(jq -r '.auth.client_token' "${login_file}")
-                local token_lookup_response
-                if token_lookup_response=$(VAULT_TOKEN="${client_token}" vault token lookup -address="${vault_address}" -namespace=perf -format=json)
-                then
-                  # TODO: I need to check the expiration time?
-                  # echo "${token_lookup_response}" | jq -r .data.expire_time
-                  # 2023-02-19T13:07:26.125306646Z
-                  true
-                else
-                  fatal "Are you logged in to Vault? Call 'wb nomad vault ${entity} login' with your IOHK GitHub token (classic)"
-                fi
-              else
-                false
-              fi
-            ;;
-            nomad-token )
-              if ! wb_nomad vault "${entity}" enabled
-              then
-                wb_nomad vault "${entity}" login
-              fi
-              local client_token
-              client_token=$(jq -r '.auth.client_token' "${login_file}")
-              local nomad_token_json
-              if nomad_token_json=$(VAULT_TOKEN="${client_token}" vault read -address="${vault_address}" -non-interactive -format=json nomad/creds/perf)
-              then
-                echo "${nomad_token_json}" | jq -r .data.secret_id
-              else
-                fatal "Unable to fetch Nomad token from Vault"
-              fi
-            ;;
-            aws-s3-credentials )
-              if ! wb_nomad vault "${entity}" enabled
-              then
-                wb_nomad vault "${entity}" login
-              fi
-              local client_token
-              client_token=$(jq -r '.auth.client_token' "${login_file}")
-              VAULT_TOKEN="${client_token}" vault read \
-                --address="${vault_address}"           \
-                -format=json                           \
-                aws/creds/perf
-            ;;
-####### vault -> world -> * )###################################################
-            * )
-              usage_nomad
-            ;;
-          esac
+####### ssh -> config )####################################################
+        config )
+          local file_path="${ssh_dir}"/config
+          if ! test -f "${file_path}"
+          then
+cat > "${file_path}" << EOL
+Host *
+  StrictHostKeyChecking    accept-new
+  GlobalKnownHostsFile     $(wb nomad ssh known_hosts)
+  UserKnownHostsFile       $(wb nomad ssh known_hosts)
+  PasswordAuthentication   no
+  PubKeyAuthentication     yes
+  PreferredAuthentications publickey
+  IdentitiesOnly           yes
+  IdentityFile             $(wb nomad ssh key user)
+  Compression              yes
+  TCPKeepAlive             no
+  ServerAliveInterval      15
+  ServerAliveCountMax      4
+  ControlMaster            auto
+  ControlPath              ${ssh_dir}/%h-%p-%r
+  ControlPersist           15
+EOL
+          fi
+          echo "${file_path}"
         ;;
-####### vault -> * )############################################################
+####### ssh -> known_hosts )####################################################
+        known_hosts )
+          local file_path="${ssh_dir}"/known_hosts
+          if ! test -f "${file_path}"
+          then
+            touch "${file_path}"
+          fi
+          echo "${file_path}"
+        ;;
+####### ssh -> * )##############################################################
         * )
           usage_nomad
         ;;
       esac
+    ;;
+################################################################################
+### clients ) ##################################################################
+################################################################################
+    clients )
+      local usage="USAGE: wb nomad ${op} ready|machines|ssh"
+      local subop=${1:?$usage}; shift
+      case "${subop}" in
+###### clients -> ready )#######################################################
+      ready )
+        local usage="USAGE: wb nomad clients ${subop}"
+        # Fetch the status of "perf" nodes that are "ready".
+        # If a node is removed status is "down" and will still show its details.
+        local nomad_class
+        nomad_class="$(jq -r .cluster.nomad.class "${WB_SHELL_PROFILE_DATA}"/profile.json)"
+        local perf_nodes
+        perf_nodes="$(nomad node status -filter "Status==\"ready\" and NodeClass==\"${nomad_class}\"" -json)"
+        # Create the base JSON string but without the "attributes" because those
+        # are only available when fetching the status of individual nodes.
+        local nodes_json
+        nodes_json="$( \
+            echo "${perf_nodes}" \
+          | \
+            jq \
+              "map( {                                   \
+                  \"id\":         .ID                   \
+                , \"name\":       .Name                 \
+                , \"class\":      .NodeClass            \
+                , \"datacenter\": .Datacenter           \
+                , \"ip\":         .Address              \
+              } )"                                      \
+        )"
+        # Output the JSON string ordered by Nomad Client "id"
+        echo "${nodes_json}" | jq '. | sort_by(.id)'
+      ;;
+##### clients -> machines )#####################################################
+      machines )
+        local usage="USAGE: wb nomad clients ${subop}"
+        # Fetch the status of "perf" nodes that are "ready".
+        local nodes_json
+        nodes_json="$(wb nomad clients ready)"
+        # For each node
+        local nodes_ids
+        nodes_ids="$( \
+            echo "${nodes_json}" \
+          | \
+            jq -S -r "map(.id) | sort | join (\" \")" \
+        )"
+        for node_id in ${nodes_ids[*]}
+        do
+          # Fetch the attributes
+          local node_attributes
+          node_attributes="$(nomad node status -json "${node_id}" | jq .Attributes)"
+          # Add the attributes of this node to the JSON string
+          nodes_json="$( \
+              echo "${nodes_json}" \
+            | \
+              jq --argjson attrs "${node_attributes}" "                        \
+                  .[]                                                          \
+                |= (                                                           \
+                  if ( .id == \"${node_id}\" )                                 \
+                  then (                                                       \
+                      .attributes                                              \
+                    |=                                                         \
+                      {                                                        \
+                        \"cpu\": {                                             \
+                           \"arch\": \$attrs[\"cpu.arch\"]                     \
+                         , \"frequency\": \$attrs[\"cpu.frequency\"]           \
+                         , \"modelname\": \$attrs[\"cpu.modelname\"]           \
+                         , \"numcores\": \$attrs[\"cpu.numcores\"]             \
+                         , \"reservablecores\": \$attrs[\"cpu.reservablecores\"] \
+                         , \"totalcompute\": \$attrs[\"cpu.totalcompute\"]     \
+                        }                                                      \
+                      , \"kernel\": {                                          \
+                           \"arch\": \$attrs[\"kernel.arch\"]                  \
+                         , \"name\": \$attrs[\"kernel.name\"]                  \
+                         , \"version\": \$attrs[\"kernel.version\"]            \
+                        }                                                      \
+                      , \"memory\": {                                          \
+                           \"totalbytes\": \$attrs[\"memory.totalbytes\"]      \
+                        }                                                      \
+                      , \"os\": {                                              \
+                           \"name\": \$attrs[\"os.name\"]                      \
+                         , \"version\": \$attrs[\"os.version\"]                \
+                        }                                                      \
+                      , \"platform\": {                                        \
+                          \"aws\": {                                           \
+                              \"ami-id\": \$attrs[\"platform.aws.ami-id\"]     \
+                            , \"instance-type\": \$attrs[\"platform.aws.instance-type\"] \
+                            , \"placement\": {                                 \
+                                \"availability-zone\": \$attrs[\"platform.aws.placement.availability-zone\"] \
+                            }                                                  \
+                          }                                                    \
+                        }                                                      \
+                      , \"unique\": {                                          \
+                          \"hostname\": \$attrs[\"unique.hostname\"]           \
+                        , \"network\": {                                       \
+                              \"ip-address\": \$attrs[\"unique.network.ip-address\"] \
+                          }                                                    \
+                        , \"platform\": {                                      \
+                              \"aws\": {                                       \
+                                  \"hostname\":        \$attrs[\"unique.platform.aws.hostname\"       ] \
+                                , \"instance-id\":     \$attrs[\"unique.platform.aws.instance-id\"    ] \
+                                , \"local-hostname\":  \$attrs[\"unique.platform.aws.local-hostname\" ] \
+                                , \"local-ipv4\":      \$attrs[\"unique.platform.aws.local-ipv4\"     ] \
+                                , \"mac\":             \$attrs[\"unique.platform.aws.mac\"            ] \
+                                , \"public-hostname\": \$attrs[\"unique.platform.aws.public-hostname\"] \
+                                , \"public-ipv4\":     \$attrs[\"unique.platform.aws.public-ipv4\"    ] \
+                              }                                                \
+                          }                                                    \
+                        }                                                      \
+                      }                                                        \
+                  ) else (                                                     \
+                    .                                                          \
+                  ) end                                                        \
+                )                                                              \
+              " \
+          )"
+        done
+        # Output the JSON string ordered by Nomad Client "id"
+        echo "${nodes_json}" | jq '. | sort_by(.id)'
+      ;;
+##### clients -> ssh )##########################################################
+      ssh )
+        local usage="USAGE: wb nomad nodes ${subop} all|producers|explorer"
+        local key=${1:?$usage}; shift
+        case "${key}" in
+######### clients -> ssh -> all )###############################################
+          all )
+            # Fetch the status of "perf" nodes that are "ready".
+            local nodes_json
+            nodes_json="$(wb nomad clients ready)"
+            # For each node
+            local nodes_names
+            nodes_names="$( \
+                echo "${nodes_json}" \
+              | \
+                jq -S -r "map(.name) | sort | join (\" \")" \
+            )"
+            local jobs_array=()
+            for node_name in ${nodes_names[*]}
+            do
+              wb nomad clients ssh "${node_name}" "$@" &
+              jobs_array+=("$!")
+            done
+            if test -n "${jobs_array:-}" # If = () "unbound variable" error
+            then
+              if ! wait_all "${jobs_array[@]}"
+              then
+                echo "ERROR"
+              fi
+            fi
+          ;;
+######### clients -> ssh -> producers )#########################################
+          producers )
+            # Fetch the status of "perf" nodes that are "ready".
+            local nodes_json
+            nodes_json="$(wb nomad clients ready)"
+            # For each node
+            local nodes_names
+            nodes_names="$( \
+                echo "${nodes_json}" \
+              | \
+                jq -S -r "map(select(.name != \"explorer\")) | map(.name) | sort | join (\" \")" \
+            )"
+            local jobs_array=()
+            for node_name in ${nodes_names[*]}
+            do
+              wb nomad clients ssh "${node_name}" "$@" &
+              jobs_array+=("$!")
+            done
+            if test -n "${jobs_array:-}" # If = () "unbound variable" error
+            then
+              if ! wait_all "${jobs_array[@]}"
+              then
+                echo "ERROR"
+              fi
+            fi
+          ;;
+######### clients -> ssh -> * )#################################################
+          * )
+            ssh                                       \
+              -n -t -t                                \
+              -i ~/.ssh/perf_cluster.key              \
+              -o StrictHostKeyChecking=no             \
+              -o VisualHostKey=no                     \
+              -o LogLevel=QUIET                       \
+              root@"${key}".perf.aws.iohkdev.io "$@"
+          ;;
+####### clients -> ssh )########################################################
+        esac
+      ;;
+##### clients -> storage-kb-available )#########################################
+      storage-kb-available )
+        local usage="USAGE: wb nomad clients ${subop} NAME"
+        local node_name=${1:?$usage}; shift
+          wb nomad clients ssh "${node_name}" df \
+        | grep /dev/disk/by-label/nixos | tr -s " " | cut -d" " -f4
+      ;;
+####### clients -> * )##########################################################
+        * )
+          usage_nomad
+        ;;
+      esac # clients
     ;;
 ################################################################################
 ### agents ) ###################################################################
@@ -328,10 +421,9 @@ wb_nomad() {
       case "${subop}" in
 ####### agents -> start )#######################################################
         start )
-          local usage="USAGE:wb nomad ${op} ${subop} SERVER-NAME CLIENT-NAME DRIVER-NAME"
+          local usage="USAGE:wb nomad ${op} ${subop} SERVER-NAME CLIENT-NAME"
           local server_name=${1:?$usage}; shift
           local client_name=${1:?$usage}; shift
-          local task_driver=${1:?$usage}; shift
           # Create config files for the server and start it.
           if ! wb_nomad server configure "${server_name}" 4646 4647 4648
           then
@@ -341,56 +433,39 @@ wb_nomad() {
           then
             fatal "Failed to start Nomad server \"${server_name}\""
           fi
-          # Set up the podman driver and start it if it's needed.
-          if test "${task_driver}" = "podman"
-          then
-            # Create config files for the client and the Podman plugin/task driver.
-            wb_nomad plugin nomad-driver-podman start
-          fi
           # Create config files for the client and start it.
           # WARNING: Actually the client is configured to connect to all the
           # running servers, so if there are no servers ready the Nomad
           # cluster state is uknown (at least to me with the actual config).
-          if ! wb_nomad client configure "${client_name}" 14646 14647 14648 "${task_driver}"
+          if ! wb_nomad client configure "${client_name}" 14646 14647 14648
           then
             wb_nomad server stop "${server_name}" || true
             fatal "Failed to configure Nomad client \"${client_name}\""
           fi
           # Only the exec driver must be run as root.
-          if test "${task_driver}" = "exec"
+          # Pass the "root prefix" (command prefix)
+          if ! wb_nomad client start "${client_name}" "sudo "
           then
-            # Pass the "root prefix" (command prefix)
-            if ! wb_nomad client start "${client_name}" "sudo "
-            then
-              wb_nomad server stop "${server_name}" || true
-              fatal "Failed to start Nomad agents"
-            fi
-          else
-            if ! wb_nomad client start "${client_name}"
-            then
-              wb_nomad plugin nomad-driver-podman stop || true
-              wb_nomad server stop "${server_name}" || true
-              fatal "Failed to start Nomad agents"
-            fi
+            wb_nomad server stop "${server_name}" || true
+            fatal "Failed to start Nomad agents"
           fi
         ;;
 ####### agents -> stop )########################################################
         stop )
-          local usage="USAGE:wb nomad ${op} ${subop} SERVER-NAME CLIENT-NAME DRIVER-NAME"
+          local usage="USAGE:wb nomad ${op} ${subop} SERVER-NAME CLIENT-NAME"
           local server_name=${1:?$usage}; shift
           local client_name=${1:?$usage}; shift
-          local task_driver=${1:?$usage}; shift
           # Collect garbage to avoid orphaned mounts
           # https://support.hashicorp.com/hc/en-us/articles/360000654467-Removing-Orphaned-Mounts-from-Nomad-Allocation-Directory
           nomad system gc 2>&1 >/dev/null || true
           # Stop client
-          wb_nomad client stop "${client_name}" || true
-          if test "${task_driver}" = "podman"
-          then
-            wb_nomad plugin nomad-driver-podman stop || true
-          fi
+            wb_nomad client stop "${client_name}" \
+          ||                                      \
+            msg "$(red "Failed to stop Nomad client \"${client_name}\"")"
           # Stop server
-          wb_nomad server stop "${server_name}" || true
+            wb_nomad server stop "${server_name}" \
+          ||                                      \
+            msg "$(red "Failed to stop Nomad server \"${server_name}\"")"
         ;;
 ####### agents -> * )###########################################################
         * )
@@ -431,7 +506,7 @@ wb_nomad() {
           # can represent an abnormal exit / uknown state!
           if wb_nomad server is-running "${name}"
           then
-            msg "$(red "FATAL: Nomad server \"${name}\" is already running or in an uknown state, call 'wb nomad server stop ${name}' or 'wb nomad nuke' first")"
+            msg "$(red "FATAL: Nomad server \"${name}\" is already running or in an unknown state, call 'wb nomad server stop ${name}' or 'wb nomad nuke' first")"
             return 1
           else
             local state_dir=$(wb_nomad server state-dir-path "${name}")
@@ -482,7 +557,9 @@ wb_nomad() {
           local usage="USAGE: wb nomad ${op} ${subop} SERVER-NAME"
           local name=${1:?$usage}; shift
           local config_file=$(wb_nomad server config-file-path "${name}")
-          pgrep --delimiter ' ' --full "nomad.*${config_file}.*"
+          # Make it Mac compatible by only using shorthand options:
+          # `-d` instead of `--delimiter` and `-f` instead of `--full`
+          pgrep -d ' ' -f "nomad.*${config_file}.*"
           # Clean up is only done by the `stop` subcommand!
           # No `rm "${pid_file}"` if not running.
         ;;
@@ -493,7 +570,9 @@ wb_nomad() {
           local pid_file=$(wb_nomad server pid-filepath "${name}")
           local config_file=$(wb_nomad server config-file-path "${name}")
           # It's running if we haven't PROPERLY stopped it or PIDs exist!
-          test -f "${pid_file}" || test $(pgrep --count --full "nomad.*${config_file}.*") -gt 0
+          # `pgrep` piped to `wc -l` instead "--count" to make it Mac comptible
+          # Also only shorthand options: like `-f` instead of `--full`
+          test -f "${pid_file}" || test $(pgrep -f "nomad.*${config_file}.*" | wc -l) -gt 0
         ;;
 ####### server -> start )#######################################################
         start )
@@ -503,7 +582,7 @@ wb_nomad() {
           # Checks
           if wb_nomad server is-running "${name}"
           then
-            msg "$(red "FATAL: Nomad server \"${name}\" is already running or in an uknown state, call 'wb nomad server stop ${name}' or 'wb nomad nuke' first")"
+            msg "$(red "FATAL: Nomad server \"${name}\" is already running or in an unknown state, call 'wb nomad server stop ${name}' or 'wb nomad nuke' first")"
             return 1
           fi
           # Start `nomad` server".
@@ -535,7 +614,7 @@ wb_nomad() {
               msg "$(yellow "port \"127.0.0.1:${http_port}\" not ready")"
               msg "$(yellow "Check logs (${state_dir})")"
               # Let the "stop" subcommand clean everything!
-              wb_nomad server stop "${name}"
+              wb_nomad server stop "${name}" || true
               return 1
             fi
             echo -ne "\b\b\b"
@@ -549,30 +628,36 @@ wb_nomad() {
           local name=${1:?$usage}; shift
           # Stop Nomad server by name
           local pids=$(wb_nomad server pids-array "${name}")
-          for pid_number in ${pids[@]}
-          do
-            msg "$(blue Stopping) Nomad $(yellow "server \"${name}\"") process PID ${pid_number} ..."
-            if ! kill -SIGINT "${pid_number}" >/dev/null 2>&1
-            then
-              msg "$(red "Killing PID ${pid_number} failed")"
-            else
-              # Wait 15 seconds for the process to fully exit or kill it.
-              msg "$(blue Wait) up to 15 seconds for PID ${pid_number} to exit"
-              timeout 15 tail --pid="${pid_number}" -f /dev/null || true
-              if kill -0 "${pid_number}" >/dev/null 2>&1
-              then
-                msg "$(yellow "Timeout killing PID ${pid_number}, trying SIGKILL")"
-                kill -SIGKILL "${pid_number}" >/dev/null 2>&1 || true
-              fi
-            fi
-          done
-          # Remove PID file if process was really killed (or wasn't running)!
-          if test -z $(wb_nomad server pids-array "${name}")
+          if test -z "${pids}"
           then
-            local pid_file=$(wb_nomad server pid-filepath "${name}")
-            if test -f "${pid_file}"
+            msg "$(red "Found no running Nomad server process to stop, manually clean possible remaining processes")"
+            return 1
+          else
+            for pid_number in ${pids[@]}
+            do
+              msg "$(blue Stopping) Nomad $(yellow "server \"${name}\"") process PID ${pid_number} ..."
+              if ! kill -SIGINT "${pid_number}" >/dev/null 2>&1
+              then
+                msg "$(red "Killing PID ${pid_number} failed")"
+              else
+                # Wait 15 seconds for the process to fully exit or kill it.
+                msg "$(blue Wait) up to 15 seconds for PID ${pid_number} to exit"
+                timeout 15 tail --pid="${pid_number}" -f /dev/null || true
+                if kill -0 "${pid_number}" >/dev/null 2>&1
+                then
+                  msg "$(yellow "Timeout killing PID ${pid_number}, trying SIGKILL")"
+                  kill -SIGKILL "${pid_number}" >/dev/null 2>&1 || true
+                fi
+              fi
+            done
+            # Remove PID file if all processes were killed!
+            if test -z "$(wb_nomad server pids-array "${name}")"
             then
-              rm "${pid_file}"
+              local pid_file=$(wb_nomad server pid-filepath "${name}")
+              if test -f "${pid_file}"
+              then
+                rm "${pid_file}"
+              fi
             fi
           fi
         ;;
@@ -617,21 +702,18 @@ wb_nomad() {
         ;;
 ####### client -> configure )###################################################
         configure )
-          local usage="USAGE: wb nomad ${op} ${subop} CLIENT-NAME HTTP-PORT RPC-PORT SERV-PORT DRIVER-NAME [GENESIS-DIR]"
+          local usage="USAGE: wb nomad ${op} ${subop} CLIENT-NAME HTTP-PORT RPC-PORT SERV-PORT [GENESIS-DIR]"
           local name=${1:?$usage}; shift
           # Ports
           local http_port=${1:?$usage}; shift
           local rpc_port=${1:?$usage}; shift
           local serv_port=${1:?$usage}; shift
-          # Unlike the server, the client can have different task drivers!
-          local task_driver=${1:?$usage}; shift
           # Checks
           # Assume the presence of the PID file means "running" because it
           # can represent an abnormal exit / uknown state!
           if wb_nomad client is-running "${name}"
           then
-            # When reusing, remember to check that client is running with
-            # the needed task driver!
+            # When reusing, remember to check that client is running!
             msg "$(red "FATAL: Nomad client \"${name}\" is already running or in an uknown state, call 'wb nomad client stop ${name}' or 'wb nomad nuke' first")"
             return 1
           else
@@ -643,30 +725,9 @@ wb_nomad() {
             mkdir -p "${state_dir}"/data/{client,plugins,alloc}
             # Store the ports config
             echo "{\"http\": ${http_port}, \"rpc\": ${rpc_port}, \"serv\": ${serv_port}}" > "${state_dir}"/ports.json
-            # Store tast driver parameter
-            echo "${task_driver}" > "${state_dir}"/task_driver
-            # Task driver specific client configuration
-            if test "${task_driver}" = "podman"
-            then
-              local podman_socket_path=$(wb_nomad plugin nomad-driver-podman socket-path)
-              # Podman Task Driver - Client Requirements:
-              ## "Ensure that Nomad can find the plugin, refer to `plugin_dir`."
-              ### https://www.nomadproject.io/plugins/drivers/podman#client-  requirements
-              ## On every call to `wb nomad client configure` the
-              ## available `nomad-driver-podman` is replaced.
-              # TODO: Somehow move this logic to `wb nomad plugin`
-              rm -f "${state_dir}"/data/plugins/nomad-driver-podman
-              ln -s -f "$(which nomad-driver-podman)" "${state_dir}"/data/plugins/nomad-driver-podman
-              # Create configuration file
-              nomad_create_client_config "${name}" \
-                "${http_port}" "${rpc_port}" "${serv_port}" \
-                "${task_driver}" "${podman_socket_path}"
-            else
-              # Create configuration file
-              nomad_create_client_config "${name}" \
-                "${http_port}" "${rpc_port}" "${serv_port}" \
-                "${task_driver}"
-            fi
+            # Create configuration file
+            nomad_create_client_config "${name}" \
+              "${http_port}" "${rpc_port}" "${serv_port}"
           fi
         ;;
 ####### client -> port )########################################################
@@ -704,7 +765,9 @@ wb_nomad() {
           local usage="USAGE: wb nomad ${op} ${subop} CLIENT-NAME"
           local name=${1:?$usage}; shift
           local config_file=$(wb_nomad client config-file-path "${name}")
-          pgrep --delimiter ' ' --full "nomad.*${config_file}.*"
+          # Make it Mac compatible by only using shorthand options:
+          # `-d` instead of `--delimiter` and `-f` instead of `--full`
+          pgrep -d ' ' -f "nomad.*${config_file}.*"
           # Clean up is only done by the `stop` subcommand!
           # No `rm "${pid_file}"` if not running.
         ;;
@@ -715,7 +778,9 @@ wb_nomad() {
           local pid_file=$(wb_nomad client pid-filepath "${name}")
           local config_file=$(wb_nomad client config-file-path "${name}")
           # It's running if we haven't PROPERLY stopped it or PIDs exist!
-          test -f "${pid_file}" || test $(pgrep --count --full "nomad.*${config_file}.*") -gt 0
+          # `pgrep` piped to `wc -l` instead "--count" to make it Mac comptible
+          # Also only shorthand options: like `-f` instead of `--full`
+          test -f "${pid_file}" || test $(pgrep -f "nomad.*${config_file}.*" | wc -l) -gt 0
         ;;
 ####### client -> start )#######################################################
         # Agent is started with `-network-interface lo` if not without a proper
@@ -787,7 +852,7 @@ wb_nomad() {
               msg "$(yellow "port \"127.0.0.1:${http_port}\" not ready")"
               msg "$(yellow "Check logs (${state_dir})")"
               # Let the "stop" subcommand clean everything!
-              wb_nomad client stop "${name}"
+              wb_nomad client stop "${name}" || true
               return 1
             fi
             echo -ne "\b\b\b"
@@ -796,7 +861,6 @@ wb_nomad() {
           # client as eligible
           local i=0 patience=25
           msg "$(blue Waiting) until the Nomad server sees the client (${patience}s) ..."
-          local ans=""
           until nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq -r '.[0].Status' | grep --quiet "^ready"
           do printf "%3d" $i; sleep 1
             i=$((i+1))
@@ -808,7 +872,7 @@ wb_nomad() {
               msg "$(yellow "Nomad client not connected to Nomad server")"
               msg "$(yellow "Check logs (${state_dir})")"
               # Let the "stop" subcommand clean everything!
-              wb_nomad client stop "${name}"
+              wb_nomad client stop "${name}" || true
               return 1
             fi
             echo -ne "\b\b\b"
@@ -819,36 +883,18 @@ wb_nomad() {
           # TODO: Configure the node?
           # nomad node eligibility -enable "${client_id}"
           # nomad node drain -disable "${client_id}"
-          local task_driver=$(cat "${state_dir}"/task_driver)
-          if test "${task_driver}" == "exec"
+          # Look for "Drivers":{"exec":  {"Detected":true,"Healthy":true}}
+          if ! test $(nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq '.[0].Drivers.exec.Detected') = "true"
           then
-            # Look for "Drivers":{"exec":  {"Detected":true,"Healthy":true}}
-            if ! test $(nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq '.[0].Drivers.exec.Detected') = "true"
-            then
-              # Not using `fatal` here, let the caller decide!
-              msg "$(red "FATAL: Task driver \"exec\" was not detected")"
-              return 1
-            fi
-            if ! test $(nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq '.[0].Drivers.exec.Healthy') = "true"
-            then
-              # Not using `fatal` here, let the caller decide!
-              msg "$(red "FATAL: Task driver \"exec\" is not healthy")"
-              return 1
-            fi
-          else
-            # Look for "Drivers":{"podman":{"Detected":true,"Healthy":true}}
-            if ! test $(nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq '.[0].Drivers.podman.Detected') = "true"
-            then
-              # Not using `fatal` here, let the caller decide!
-              msg "$(red "FATAL: Task driver \"podman\" was not detected")"
-              return 1
-            fi
-            if ! test $(nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq '.[0].Drivers.podman.Healthy') = "true"
-            then
-              # Not using `fatal` here, let the caller decide!
-              msg "$(red "FATAL: Task driver \"podman\" is not healthy")"
-              return 1
-            fi
+            # Not using `fatal` here, let the caller decide!
+            msg "$(red "FATAL: Task driver \"exec\" was not detected")"
+            return 1
+          fi
+          if ! test $(nomad node status -filter "\"workbench-nomad-client-${name}\" in Name" -json | jq '.[0].Drivers.exec.Healthy') = "true"
+          then
+            # Not using `fatal` here, let the caller decide!
+            msg "$(red "FATAL: Task driver \"exec\" is not healthy")"
+            return 1
           fi
           true
           # TODO: Check all the clients connected to the server!
@@ -870,42 +916,45 @@ wb_nomad() {
           fi
           # Stop Nomad client by name
           local pids=$(wb_nomad client pids-array "${name}")
-          for pid_number in ${pids[@]}
-          do
-            msg "$(blue Stopping) Nomad $(yellow "client \"${name}\"") process PID ${pid_number} ..."
-            local cmd_array=("${root_prefix}" "bash" "-c")
-            if ! ${cmd_array[@]} "kill -SIGINT ${pid_number}" >/dev/null 2>&1
-            then
-              msg "Killing PID ${pid_number} failed"
-            else
-              # Wait 15 seconds for the process to fully exit or kill it.
-              msg "$(blue Wait) up to 30 seconds for PID ${pid_number} to exit"
-              timeout 30 tail --pid="${pid_number}" -f /dev/null || true
-              local cmd_array=("${root_prefix}" "bash" "-c")
-              if ${cmd_array[@]} "kill -0 ${pid_number}" >/dev/null 2>&1
-              then
-                msg "$(yellow "Timeout killing PID ${pid_number}, trying SIGKILL")"
-                local cmd_array=("${root_prefix}" "bash" "-c")
-                ${cmd_array[@]} "kill -SIGKILL ${pid_number}" >/dev/null 2>&1 || true
-              fi
-            fi
-          done
-          # Remove PID file if process was really killed (or wasn't running)!
-          if test -z $(wb_nomad client pids-array "${name}")
+          if test -z "${pids}"
           then
-            # WHY? The client is keeping some directories mounted!
-            # Maybe because of the 2 processes it creates (testes running
-            # only one client instance), I may be killing a child first?
-            # Or the timeout needs more time?
-            msg "Unmount any folders left by the client"
-            local cmd_array=("${root_prefix}" "bash" "-c")
-            # Command fails when there's nothing to umount!
-            grep "${state_dir}" /proc/mounts | cut -f2 -d" " | sort -r | ${cmd_array[@]} 'xargs -I "{}" umount -n "{}"' || true
-            # Now mark as "not running"
-            local pid_file=$(wb_nomad client pid-filepath "${name}")
-            if test -f "${pid_file}"
+            msg "$(red "Found no running Nomad client process to stop, manually clean possible remaining processes")"
+            return 1
+          else
+            for pid_number in ${pids[@]}
+            do
+              msg "$(blue Stopping) Nomad $(yellow "client \"${name}\"") process PID ${pid_number} ..."
+              local cmd_array=("${root_prefix}" "bash" "-c")
+              if ! ${cmd_array[@]} "kill -SIGINT ${pid_number}" >/dev/null 2>&1
+              then
+                msg "Killing PID ${pid_number} failed"
+              else
+                # Wait 15 seconds for the process to fully exit or kill it.
+                msg "$(blue Wait) up to 30 seconds for PID ${pid_number} to exit"
+                timeout 30 tail --pid="${pid_number}" -f /dev/null || true
+                local cmd_array=("${root_prefix}" "bash" "-c")
+                if ${cmd_array[@]} "kill -0 ${pid_number}" >/dev/null 2>&1
+                then
+                  msg "$(yellow "Timeout killing PID ${pid_number}, trying SIGKILL")"
+                  local cmd_array=("${root_prefix}" "bash" "-c")
+                  ${cmd_array[@]} "kill -SIGKILL ${pid_number}" >/dev/null 2>&1 || true
+                fi
+              fi
+            done
+            # Remove PID file if all processes were killed!
+            if test -z "$(wb_nomad client pids-array "${name}")"
             then
-              rm "${pid_file}"
+              # WHY? The client is keeping some directories mounted!
+              msg "Unmount any folders left by the client"
+              local cmd_array=("${root_prefix}" "bash" "-c")
+              # Command fails when there's nothing to umount!
+              grep "${state_dir}" /proc/mounts | cut -f2 -d" " | sort -r | ${cmd_array[@]} 'xargs -I "{}" umount -n "{}"' || true
+              # Now mark as "not running"
+              local pid_file=$(wb_nomad client pid-filepath "${name}")
+              if test -f "${pid_file}"
+              then
+                rm "${pid_file}"
+              fi
             fi
           fi
         ;;
@@ -936,125 +985,6 @@ wb_nomad() {
           usage_nomad
         ;;
       esac # client
-    ;;
-################################################################################
-### plugin ) ###################################################################
-################################################################################
-    plugin )
-      local usage="USAGE: wb nomad ${op} nomad-driver-podman"
-      local plugin=${1:?$usage}; shift
-      case "${plugin}" in
-####### plugin -> nomad-driver-podman )#########################################
-        nomad-driver-podman )
-          local usage="USAGE: wb nomad ${op} ${plugin}"
-          local subop=${1:?$usage}; shift
-          case "$subop" in
-########### plugin -> nomad-driver-podman -> socket-path )######################
-            socket-path )
-              # Socket of the process that connects nomad-driver-podman with podman.
-              # Can't reside inside "$dir", can't use a path longer than 108 characters!
-              # See: https://man7.org/linux/man-pages/man7/unix.7.html
-              # char        sun_path[108];            /* Pathname */
-              echo "${XDG_RUNTIME_DIR:-/run/user/$UID}/workbench-podman.sock"
-            ;;
-########### plugin -> nomad-driver-podman -> pid-filepath )#####################
-            pid-filepath )
-              local plugin_dir="$(wb_nomad dir-path plugin)"
-              echo "${plugin_dir}"/nomad-driver-podman.pid
-            ;;
-########### plugin -> nomad-driver-podman -> pid )##############################
-            pid )
-              local pid_file=$(wb_nomad plugin nomad-driver-podman pid-filepath)
-              if test -f $pid_file
-              then
-                local pid_number=$(cat "${pid_file}")
-                # Check if the process is running
-                if kill -0 "${pid_number}" >/dev/null 2>&1
-                then
-                  echo "${pid_number}"
-                else
-                  rm "${pid_file}"
-                  false
-                fi
-              else
-                false
-              fi
-            ;;
-########### plugin -> nomad-driver-podman -> is-running )#######################
-            is-running )
-              wb_nomad plugin nomad-driver-podman pid >/dev/null
-            ;;
-########### plugin -> nomad-driver-podman -> start )############################
-            # Start the `podman` API service needed by `nomad`.
-            start ) # TODO: Check that it's not already running!
-              msg "Preparing podman API service for nomad driver \`nomad-driver-podman\` ..."
-              local podman_socket_path=$(wb_nomad plugin nomad-driver-podman socket-path)
-        #      if test -S "$socket"
-        #      then
-        #          msg "Podman API service was already running"
-        #      else
-                # The session is kept open waiting for a new connection for 60 seconds.
-                # https://discuss.hashicorp.com/t/nomad-podman-rhel8-driver-difficulties/21877/4
-                # `--time`: Time until the service session expires in seconds. Use 0
-                # to disable the timeout (default 5).
-                local pid_file=$(wb_nomad plugin nomad-driver-podman pid-filepath)
-                podman system service --time 60 "unix://$podman_socket_path" &
-                local pid_number="$!"
-                echo "${pid_number}" > "${pid_file}"
-                local i=0 patience=5
-                while test ! -S "$podman_socket_path"
-                do printf "%3d" $i; sleep 1
-                  i=$((i+1))
-                  if test $i -ge $patience
-                  then echo
-                      progress "nomad-driver-podman" "$(red FATAL):  workbench:  nomad-driver-podman:  patience ran out after ${patience}s, socket $podman_socket_path"
-                      fatal "nomad-driver-podman startup did not succeed:  check logs"
-                      rm "${pid_file}"
-                  fi
-                  echo -ne "\b\b\b"
-                done >&2
-        #      fi
-              msg "Podman API service started"
-            ;;
-########### plugin -> nomad-driver-podman -> stop )#############################
-            stop )
-              local pid_number
-              local pid_file=$(wb_nomad plugin nomad-driver-podman pid-filepath "${name}")
-              # Call without `local` to obtain the subcommand's return code.
-              if pid_number=$(wb_nomad plugin nomad-driver-podman pid)
-              then
-                msg "Killing nomad-driver-podman (PID ${pid_number}) ..."
-                if ! kill -SIGINT "${pid_number}"
-                then
-                  fatal \
-                    "Killing nomad-driver-podman failed, \
-                    is PID \"${pid_number}\" (${pid_file}) running?"
-                else
-                  # Wait 15 seconds for the process to fully exit or kill it.
-                  if ! timeout 15 tail --pid="${pid_number}" -f /dev/null
-                  then
-                    kill -SIGKILL "${pid_number}" || true
-                  fi
-                fi
-                # Remove PID file
-                rm "${pid_file}"
-              else
-                msg "nomad-driver-podman API service is not running"
-                # If a PID file was already there it's not removed!
-                false
-              fi
-            ;;
-########### plugin -> nomad-driver-podman -> * )################################
-            * )
-              usage_nomad
-            ;;
-          esac  # plugin -> nomad-driver-podman
-        ;;
-####### plugin -> * )###########################################################
-        * )
-          usage_nomad
-        ;;
-      esac # plugin
     ;;
 ################################################################################
 ### rsync ) ####################################################################
@@ -1143,7 +1073,9 @@ EOF
         pids-array )
           local usage="USAGE: wb nomad ${op} ${subop}"
           local state_dir=$(wb_nomad webfs state-dir-path)
-          pgrep --delimiter ' ' --full "webfsd.*${state_dir}"/webfsd.log
+          # Make it Mac compatible by only using shorthand options:
+          # `-d` instead of `--delimiter` and `-f` instead of `--full`
+          pgrep -d ' ' -f "webfsd.*${state_dir}"/webfsd.log
           # Clean up is only done by the `stop` subcommand!
           # No `rm "${pid_file}"` if not running.
         ;;
@@ -1152,7 +1084,9 @@ EOF
           local pid_file=$(wb_nomad webfs pid-filepath)
           local state_dir=$(wb_nomad webfs state-dir-path)
           # It's running if we haven't PROPERLY stopped it or PIDs exist!
-          test -f "${pid_file}" && test $(pgrep --count --full "webfsd.*${state_dir}"/webfsd.log) -gt 0
+          # `pgrep` piped to `wc -l` instead "--count" to make it Mac comptible
+          # Also only shorthand options: like `-f` instead of `--full`
+          test -f "${pid_file}" && test $(pgrep -f "webfsd.*${state_dir}"/webfsd.log | wc -l) -gt 0
         ;;
         start )
           local usage="USAGE: wb nomad ${op} ${subop}"
@@ -1192,44 +1126,70 @@ EOF
       local nomad_clients_dir="$(wb_nomad dir-path client)"
       # Nuke all Nomad clients
       for client_name in $(ls "${nomad_clients_dir}"); do
+        msg "Config folder of Nomad client \"${client_name}\" found"
         if wb_nomad client is-running "${client_name}"
         then
-          wb_nomad client stop "${client_name}"
-          wb_nomad client cleanup "${client_name}"
+          msg "Nomad client \"${client_name}\" is running"
+          if wb_nomad client stop "${client_name}"
+          then
+            # Only call cleanup if stop did not fail
+            wb_nomad client cleanup "${client_name}"
+          else
+            msg "Failed to stop Nomad client \"${client_name}\", now in unknown state, manual cleanup of processes needed"
+          fi
+        else
+          msg "Nomad client \"${client_name}\" is not running"
+        fi
+        # Nuke the client's dir
+        local state_dir=$(wb_nomad client state-dir-path "${client_name}")
+        msg "Removing \"${state_dir}\" ..."
+        local root_prefix
+        if test -e "${state_dir}"/root
+        then
+          root_prefix=$(cat "${state_dir}"/root)
+        else
+          root_prefix=""
+        fi
+        local cmd_array=("${root_prefix}" "bash" "-c")
+        if ! ${cmd_array[@]} "rm -rf ${state_dir}" >/dev/null 2>&1
+        then
+          msg "Failed to remove config folder of Nomad client \"${client_name}\", now in unknown state, manual cleanup needed"
         fi
       done
-      # Nuke the nomad-driver-podman plugin
-      if wb_nomad plugin nomad-driver-podman is-running
-      then
-        wb_nomad plugin nomad-driver-podman stop
-      fi
-      local podman_socket_path=$(wb_nomad plugin nomad-driver-podman socket-path)
-      if test -S "${podman_socket_path}"
-      then
-        rm "${podman_socket_path}"
-      fi
       # Nuke all Nomad servers
       for server_name in $(ls "${nomad_servers_dir}"); do
+        msg "Config folder of Nomad server \"${server_name}\" found"
         if wb_nomad server is-running "${server_name}"
         then
-          wb_nomad server stop "${server_name}"
-          wb_nomad server cleanup "${server_name}"
+          msg "Nomad server \"${server_name}\" is running"
+          if wb_nomad server stop "${server_name}"
+          then
+            # Only call cleanup if stop did not fail
+            wb_nomad server cleanup "${server_name}"
+          else
+            msg "Failed to stop Nomad server \"${server_name}\", now in unknown state, manual cleanup of processes needed"
+          fi
+        else
+          msg "Nomad server \"${server_name}\" is not running"
+        fi
+        # Nuke the server's dir
+        local state_dir=$(wb_nomad server state-dir-path "${server_name}")
+        msg "Removing \"${state_dir}\" ..."
+        if ! rm -rf "${state_dir}" >/dev/null 2>&1
+        then
+          msg "Failed to remove config folder of Nomad server \"${server_name}\", now in unknown state, manual cleanup needed"
         fi
       done
       # Nuke the Nomad Agents' .cache dir
-      # Keep top level Nomad cache dir because it includes Vault's dirs.
-      rm -rf "${nomad_servers_dir}" >/dev/null 2>&1
+      # Keep top level Nomad cache dir because it includes webfs and ssh dirs.
       rm -rf "${nomad_clients_dir}" >/dev/null 2>&1
+      rm -rf "${nomad_servers_dir}" >/dev/null 2>&1
       # Bye HTTP server
       if wb_nomad webfs is-running
       then
         wb_nomad webfs stop
       fi
       rm -rf "$(wb_nomad webfs state-dir-path)"
-      # TODO: podman ?
-      # rm -rf ~/.local/share/containers/cache/
-      # rm -rf ~/.local/share/containers/storage/
-      # rm -rf ~/.config/containers/podman/
     ;;
 ################################################################################
 ### job ) ######################################################################
@@ -1244,7 +1204,7 @@ EOF
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
           # Post a Nomad job without "monitor" (`-detach`) mode!
-          # I don't want to have `nomad` process attached to my terminal,
+          # I don't want to have a `nomad` process attached to my terminal,
           # funny things are happening with the workbench's log output!
           ### -detach
           ### Return immediately instead of entering monitor mode. After job
@@ -1304,12 +1264,12 @@ EOF
           # Some docs on the scheduling flow:
           # https://developer.hashicorp.com/nomad/docs/concepts/scheduling/scheduling
           # Notes:
-          # 1) In "misterious" cases a new evaluation ID is given later
+          # 1) In "mysterious" cases a new evaluation ID is given later
           #    and the initial one is forgotten!
           #    For example if there are placement errors, like when the
           #    requested task driver is not available, the initial
           #    deployment stays "running" and new evaluation IDs can be
-          #    found whith the following message:
+          #    found with the following message:
           #    "StatusDescription": "created to place remaining allocations"
           #    This is weird/unintuitive to me!
           # 2) An evaluation can be marked as "complete" in the `-json`
@@ -1328,32 +1288,53 @@ EOF
             &
           jobs_array+=("$!")
           # Wait for all processes to finish or kill them if at least one fails!
-          wait_fail_any "${jobs_array[@]}" || touch "${job_file}.run/job.error"
+          wait_kill_em_all "${jobs_array[@]}" || touch "${job_file}.run/job.error"
           # Check for every possible error
           local return_code=0
-          # Any failed evaluations?
+          # Any failed evaluation(s)?
           if test -f "${job_file}.run/evaluations.error"
           then
             return_code=1
             msg "$(red "FATAL: One or more Nomad Evaluations failed!")"
             # Due to race conditions the *.error file may not be preset.
-            msg "$(yellow "See logs on: $(ls "${job_file}.run/evaluation.*.error.json" 2>/dev/null || true)")"
+            msg \
+              "$(yellow \
+                "See logs on: $( \
+                    ls "${job_file}.run/evaluation.*.error.json" 2>/dev/null \
+                  || \
+                    echo "${job_file}.run/evaluation.*.error.json" \
+                )"\
+              )"
           fi
-          # Any failed allocations?
+          # Any failed allocation(s)?
           if test -f "${job_file}.run/allocations.error"
           then
             return_code=1
             msg "$(red "FATAL: One or more Nomad Allocations failed!")"
             # Due to race conditions the *.error file may not be preset.
-            msg "$(yellow "See logs on: $(ls "${job_file}.run/allocation.*.error.json" 2>/dev/null || true)")"
+            msg \
+              "$(yellow \
+                "See logs on: $( \
+                    ls "${job_file}.run/allocation.*.error.json" 2>/dev/null \
+                  || \
+                    echo "${job_file}.run/allocation.*.error.json" \
+                )"\
+              )"
           fi
-          # Any allocation's tasks failed?
-          if test -f "${job_file}.run/tasks.*.error"
+          # Any failed allocations' task(s)?
+          if test -f "${job_file}.run/tasks.error"
           then
             return_code=1
-            msg "$(red "FATAL: One or more Nomad Allocation Tasks failed!")"
+            msg "$(red "FATAL: One or more Nomad Allocation's Tasks failed!")"
             # Due to race conditions the *.error file may not be preset.
-            msg "$(yellow "See logs on: $(ls "${job_file}.run/task.*.error.json" 2>/dev/null || true)")"
+            msg \
+              "$(yellow \
+                "See logs on: $( \
+                    ls "${job_file}.run/task.*.error.json" 2>/dev/null \
+                  || \
+                    echo "${job_file}.run/task.*.error.json" \
+                )"\
+              )"
           fi
           # Any other generic error?
           if test -f "${job_file}.run/job.error"
@@ -1368,35 +1349,43 @@ EOF
           local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME MSGOFF"
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local msgoff=${1:?$usage};   shift
           # Fetch the evaluations IDs and monitor them.
-          local job_evals_result
-          if ! job_evals_result=$(nomad eval list -json -job "${job_name}")
+          local nomad_command_stdout # Don't masquerade errors behind `local`
+          if ! nomad_command_stdout=$(nomad eval list -json -job "${job_name}")
           then
             "${msgoff}" || msg "$(red "FATAL: Command \"nomad eval list\" failed")"
-            "${msgoff}" || msg "${job_evals_result}"
+            # Error messages surely shown on stderr and this variable is empty
+            if test -n "${nomad_command_stdout}"
+            then
+              "${msgoff}" || msg "${nomad_command_stdout}"
+            fi
             # Send fatal job error signal after printing this error's messages!
             touch "${job_file}.run/job.error"
             return 1
           fi
-          local evals_array=($(echo "${job_evals_result}" | jq "map(.ID)? | join (\" \")" --raw-output))
+          # IDs Bash array with the command result if any (jq query using "?")
+          local ids_array # Don't masquerade errors behind `local`
+          ids_array=($(echo "${nomad_command_stdout}" | jq --raw-output "map(.ID)? | join (\" \")"))
           # If no evaluations start all over again
-          if test -z "${evals_array:-}"
+          if test -z "${ids_array:-}" # If = () "unbound variable" error
           then
             # But stop if any other cluster failure happens
             if test -f "${job_file}.run/job.error"
             then
+              # Monitor was not started, IDs not known, no messages to show
               return 1
             else
               sleep 1
+              # Iterate and exit with the return code of the new call
               wb_nomad job monitor-job-evals            \
                 "${job_file}" "${job_name}" "${msgoff}"
             fi
           else
             # Iterate through evaluations
             local jobs_array=()
-            "${msgoff}" || msg "Entering monitor of Nomad $(yellow "Evaluations: [${evals_array[@]}]")"
-            for eval_id in ${evals_array[*]}
+            "${msgoff}" || msg "Entering monitor of Nomad $(yellow "Evaluation(s) [${ids_array[@]}]")"
+            for eval_id in ${ids_array[*]}
             do
               # Create file "evaluations.error" is any evaluation fails
                   wb_nomad job monitor-eval-id               \
@@ -1408,19 +1397,16 @@ EOF
               jobs_array+=("$!")
             done
             # Wait for all processes to finish or kill them if at least one fails!
-            if ! wait_fail_any "${jobs_array[@]}" || test -f "${job_file}.run/evaluations.error"
+            if ! wait_kill_em_all "${jobs_array[@]}" || test -f "${job_file}.run/evaluations.error"
             then
-              "${msgoff}" || msg "$(red "Exiting monitor of Nomad Evaluations [${evals_array[@]}] due to errors")"
+              "${msgoff}" || msg "$(red "Exiting monitor of Nomad Evaluation(s) [${ids_array[@]}] due to errors")"
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
             else
-              # If nobody else failed!
-              if ! test -f "${job_file}.run/job.error"
-              then
-                touch "${job_file}.run/evaluations.ok"
-                "${msgoff}" || msg "Exiting monitor of Nomad Evaluations"
-              fi
+              touch "${job_file}.run/evaluations.ok"
+              "${msgoff}" || msg "Exiting monitor of Nomad Evaluation(s) [${ids_array[@]}]"
+              return 0
             fi
           fi
         ;;
@@ -1429,35 +1415,43 @@ EOF
           local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME MSGOFF"
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local msgoff=${1:?$usage};   shift
           # Fetch the allocations IDs and monitor them.
-          local job_allocs_result
-          if ! job_allocs_result=$(nomad job allocs -json "${job_name}")
+          local nomad_command_stdout # Don't masquerade errors behind `local`
+          if ! nomad_command_stdout=$(nomad job allocs -json "${job_name}")
           then
             "${msgoff}" || msg "$(red "FATAL: Command \"nomad job allocs\" failed")"
-            "${msgoff}" || msg "${job_allocs_result}"
+            # Error messages surely shown on stderr and this variable is empty
+            if test -n "${nomad_command_stdout}"
+            then
+              "${msgoff}" || msg "${nomad_command_stdout}"
+            fi
             # Send fatal job error signal after printing this error's messages!
             touch "${job_file}.run/job.error"
             return 1
           fi
-          local allocs_array=($(echo "${job_allocs_result}" | jq "map(.ID)? | join (\" \")" --raw-output))
+          # IDs Bash array with the command result if any (jq query using "?")
+          local ids_array # Don't masquerade errors behind `local`
+          ids_array=($(echo "${nomad_command_stdout}" | jq --raw-output "map(.ID)? | join (\" \")"))
           # If no allocations start all over again
-          if test -z "${allocs_array:-}"
+          if test -z "${ids_array:-}" # If = () "unbound variable" error
           then
             # But stop if any other cluster failure happens
             if test -f "${job_file}.run/job.error"
             then
+              # Monitor was not started, IDs not known, no messages to show
               return 1
             else
               sleep 1
+              # Iterate and exit with the return code of the new call
               wb_nomad job monitor-job-allocs           \
                 "${job_file}" "${job_name}" "${msgoff}"
             fi
           else
             # Iterate through allocations
             local jobs_array=()
-            "${msgoff}" || msg "Entering monitor of Nomad $(yellow "Allocations: [${allocs_array[@]}]")"
-            for alloc_id in ${allocs_array[*]}
+            "${msgoff}" || msg "Entering monitor of Nomad $(yellow "Allocation(s) [${ids_array[@]}]")"
+            for alloc_id in ${ids_array[*]}
             do
               # Create file "allocations.error" is any allocation fails
                   wb_nomad job monitor-alloc-id               \
@@ -1469,81 +1463,83 @@ EOF
               jobs_array+=("$!")
             done
             # Wait for all processes to finish or kill them if at least one fails!
-            if ! wait_fail_any "${jobs_array[@]}" || test -f "${job_file}.run/allocations.error"
+            if ! wait_kill_em_all "${jobs_array[@]}" || test -f "${job_file}.run/allocations.error"
             then
-              "${msgoff}" || msg "$(red "Exiting monitor of Nomad Allocations [${allocs_array[@]}] due to errors")"
+              "${msgoff}" || msg "$(red "Exiting monitor of Nomad Allocation(s) [${ids_array[@]}] due to errors")"
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
             else
-              # If nobody else failed!
-              if ! test -f "${job_file}.run/job.error"
-              then
-                touch "${job_file}.run/allocations.ok"
-                "${msgoff}" || msg "Exiting monitor of Nomad Allocations"
-              fi
+              touch "${job_file}.run/allocations.ok"
+              "${msgoff}" || msg "Exiting monitor of Nomad Allocation(s) [${ids_array[@]}]"
+              return 0
             fi
           fi
         ;;
-####### job -> monitor-alloc-tasks )############################################
-        monitor-alloc-tasks )
-          local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME MSGOFF"
+####### job -> monitor-job-alloc-tasks )########################################
+        monitor-job-alloc-tasks )
+          local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME ALLOC-ID MSGOFF"
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
           local alloc_id=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local msgoff=${1:?$usage};   shift
           # Fetch the allocation's status and monitor its Tasks.
-          local alloc_status_result
-          if ! alloc_status_result=$(nomad alloc status -json "${alloc_id}")
+          local nomad_command_stdout # Don't masquerade errors behind `local`
+          if ! nomad_command_stdout=$(nomad alloc status -json "${alloc_id}")
           then
             "${msgoff}" || msg "$(red "FATAL: Command \"nomad alloc status\" failed")"
-            "${msgoff}" || msg "${alloc_status_result}"
+            # Error messages surely shown on stderr and this variable is empty
+            if test -n "${nomad_command_stdout}"
+            then
+              "${msgoff}" || msg "${nomad_command_stdout}"
+            fi
             # Send fatal job error signal after printing this error's messages!
             touch "${job_file}.run/job.error"
             return 1
           fi
+          # IDs Bash array with the command result if any (jq query using "?")
+          local ids_array # Don't masquerade errors behind `local`
+          ids_array=($(echo "${nomad_command_stdout}" | jq --raw-output ".TaskStates? | keys? | join (\" \")"))
           # If no tasks start all over again
-          local tasks_array=($(echo "${alloc_status_result}" | jq ".TaskStates? | keys? | join (\" \")" --raw-output))
-          if test -z "${tasks_array:-}"
+          if test -z "${ids_array:-}" # If = () "unbound variable" error
           then
             # But stop if any other cluster failure happens
             if test -f "${job_file}.run/job.error"
             then
+              # Monitor was not started, IDs not known, no messages to show
               return 1
             else
               sleep 1
-              wb_nomad job monitor-alloc-tasks                        \
+              # Iterate and exit with the return code of the new call
+              wb_nomad job monitor-job-alloc-tasks                    \
                 "${job_file}" "${job_name}" "${alloc_id}" "${msgoff}"
             fi
           else
             # Iterate through allocation's tasks
             local jobs_array=()
-            "${msgoff}" || msg "Entering monitor of Nomad $(yellow "Tasks: [${tasks_array[@]}]")"
-            for task_name in ${tasks_array[*]}
+            "${msgoff}" || msg "Entering monitor of Nomad Allocation \"${alloc_id}\" $(yellow "Task(s) [${ids_array[@]}]")"
+            for task_name in ${ids_array[*]}
             do
-              # Create file "tasks.ALLOC_ID.error" is any task fails
+              # Create file "tasks.error" is any task fails
                   wb_nomad job monitor-alloc-id-task-name                    \
                     "${job_file}" "${job_name}" "${alloc_id}" "${task_name}" \
                     "${msgoff}"                                              \
                 ||                                                           \
-                  touch "${job_file}.run/tasks.${alloc_id}.error"            \
+                  touch "${job_file}.run/tasks.error"                        \
               &
               jobs_array+=("$!")
             done
             # Wait for all processes to finish or kill them if at least one fails!
-            if ! wait_fail_any "${jobs_array[@]}" || test -f "${job_file}.run/tasks.${alloc_id}.error"
+            if ! wait_kill_em_all "${jobs_array[@]}" || test -f "${job_file}.run/tasks.error"
             then
-              "${msgoff}" || msg "$(red "Exiting monitor of Nomad Tasks [${tasks_array[@]}] due to errors")"
+              "${msgoff}" || msg "$(red "Exiting monitor of Nomad Allocation \"${alloc_id}\" Task(s) [${ids_array[@]}] due to errors")"
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
             else
-              # If nobody else failed!
-              if ! test -f "${job_file}.run/job.error"
-              then
-                touch "${job_file}.run/tasks.${alloc_id}.ok"
-                "${msgoff}" || msg "Exiting monitor of Nomad Tasks"
-              fi
+              touch "${job_file}.run/tasks.${alloc_id}.ok"
+              "${msgoff}" || msg "Exiting monitor of Nomad Allocation \"${alloc_id}\" Task(s) [${ids_array[@]}]"
+              return 0
             fi
           fi
         ;;
@@ -1552,14 +1548,17 @@ EOF
           local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME EVAL-ID MSGOFF"
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
-          local eval_id=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local eval_id=${1:?$usage};  shift
+          local msgoff=${1:?$usage};   shift
           "${msgoff}" || msg "$(blue Checking) for \"Placement Failures\" in Nomad $(blue Evaluation) $(yellow "\"${eval_id}\"") ..."
           local status_response
           if ! status_response=$(nomad eval status "${eval_id}")
           then
             "${msgoff}" || msg "$(red "FATAL: Command \"nomad eval status\" failed")"
-            "${msgoff}" || msg "${status_response}"
+            if test -n "${status_response}"
+            then
+              "${msgoff}" || msg "${status_response}"
+            fi
             # Send fatal job error signal after printing this error's messages!
             touch "${job_file}.run/job.error"
             return 1
@@ -1577,8 +1576,8 @@ EOF
           local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME EVAL-ID MSGOFF"
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
-          local eval_id=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local eval_id=${1:?$usage};  shift
+          local msgoff=${1:?$usage};   shift
           "${msgoff}" || msg "$(blue Waiting) for Nomad $(yellow "Evaluation \"${eval_id}\"") to be \"complete\" ..."
           local status=""
           local status_response
@@ -1587,7 +1586,10 @@ EOF
             if ! status_response=$(nomad eval status -json "${eval_id}")
             then
               "${msgoff}" || msg "$(red "FATAL: Command \"nomad eval status\" failed")"
-              "${msgoff}" || msg "${status_response}"
+              if test -n "${status_response}"
+              then
+                "${msgoff}" || msg "${status_response}"
+              fi
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
@@ -1607,7 +1609,10 @@ EOF
                 # When done building Tasks run just fine but the deployment
                 # is already considered failed.
                 "${msgoff}" || msg "$(yellow "WARNING: A Nomad Deployment failed while waiting for its Evaluation")"
-                "${msgoff}" || msg "${deploy_output}"
+                if test -n "${deploy_output}"
+                then
+                  "${msgoff}" || msg "${deploy_output}"
+                fi
               fi
             fi
           done
@@ -1621,7 +1626,10 @@ EOF
               echo "${status_response}" > "${job_file}.run/evaluation.${eval_id}.error.json"
               # Show this error messages.
               "${msgoff}" || msg "$(red "FATAL: Nomad Evaluation \"${eval_id}\" failed")"
-              "${msgoff}" || msg "${status_response}"
+              if test -n "${status_response}"
+              then
+                "${msgoff}" || msg "${status_response}"
+              fi
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
@@ -1632,9 +1640,12 @@ EOF
             if ! placement_response=$(wb_nomad job check-eval-id-placement-failures "${job_file}" "${job_name}" "${eval_id}" "${msgoff}")
             then
               # Store the error response that ended the loop!
-              echo "${status_response}" > "${job_file}.run/evaluation.${eval_id}.error.json"
+              echo "${placement_response}" > "${job_file}.run/evaluation.${eval_id}.error.json"
               # Show this error messages.
-              "${msgoff}" || msg "${placement_response}"
+              if test -n "${placement_response}"
+              then
+                "${msgoff}" || msg "${placement_response}"
+              fi
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
@@ -1648,10 +1659,10 @@ EOF
 ####### job -> monitor-deploy-id )##############################################
         monitor-deploy-id )
           local usage="USAGE:wb nomad ${op} ${subop} JOB-FILE JOB-NAME DEPLOY-ID MSGOFF"
-          local job_file=${1:?$usage}; shift
-          local job_name=${1:?$usage}; shift
+          local job_file=${1:?$usage};  shift
+          local job_name=${1:?$usage};  shift
           local deploy_id=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local msgoff=${1:?$usage};    shift
           "${msgoff}" || msg "$(blue Waiting) for Nomad $(yellow "Deployment \"${deploy_id}\"") to be \"successful\" ..."
           local status=""
           local status_response
@@ -1660,7 +1671,10 @@ EOF
             if ! status_response=$(nomad deployment status -json "${deploy_id}")
             then
               "${msgoff}" || msg "$(red "FATAL: Command \"nomad deployment status\" failed")"
-              "${msgoff}" || msg "${status_response}"
+              if test -n "${status_response}"
+              then
+                "${msgoff}" || msg "${status_response}"
+              fi
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
@@ -1678,7 +1692,10 @@ EOF
               # Store the error response that ended the loop!
               echo "${status_response}" > "${job_file}.run/deployment.${deploy_id}.error.json"
               "${msgoff}" || msg "$(yellow "WARNING: Nomad Deployment \"${deploy_id}\" failed")"
-              "${msgoff}" || msg "${status_response}"
+              if test -n "${status_response}"
+              then
+                "${msgoff}" || msg "${status_response}"
+              fi
               # Deployment failures are not considered fatal!
             else
               if test -f "${job_file}.run/allocations.ok"
@@ -1698,7 +1715,7 @@ EOF
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
           local alloc_id=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local msgoff=${1:?$usage};   shift
           "${msgoff}" || msg "$(blue Waiting) for Nomad $(yellow "Allocation \"${alloc_id}\"") to be \"running\" ..."
           local status=""
           local status_response
@@ -1707,7 +1724,10 @@ EOF
             if ! status_response=$(nomad alloc status -json "${alloc_id}")
             then
               "${msgoff}" || msg "$(red "FATAL: Command \"nomad alloc status\" failed")"
-              "${msgoff}" || msg "${status_response}"
+              if test -n "${status_response}"
+              then
+                "${msgoff}" || msg "${status_response}"
+              fi
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
@@ -1715,13 +1735,16 @@ EOF
             status=$(echo "${status_response}" | jq -r .ClientStatus)
             echo "${status_response}" > "${job_file}.run/allocation.${alloc_id}.$(date +%Y-%m-%d-%H-%M-%S-%N).json"
             # Monitor tasks "concurrently" (no need for sleeps here)!
-            if ! test -f "${job_file}.run/tasks.${alloc_id}.ok" && ! test -f "${job_file}.run/tasks.${alloc_id}.error"
+            if ! test -f "${job_file}.run/tasks.${alloc_id}.ok" && ! test -f "${job_file}.run/tasks.error"
             then
               local tasks_output
-              if ! tasks_output=$(wb_nomad job monitor-alloc-tasks "${job_file}" "${job_name}" "${alloc_id}" "false")
+              if ! tasks_output=$(wb_nomad job monitor-job-alloc-tasks "${job_file}" "${job_name}" "${alloc_id}" "false")
               then
                 "${msgoff}" || msg "$(red "FATAL: A Nomad Task failed while waiting for its Allocation")"
-                "${msgoff}" || msg "${tasks_output}"
+                if test -n "${tasks_output}"
+                then
+                  "${msgoff}" || msg "${tasks_output}"
+                fi
                 msg "$(yellow "INFO: Nomad Allocation \"${alloc_id}\" entrypoint stdout:")"
                 nomad alloc logs -verbose         "${alloc_id}" > "${job_file}.run/allocation.${alloc_id}.stdout"
                 cat "${job_file}.run/allocation.${alloc_id}.stdout"
@@ -1769,11 +1792,11 @@ EOF
 ####### job -> monitor-alloc-id-task-name )#####################################
         monitor-alloc-id-task-name )
           local usage="USAGE: wb nomad ${op} ${subop} JOB-FILE JOB-NAME ALLOC-ID MSGOFF"
-          local job_file=${1:?$usage}; shift
-          local job_name=${1:?$usage}; shift
-          local alloc_id=${1:?$usage}; shift
+          local job_file=${1:?$usage};  shift
+          local job_name=${1:?$usage};  shift
+          local alloc_id=${1:?$usage};  shift
           local task_name=${1:?$usage}; shift
-          local msgoff=${1:?$usage}; shift
+          local msgoff=${1:?$usage};    shift
           "${msgoff}" || msg "$(blue Waiting) for Nomad $(yellow "Task \"${task_name}\"") to be \"running\" ..."
           local status=""
           local status_response
@@ -1782,7 +1805,10 @@ EOF
             if ! status_response=$(nomad alloc status -json "${alloc_id}")
             then
               "${msgoff}" || msg "$(red "FATAL: Command \"nomad alloc status\" failed")"
-              "${msgoff}" || msg "${status_response}"
+              if test -n "${status_response}"
+              then
+                "${msgoff}" || msg "${status_response}"
+              fi
               # Send fatal job error signal after printing this error's messages!
               touch "${job_file}.run/job.error"
               return 1
@@ -1816,15 +1842,22 @@ EOF
             local client_id=$(echo "${status_response}"   | jq .NodeID -r)
             local client_name=$(echo "${status_response}" | jq .NodeName -r )
             # TODO: Also contains .DeploymentID , .EvalID and .FollowupEvalID
-            "${msgoff}" || msg "Nomad $(yellow "Task \"${task_name}\"") was placed on Nomad $(yellow "client \"${client_name}\"") (\"${client_id}\")"
+            "${msgoff}" || msg "Nomad $(yellow "Task \"${task_name}\"") was placed on Nomad $(yellow "client named \"${client_name}\"") with ID \"${client_id}\""
           fi
         ;;
 ####### job -> task-name-allocation-id )########################################
         task-name-allocation-id )
           local usage="USAGE:wb nomad ${op} ${subop} JOB-FILE TASK-NAME"
-          local job_file=${1:?$usage}; shift
+          local job_file=${1:?$usage};  shift
           local task_name=${1:?$usage}; shift
-          jq -r '.ID' "${job_file}.run/task.${task_name}.final.json"
+          jq -r '.ID' "${job_file}".run/task.${task_name}.final.json
+        ;;
+####### job -> task-name-node-name )############################################
+        task-name-node-name )
+          local usage="USAGE:wb nomad ${op} ${subop} JOB-FILE TASK-NAME"
+          local job_file=${1:?$usage};  shift
+          local task_name=${1:?$usage}; shift
+          jq -r '.NodeName' "${job_file}".run/task.${task_name}.final.json
         ;;
 ####### job -> stop )###########################################################
         stop )
@@ -1832,7 +1865,292 @@ EOF
           local job_file=${1:?$usage}; shift
           local job_name=${1:?$usage}; shift
           # Do the prune, purge, garbage collect thing!
-          nomad job stop -global -no-shutdown-delay -purge -yes -verbose "${job_name}"
+          nomad job stop -global -no-shutdown-delay -purge -yes -verbose "${job_name}" || msg "$(red "Failed to stop Nomad job")"
+        ;;
+####### job -> node-specs )#####################################################
+        node-specs )
+          # Creates an ex-post "node-specs.json" like file.
+          # It uses Nomad tasks and allocations data plus the files that were
+          # actually deployed, these last ones because parts of them are
+          # dynamically generated using Nomad templates.
+          local usage="USAGE:wb nomad ${op} ${subop} JOB-FILE"
+          local job_file=${1:?$usage}; shift
+          # The nodes/clients file must exists!
+          local clients_file_path="$(dirname "${job_file}")"/clients.json
+          local node_specs_path="$(dirname "${job_file}")"/../node-specs.json
+          # Top object start
+          ##################
+          echo "{"
+          # Grab all the "i" properties from inside each "node-i" object
+          # Why "i" and not "name"? `jq` sorts like this: "node-49", "node-5",
+          # "node-50".
+          local node_specs_is
+          node_specs_is=$(jq --raw-output \
+            'map(.i) | join (" ")' \
+            "${node_specs_path}" \
+          )
+          local first_node="true"
+          for node_i in ${node_specs_is[*]}
+          do
+            # Nomad Job Tasks' names are taken from the `node-specs.json` file.
+            # Task names are of the form "node-0", "node-1", "node-10" (not
+            # "node-04").
+            local task_name
+            task_name=$(jq --raw-output \
+              "map(select(.i == ${node_i})) | .[] | .name" \
+              "${node_specs_path}" \
+            )
+            # Node open "{"
+            ###############
+            # If not the first one ","
+            if test "${first_node}" == "true"
+            then
+              first_node="false"
+              echo "    \"${task_name}\": {"
+            else
+              echo "  , \"${task_name}\": {"
+            fi
+            # Fetch from the allocation data the Nomad Client ID, Name and
+            # Datacenter/region were this Task was deployed.
+            local nomad_client_id
+            nomad_client_id=$(jq --raw-output \
+              .NodeID \
+              "${job_file}".run/task."${task_name}".final.json \
+            )
+            local nomad_client_name
+            nomad_client_name=$(jq --raw-output \
+              .NodeName \
+              "${job_file}".run/task."${task_name}".final.json \
+            )
+            local nomad_client_datacenter
+            nomad_client_datacenter=$(jq --raw-output \
+              ". | map(select(.id == \"${nomad_client_id}\")) | .[0] | .datacenter" \
+              "${clients_file_path}" \
+            )
+            # With the Nomad Client data now fetch AZ and port.
+            local nomad_client_az # Client's AWS AZ were this task was deployed!
+            nomad_client_az=$(jq --raw-output \
+              ". | map(select(.id == \"${nomad_client_id}\")) | .[0] | .attributes.platform.aws.placement[\"availability-zone\"]" \
+              "${clients_file_path}" \
+            )
+            local nomad_task_port # Task's reserved port number!
+            nomad_task_port=$(jq --raw-output \
+              .Resources.Networks[0].ReservedPorts[0].Value \
+              "${job_file}".run/task."${task_name}".final.json \
+            )
+            local nomad_task_ip
+            nomad_task_ip=$(jq --raw-output \
+              ". | map(select(.name == \"${nomad_client_name}\")) | .[0] | .attributes.unique.platform.aws[\"public-ipv4\"]" \
+              "${clients_file_path}" \
+            )
+            # Same data as "node-specs.json".
+            #################################
+            echo "          \"i\":      ${node_i}"
+            echo "        , \"name\":   \"${task_name}\""
+            echo "        , \"region\": \"${nomad_client_datacenter}\""
+            echo "        , \"port\":   ${nomad_task_port}"
+            # Extra Nomad client data.
+            ##########################
+            echo "        , \"nomad-client\": {"
+            echo "              \"id\":   \"${nomad_client_id}\""
+            echo "            , \"name\": \"${nomad_client_name}\""
+            echo "            , \"az\":   \"${nomad_client_az}\""
+            echo "            , \"ip\":   \"${nomad_task_ip}\""
+            echo "        }"
+            # Node close "}"
+            ################
+            echo "  }"
+          done
+          # Top object end
+          ################
+          echo "}"
+        ;;
+####### job -> topology )#######################################################
+        topology )
+          # Creates an ex-post "topology.json" like file.
+          # It uses Nomad tasks and allocations data plus the files that were
+          # actually deployed, these last ones because parts of them are
+          # dynamically generated using Nomad templates.
+          # The "producers" list of each node is re-constructed using the Nomad
+          # services definitions.
+          local usage="USAGE:wb nomad ${op} ${subop} JOB-FILE"
+          local job_file=${1:?$usage}; shift
+          # The nodes/clients file must exists!
+          local clients_file_path="$(dirname "${job_file}")"/clients.json
+          local topology_path="$(dirname "${job_file}")"/../topology.json
+          # Helper, called for "coreNodes" and "relayNodes" separately.
+          topology-node-helper() {
+            local task_name="$1"
+            local node_i="$2"
+            # Fetch from the allocation data the Nomad Client ID and
+            # Datacenter/region were this Task was deployed.
+            local nomad_client_id
+            nomad_client_id=$(jq --raw-output \
+              .NodeID \
+              "${job_file}".run/task."${task_name}".final.json \
+            )
+            local nomad_client_datacenter
+            nomad_client_datacenter=$(jq --raw-output \
+              ". | map(select(.id == \"${nomad_client_id}\")) | .[0] | .datacenter" \
+              "${clients_file_path}" \
+            )
+            # Same data as "topology.json".
+            ###############################
+            echo "             \"name\":   \"${task_name}\""
+            echo "           , \"nodeId\": ${node_i}"
+            echo "           , \"region\": \"${nomad_client_datacenter}\""
+            # producers start
+            #################
+            echo "           , \"producers\": ["
+            local node_topology_file_path
+            node_topology_file_path="$(dirname "${job_file}")"/../"${task_name}"/topology.json
+            # Grab producers from the fetched, after deployment, "topology.json" files, merging P2P and non-P2P formats.
+            local node_producers
+            # Merge non-P2P and P2P in the same {addr:"ADDR",port:0} format.
+            # P2P uses "address" instead of "addr" and is:
+            ### {
+            ### "localRoots": [
+            ### {
+            ###   "accessPoints": [
+            ###     {
+            ###       "address": "10.0.0.1",
+            ###       "port": 30001
+            ###     },
+            ###     {
+            ###       "address": "10.0.0.2",
+            ###       "port": 30002
+            ###     },
+            # non-P2P is:
+            ### {
+            ### "Producers": [
+            ###  {
+            ###    "addr": "10.0.0.1",
+            ###    "port": 30001
+            ###  },
+            node_producers=$(jq \
+              '.Producers//[] + ((.localRoots[0].accessPoints//[]) | map({addr:.address,port:.port}))' \
+              "${node_topology_file_path}"
+            )
+            local node_producers_keys
+            node_producers_keys=$(echo "${node_producers}" | jq --raw-output 'keys | join (" ")')
+            local node_producer_i=0
+            for node_producer_key in ${node_producers_keys[*]}
+            do
+              # The topology file, as used by the node, is already formated as
+              # {"addr":XX,"port":YY} were the XX and YY values were resolved
+              # using Nomad templates.
+              local producer_addr producer_port
+              producer_addr=$(echo "${node_producers}" | jq -r ".[${node_producer_key}] | .addr")
+              producer_port=$(echo "${node_producers}" | jq -r ".[${node_producer_key}] | .port")
+              # From the public IP and port look for the node that was deployed
+              # with this values by searching thorugh the services definitions.
+              local node_specs_path="$(dirname "${job_file}")"/../node-specs.json
+              local node_specs_names
+              node_specs_names=$(jq --raw-output \
+                'map(.name) | join (" ")' \
+                "${node_specs_path}" \
+              )
+              for node_name in ${node_specs_names[*]}
+              do
+                if jq -e "any(select(.Address == \"${producer_addr}\" and .Port == ${producer_port}))" "$(dirname "${job_file}")"/"${node_name}"/service-info.json >/dev/null
+                then
+                  if test "${node_producer_i}" == "0"
+                  then
+                    echo "                  \"${node_name}\""
+                  else
+                    echo "                , \"${node_name}\""
+                  fi
+                  node_producer_i=$((node_producer_i + 1))
+                fi
+              done
+            done
+            # producers end
+            ###############
+            echo "            ]"
+          }
+          # Top object start
+          ##################
+          echo "{"
+          # coreNodes start
+          #################
+          echo "    \"coreNodes\": ["
+          # Grab all the "nodeId" properties from inside each array's objects
+          # Why "nodeId" and not "name"? `jq` sorts like this: "node-49",
+          # "node-5", "node-50".
+          local coreNodes_is
+          coreNodes_is=$(jq --raw-output \
+            '.coreNodes | map(.nodeId) | join (" ")' \
+            "${topology_path}" \
+          )
+          local first_coreNode="true"
+          for node_i in ${coreNodes_is[*]}
+          do
+            # Nomad Job Tasks' names are taken from the `topology.json` file.
+            # Task names are of the form "node-0", "node-1", "node-10" (not "node-04").
+            local task_name
+            task_name=$(jq --raw-output \
+              ".coreNodes | map(select(.nodeId == ${node_i})) | .[] | .name" \
+              "${topology_path}" \
+            )
+            # Node open "{"
+            ###############
+            # If not the first one ","
+            if test "${first_coreNode}" == "true"
+            then
+              first_coreNode="false"
+              echo "        {"
+            else
+              echo "      , {"
+            fi
+            topology-node-helper "${task_name}" "${node_i}"
+            # Node close "}"
+            ################
+            echo "        }"
+          done
+          # coreNodes end
+          ###############
+          echo "  ]"
+          # relayNodes start
+          ##################
+          echo "  , \"relayNodes\": ["
+          # Grab all the "i" properties from inside each "node-i" object
+          # Why "i" and not name? `jq` sorts like this: "node-49", "node-5", "node-50"
+          local relayNodes_is
+          relayNodes_is=$(jq --raw-output \
+            '.relayNodes | map(.nodeId) | join (" ")' \
+            "${topology_path}" \
+          )
+          local first_relayNode="true"
+          for node_i in ${relayNodes_is[*]}
+          do
+            # Nomad Job Tasks' names are taken from the `topology.json` file.
+            # Task names are of the form "node-0", "node-1", "node-10" (not "node-04").
+            local task_name
+            task_name=$(jq --raw-output \
+              ".relayNodes | map(select(.nodeId == ${node_i})) | .[] | .name" \
+              "${topology_path}" \
+            )
+            # Node open "{"
+            ###############
+            # If not the first one ","
+            if test "${first_relayNode}" == "true"
+            then
+              first_relayNode="false"
+              echo "      {"
+            else
+              echo "    , {"
+            fi
+            topology-node-helper "${task_name}" "${node_i}"
+            # Node close "}"
+            ################
+            echo "      }"
+          done
+          # relayNodes end
+          ################
+          echo "  ]"
+          # Top object end
+          ################
+          echo "}"
         ;;
 ####### job -> * )##############################################################
         * )
@@ -1850,3 +2168,15 @@ EOF
   esac
 
 }
+
+# TODO: `nomad-retry`
+# Example errors:
+# - Error retrieving deployment: Get "https://nomad.world.dev.cardano.org/v1/deployment/f8921691-abad-567c-dd79-f1fa8ae672eb?namespace=perf": net/http: TLS handshake timeout
+# - Error querying allocation: Get "https://nomad.world.dev.cardano.org/v1/allocations?namespace=perf&prefix=4b2b9fad-145e-5221-a89b-5e7ffbe955aa": dial tcp 3.72.231.105:443: connect: connection refused
+# - Error querying allocation: Get "https://nomad.world.dev.cardano.org/v1/allocations?namespace=perf&prefix=3e9f7b8e-56ef-3548-3c5b-c6406424608c": net/http: TLS handshake timeout
+# - Error querying allocation: Get "https://nomad.world.dev.cardano.org/v1/allocations?namespace=perf&prefix=d23e3485-453e-e2d9-0312-91273c043c0b": tls: failed to verify certificate: x509: certificate is valid for 6574a66487be7c78e86d0a547d1d56ed.3097b591bb3e0e3ad8356f18812c6de1.traefik.default, not nomad.world.dev.cardano.org
+# - Error querying allocation: Unexpected response code: 403 (ACL token not found)
+# - Error reading file: Unexpected response code: 404 (task "node-50" not started yet. No logs available)
+# - failed to exec into task: unexpected EOF
+# - failed to exec into task: read tcp 10.0.101.184:58166->3.72.231.105:443: read: connection reset by peer
+# - failed to exec into task: websocket closed before receiving exit code: websocket: close 1000 (normal)

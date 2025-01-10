@@ -3,9 +3,11 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 {-# OPTIONS_GHC -Wno-name-shadowing -Wno-orphans #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Cardano.Node.Tracing.Tracers.Startup
 
@@ -15,28 +17,16 @@ module Cardano.Node.Tracing.Tracers.Startup
 
 import           Cardano.Api (NetworkMagic (..), SlotNo (..))
 import qualified Cardano.Api as Api
-import           Prelude
-
-import           Data.Aeson (ToJSON (..), Value (..), (.=))
-import qualified Data.Aeson as Aeson
-import           Data.List (intercalate)
-import qualified Data.Map.Strict as Map
-import           Data.Text (Text, pack)
-import           Data.Time (getCurrentTime)
-import           Data.Time.Clock.POSIX (POSIXTime, utcTimeToPOSIXSeconds)
-import           Data.Version (showVersion)
-import           Network.Socket (SockAddr)
-import           Paths_cardano_node (version)
 
 import qualified Cardano.Chain.Genesis as Gen
-import           Cardano.Slotting.Slot (EpochSize (..))
-
+import           Cardano.Git.Rev (gitRev)
 import           Cardano.Ledger.Shelley.API as SL
-
-import           Ouroboros.Network.NodeToClient (LocalAddress (..), LocalSocket (..))
-import           Ouroboros.Network.NodeToNode (DiffusionMode (..))
-import           Ouroboros.Network.PeerSelection.LedgerPeers (UseLedgerAfter (..))
-
+import           Cardano.Logging
+import           Cardano.Node.Configuration.POM (NodeConfiguration, ncProtocol)
+import           Cardano.Node.Configuration.Socket
+import           Cardano.Node.Protocol (SomeConsensusProtocol (..))
+import           Cardano.Node.Startup
+import           Cardano.Slotting.Slot (EpochSize (..))
 import qualified Ouroboros.Consensus.BlockchainTime.WallClock.Types as WCT
 import           Ouroboros.Consensus.Byron.Ledger.Conversions (fromByronEpochSlots,
                    fromByronSlotLength, genesisSlotLength)
@@ -49,16 +39,24 @@ import           Ouroboros.Consensus.HardFork.Combinator.Degenerate (HardForkLed
 import           Ouroboros.Consensus.Node.NetworkProtocolVersion
 import           Ouroboros.Consensus.Node.ProtocolInfo (ProtocolInfo (..))
 import           Ouroboros.Consensus.Shelley.Ledger.Ledger (shelleyLedgerGenesis)
+import           Ouroboros.Network.NodeToClient (LocalAddress (..), LocalSocket (..))
+import           Ouroboros.Network.NodeToNode (DiffusionMode (..))
+import           Ouroboros.Network.PeerSelection.LedgerPeers.Type (AfterSlot (..),
+                   UseLedgerPeers (..))
 
-import           Cardano.Logging
+import           Prelude
 
-import           Cardano.Git.Rev (gitRev)
+import           Data.Aeson (ToJSON (..), Value (..), (.=))
+import qualified Data.Aeson as Aeson
+import           Data.List (intercalate)
+import qualified Data.Map.Strict as Map
+import           Data.Text (Text, pack)
+import           Data.Time (getCurrentTime)
+import           Data.Time.Clock.POSIX (POSIXTime, utcTimeToPOSIXSeconds)
+import           Data.Version (showVersion)
+import           Network.Socket (SockAddr)
 
-import           Cardano.Node.Configuration.POM (NodeConfiguration, ncProtocol)
-import           Cardano.Node.Configuration.Socket
-import           Cardano.Node.Configuration.TopologyP2P
-import           Cardano.Node.Protocol (SomeConsensusProtocol (..))
-import           Cardano.Node.Startup
+import           Paths_cardano_node (version)
 
 
 getStartupInfo
@@ -68,11 +66,11 @@ getStartupInfo
   -> IO [StartupTrace blk]
 getStartupInfo nc (SomeConsensusProtocol whichP pForInfo) fp = do
   nodeStartTime <- getCurrentTime
-  let cfg = pInfoConfig $ Api.protocolInfo pForInfo
+  let cfg = pInfoConfig $ fst $ Api.protocolInfo @IO pForInfo
       basicInfoCommon = BICommon $ BasicInfoCommon {
                 biProtocol = pack . show $ ncProtocol nc
               , biVersion  = pack . showVersion $ version
-              , biCommit   = gitRev
+              , biCommit   = $(gitRev)
               , biNodeStartTime = nodeStartTime
               , biConfigPath = fp
               , biNetworkMagic = getNetworkMagic $ Consensus.configBlock cfg
@@ -201,6 +199,19 @@ instance ( Show (BlockNodeToNodeVersion blk)
   forMachine _dtal StartupDBValidation =
       mconcat [ "kind" .= String "StartupDBValidation"
                , "message" .= String "start db validation" ]
+  forMachine _dtal (BlockForgingUpdate b) =
+      mconcat [ "kind" .= String "BlockForgingUpdate"
+              , "enabled" .= String (showT b)
+              ]
+  forMachine _dtal (BlockForgingUpdateError err) =
+      mconcat [ "kind" .= String "BlockForgingUpdateError"
+              , "error" .= String (showT err)
+              ]
+  forMachine _dtal (BlockForgingBlockTypeMismatch expected provided) =
+      mconcat [ "kind" .= String "BlockForgingBlockTypeMismatch"
+              , "expected" .= String (showT expected)
+              , "provided" .= String (showT provided)
+              ]
   forMachine _dtal NetworkConfigUpdate =
       mconcat [ "kind" .= String "NetworkConfigUpdate"
                , "message" .= String "network configuration update" ]
@@ -210,22 +221,15 @@ instance ( Show (BlockNodeToNodeVersion blk)
   forMachine _dtal (NetworkConfigUpdateError err) =
       mconcat [ "kind" .= String "NetworkConfigUpdateError"
                , "error" .= String err ]
-  forMachine _dtal (NetworkConfig localRoots publicRoots useLedgerAfter) =
+  forMachine _dtal (NetworkConfig localRoots publicRoots useLedgerPeers) =
       mconcat [ "kind" .= String "NetworkConfig"
                , "localRoots" .= toJSON localRoots
                , "publicRoots" .= toJSON publicRoots
-               , "useLedgerAfter" .= UseLedger useLedgerAfter
+               , "useLedgerAfter" .= useLedgerPeers
                ]
-  forMachine _dtal NetworkConfigLegacy =
-      mconcat [ "kind" .= String "NetworkConfigLegacy"
-              , "message" .= String p2pNetworkConfigLegacyMessage
-              ]
-  forMachine _dtal P2PWarning =
-      mconcat [ "kind" .= String "P2PWarning"
-               , "message" .= String p2pWarningMessage ]
-  forMachine _dtal PeerSharingWarning =
-      mconcat [ "kind" .= String "PeerSharingWarning"
-               , "message" .= String peerSharingWarningMessage ]
+  forMachine _dtal NonP2PWarning =
+      mconcat [ "kind" .= String "NonP2PWarning"
+               , "message" .= String nonP2PWarningMessage ]
   forMachine _ver (WarningDevelopmentNodeToNodeVersions ntnVersions) =
       mconcat [ "kind" .= String "WarningDevelopmentNodeToNodeVersions"
                , "message" .= String "enabled development network protocols"
@@ -267,6 +271,19 @@ instance ( Show (BlockNodeToNodeVersion blk)
                , "nodeStartTime" .= biNodeStartTime
                ]
 
+  asMetrics (BlockForgingUpdate b) =
+    [ IntM "forging_enabled"
+      (case  b of
+        EnabledBlockForging -> 1
+        DisabledBlockForging -> 0
+        NotEffective -> 0
+      )]
+  asMetrics (BICommon BasicInfoCommon {..}) =
+    [ PrometheusM "basicInfo" [("nodeStartTime", (pack . show) biNodeStartTime)]
+    , IntM "node.start.time" ((ceiling . utcTimeToPOSIXSeconds) biNodeStartTime)
+    ]
+  asMetrics _ = []
+
 instance MetaTrace  (StartupTrace blk) where
   namespaceFor StartupInfo {}  =
     Namespace [] ["Info"]
@@ -280,6 +297,12 @@ instance MetaTrace  (StartupTrace blk) where
      Namespace [] ["SocketConfigError"]
   namespaceFor StartupDBValidation {}  =
     Namespace [] ["DBValidation"]
+  namespaceFor BlockForgingUpdate {} =
+    Namespace [] ["BlockForgingUpdate"]
+  namespaceFor BlockForgingUpdateError {} =
+    Namespace [] ["BlockForgingUpdateError"]
+  namespaceFor BlockForgingBlockTypeMismatch {} =
+    Namespace [] ["BlockForgingBlockTypeMismatch"]
   namespaceFor NetworkConfigUpdate {}  =
     Namespace [] ["NetworkConfigUpdate"]
   namespaceFor NetworkConfigUpdateUnsupported {}  =
@@ -288,12 +311,8 @@ instance MetaTrace  (StartupTrace blk) where
     Namespace [] ["NetworkConfigUpdateError"]
   namespaceFor NetworkConfig {}  =
     Namespace [] ["NetworkConfig"]
-  namespaceFor NetworkConfigLegacy {}  =
-    Namespace [] ["NetworkConfigLegacy"]
-  namespaceFor P2PWarning {}  =
-    Namespace [] ["P2PWarning"]
-  namespaceFor PeerSharingWarning {}  =
-    Namespace [] ["PeerSharingWarning"]
+  namespaceFor NonP2PWarning {}  =
+    Namespace [] ["NonP2PWarning"]
   namespaceFor WarningDevelopmentNodeToNodeVersions {}  =
     Namespace [] ["WarningDevelopmentNodeToNodeVersions"]
   namespaceFor WarningDevelopmentNodeToClientVersions {}  =
@@ -311,9 +330,11 @@ instance MetaTrace  (StartupTrace blk) where
   severityFor (Namespace _ ["NetworkConfigUpdate"]) _ = Just Notice
   severityFor (Namespace _ ["NetworkConfigUpdateError"]) _ = Just Error
   severityFor (Namespace _ ["NetworkConfigUpdateUnsupported"]) _ = Just Warning
-  severityFor (Namespace _ ["P2PWarning"]) _ = Just Warning
+  severityFor (Namespace _ ["NonP2PWarning"]) _ = Just Warning
   severityFor (Namespace _ ["WarningDevelopmentNodeToNodeVersions"]) _ = Just Warning
   severityFor (Namespace _ ["WarningDevelopmentNodeToClientVersions"]) _ = Just Warning
+  severityFor (Namespace _ ["BlockForgingUpdateError"]) _ = Just Error
+  severityFor (Namespace _ ["BlockForgingBlockTypeMismatch"]) _ = Just Error
   severityFor _ _ = Just Info
 
   documentFor (Namespace [] ["Info"]) = Just
@@ -328,6 +349,12 @@ instance MetaTrace  (StartupTrace blk) where
     ""
   documentFor (Namespace [] ["DBValidation"]) = Just
     ""
+  documentFor (Namespace [] ["BlockForgingUpdate"]) = Just
+    ""
+  documentFor (Namespace [] ["BlockForgingUpdateError"]) = Just
+    ""
+  documentFor (Namespace [] ["BlockForgingBlockTypeMismatch"]) = Just
+    ""
   documentFor (Namespace [] ["NetworkConfigUpdate"]) = Just
     ""
   documentFor (Namespace [] ["NetworkConfigUpdateUnsupported"]) = Just
@@ -336,9 +363,7 @@ instance MetaTrace  (StartupTrace blk) where
     ""
   documentFor (Namespace [] ["NetworkConfig"]) = Just
     ""
-  documentFor (Namespace [] ["NetworkConfigLegacy"]) = Just
-    ""
-  documentFor (Namespace [] ["P2PWarning"]) = Just
+  documentFor (Namespace [] ["NonP2PWarning"]) = Just
     ""
   documentFor (Namespace [] ["WarningDevelopmentNodeToNodeVersions"]) = Just
     ""
@@ -355,7 +380,7 @@ instance MetaTrace  (StartupTrace blk) where
   documentFor (Namespace [] ["ShelleyBased"]) = Just $ mconcat
     [ "bisEra is the current era, e.g. \"Shelley\", \"Allegra\", \"Mary\" "
     , "or \"Alonzo\". "
-    , "\n_bisSystemStartTime_: TODO JNF "
+    , "\n_bisSystemStartTime_: "
     , "\n_bisSlotLength_: gives the length of a slot as time interval. "
     , "\n_bisEpochLength_: gives the number of slots which forms an epoch. "
     , "\n_bisSlotsPerKESPeriod_: gives the slots per KES period."
@@ -375,6 +400,15 @@ instance MetaTrace  (StartupTrace blk) where
     ]
   documentFor _ns = Nothing
 
+  metricsDocFor (Namespace _ ["BlockForgingUpdate"]) =
+    [("forging_enabled","Can this node forge blocks? (Is it provided with block forging credentials) 0 = no, 1 = yes")]
+  metricsDocFor (Namespace _ ["Common"]) =
+    [("systemStartTime","The UTC time this node was started."),
+     ("node.start.time","The UTC time this node was started represented in POSIX seconds.")]
+
+
+  metricsDocFor _ = []
+
   allNamespaces =
     [ Namespace [] ["Info"]
     , Namespace [] ["P2PInfo"]
@@ -382,12 +416,13 @@ instance MetaTrace  (StartupTrace blk) where
     , Namespace [] ["NetworkMagic"]
     , Namespace [] ["SocketConfigError"]
     , Namespace [] ["DBValidation"]
+    , Namespace [] ["BlockForgingUpdate"]
+    , Namespace [] ["BlockForgingBlockTypeMismatch"]
     , Namespace [] ["NetworkConfigUpdate"]
     , Namespace [] ["NetworkConfigUpdateUnsupported"]
     , Namespace [] ["NetworkConfigUpdateError"]
     , Namespace [] ["NetworkConfig"]
-    , Namespace [] ["NetworkConfigLegacy"]
-    , Namespace [] ["P2PWarning"]
+    , Namespace [] ["NonP2PWarning"]
     , Namespace [] ["WarningDevelopmentNodeToNodeVersions"]
     , Namespace [] ["WarningDevelopmentNodeToClientVersions"]
     , Namespace [] ["Common"]
@@ -395,7 +430,6 @@ instance MetaTrace  (StartupTrace blk) where
     , Namespace [] ["Byron"]
     , Namespace [] ["Network"]
     ]
-
 
 nodeToClientVersionToInt :: NodeToClientVersion -> Int
 nodeToClientVersionToInt = \case
@@ -407,15 +441,13 @@ nodeToClientVersionToInt = \case
   NodeToClientV_14 -> 14
   NodeToClientV_15 -> 15
   NodeToClientV_16 -> 16
+  NodeToClientV_17 -> 17
+  NodeToClientV_18 -> 18
 
 nodeToNodeVersionToInt :: NodeToNodeVersion -> Int
 nodeToNodeVersionToInt = \case
-  NodeToNodeV_7 -> 7
-  NodeToNodeV_8 -> 8
-  NodeToNodeV_9 -> 9
-  NodeToNodeV_10 -> 10
-  NodeToNodeV_11 -> 11
-  NodeToNodeV_12 -> 12
+  NodeToNodeV_13 -> 13
+  NodeToNodeV_14 -> 14
 
 -- | Pretty print 'StartupInfoTrace'
 --
@@ -452,28 +484,53 @@ ppStartupInfoTrace (StartupSocketConfigError err) =
 
 ppStartupInfoTrace StartupDBValidation = "Performing DB validation"
 
+ppStartupInfoTrace (BlockForgingUpdate b) =
+  "Performing block forging reconfiguration: "
+    <> case b of
+        EnabledBlockForging  ->
+            "Enabling block forging. To disable it please move/rename/remove "
+          <> "the credentials files and then trigger reconfiguration via SIGHUP "
+          <> "signal."
+        DisabledBlockForging ->
+            "Disabling block forging, to enable it please make the credentials "
+          <> "files available again and then re-trigger reconfiguration via SIGHUP "
+          <> "signal."
+        NotEffective ->
+             "Changing block forging is not effective until consensus has started. "
+
+ppStartupInfoTrace (BlockForgingUpdateError err) =
+  "Block forging reconfiguration error: "
+    <> showT err <> "\n"
+    <> "Block forging is not reconfigured."
+ppStartupInfoTrace (BlockForgingBlockTypeMismatch expected provided) =
+  "Block forging reconfiguration block type mismatch: expected "
+    <> showT expected
+    <> " provided "
+    <> showT provided
+
 ppStartupInfoTrace NetworkConfigUpdate = "Performing topology configuration update"
 ppStartupInfoTrace NetworkConfigUpdateUnsupported =
   "Network topology reconfiguration is not supported in non-p2p mode"
 ppStartupInfoTrace (NetworkConfigUpdateError err) = err
-ppStartupInfoTrace (NetworkConfig localRoots publicRoots useLedgerAfter) =
+ppStartupInfoTrace (NetworkConfig localRoots publicRoots useLedgerPeers) =
     pack
   $ intercalate "\n"
   [ "\nLocal Root Groups:"
-  , "  " ++ intercalate "\n  " (map (\(x,y) -> show (x, Map.assocs y))
+  , "  " ++ intercalate "\n  " (map (\(x,y,z) -> show (x, y, Map.assocs z))
                                     localRoots)
   , "Public Roots:"
   , "  " ++ intercalate "\n  " (map show $ Map.assocs publicRoots)
-  , case useLedgerAfter of
-      UseLedgerAfter slotNo -> "Get root peers from the ledger after slot "
-                            ++ show (unSlotNo slotNo)
-      DontUseLedger         -> "Don't use ledger to get root peers."
+  , case useLedgerPeers of
+      DontUseLedgerPeers            ->
+        "Don't use ledger to get root peers."
+      UseLedgerPeers (After slotNo) ->
+        "Get root peers from the ledger after slot "
+        ++ show (unSlotNo slotNo)
+      UseLedgerPeers Always         ->
+        "Use ledger peers in any slot."
   ]
-ppStartupInfoTrace NetworkConfigLegacy = p2pNetworkConfigLegacyMessage
 
-ppStartupInfoTrace P2PWarning = p2pWarningMessage
-
-ppStartupInfoTrace PeerSharingWarning = peerSharingWarningMessage
+ppStartupInfoTrace NonP2PWarning = nonP2PWarningMessage
 
 ppStartupInfoTrace (WarningDevelopmentNodeToNodeVersions ntnVersions) =
      "enabled development node-to-node versions: "
@@ -508,29 +565,10 @@ ppStartupInfoTrace (BICommon BasicInfoCommon {..}) =
   <> ", Commit " <> showT biCommit
   <> ", Node start time " <> showT biNodeStartTime
 
-p2pWarningMessage :: Text
-p2pWarningMessage =
-      "You are using an early release of peer-to-peer capabilities, "
-   <> "please report any issues."
-
-p2pNetworkConfigLegacyMessage :: Text
-p2pNetworkConfigLegacyMessage =
-    pack
-  $ intercalate "\n"
-  [ "You are using legacy p2p topology file format."
-  , "See https://github.com/input-output-hk/cardano-node/issues/4559"
-  , "Note that the legacy p2p format will be removed in `1.37` release."
-  ]
-
-peerSharingWarningMessage :: Text
-peerSharingWarningMessage =
-    "Warning: Enabling PeerSharing can expose you to significant risks, including "
-  <> "the possibility of eclipse attacks. By turning on this feature, you may "
-  <> "inadvertently give malicious actors the ability to isolate your device, "
-  <> "manipulate your view of the network, and compromise your data integrity. "
-  <> "It is crucial to carefully consider the potential consequences before "
-  <> "enabling PeerSharing. If you are unsure, it is strongly advised to consult "
-  <> "a security expert for guidance. Proceed with caution."
+nonP2PWarningMessage :: Text
+nonP2PWarningMessage =
+      "You are using legacy networking stack, "
+   <> "consider upgrading to the p2p network stack."
 
 -- | Pretty print 'SocketOrSocketInfo'.
 --

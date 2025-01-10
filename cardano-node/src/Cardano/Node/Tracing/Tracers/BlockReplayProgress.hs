@@ -5,20 +5,18 @@ module Cardano.Node.Tracing.Tracers.BlockReplayProgress
    , ReplayBlockStats(..)
   ) where
 
-import           Control.Monad.IO.Class (MonadIO)
-import           Data.Aeson (Value (String), (.=))
-import           Data.Text (pack)
-
 import           Cardano.Api (textShow)
 
 import           Cardano.Logging
-
 import           Ouroboros.Consensus.Block (realPointSlot)
+import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
+import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
 import           Ouroboros.Network.Block (pointSlot, unSlotNo)
 import           Ouroboros.Network.Point (withOrigin)
 
-import qualified Ouroboros.Consensus.Storage.ChainDB as ChainDB
-import qualified Ouroboros.Consensus.Storage.LedgerDB as LedgerDB
+import           Control.Monad.IO.Class (MonadIO)
+import           Data.Aeson (Value (String), (.=))
+import           Data.Text (pack)
 
 data ReplayBlockStats = ReplayBlockStats
   { rpsDisplay      :: Bool
@@ -41,7 +39,7 @@ instance LogFormatting ReplayBlockStats where
       ]
   forHuman ReplayBlockStats {..} = "Block replay progress " <> textShow rpsProgress <> "%"
   asMetrics ReplayBlockStats {..} =
-     [DoubleM "ChainDB.BlockReplayProgress" rpsProgress]
+     [DoubleM "blockReplayProgress" rpsProgress]
 
 instance MetaTrace ReplayBlockStats where
   namespaceFor ReplayBlockStats {} = Namespace [] ["LedgerReplay"]
@@ -54,7 +52,7 @@ instance MetaTrace ReplayBlockStats where
   documentFor _ = Nothing
 
   metricsDocFor (Namespace _ ["LedgerReplay"]) =
-     [("ChainDB.BlockReplayProgress", "Progress in percent")]
+     [("blockReplayProgress", "Progress in percent")]
   metricsDocFor _ = []
 
   allNamespaces =
@@ -66,7 +64,7 @@ withReplayedBlock :: Trace IO ReplayBlockStats
 withReplayedBlock tr =
     let tr' = filterTrace filterFunction tr
         tr'' = contramap unfold tr'
-    in foldMTraceM replayBlockStats emptyReplayBlockStats tr''
+    in foldTraceM replayBlockStats emptyReplayBlockStats tr''
   where
     filterFunction(_, ReplayBlockStats {..}) = rpsDisplay
 

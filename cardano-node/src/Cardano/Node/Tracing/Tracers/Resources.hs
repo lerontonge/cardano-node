@@ -4,15 +4,13 @@ module Cardano.Node.Tracing.Tracers.Resources
   ( startResourceTracer
   ) where
 
+import           Cardano.Logging.Resources
+
 import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async (async)
-import           Control.Monad (forM_)
+import           Control.Monad (forM_, forever)
 import           Control.Monad.Class.MonadAsync (link)
-import           Control.Monad.Cont (forever)
-
 import           "contra-tracer" Control.Tracer
-
-import           Cardano.Logging.Resources
 
 startResourceTracer
   :: Tracer IO ResourceStats
@@ -25,7 +23,5 @@ startResourceTracer tr delayMilliseconds = do
     resourceThread :: IO ()
     resourceThread = forever $ do
       mbrs <- readResourceStats
-      forM_ mbrs $ \rs -> traceWith tr rs
-      threadDelay (delayMilliseconds * 1000)
       forM_ mbrs $ \rs -> traceWith tr rs
       threadDelay (delayMilliseconds * 1000)

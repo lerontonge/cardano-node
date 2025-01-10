@@ -24,6 +24,8 @@ usage_backend() {
 
     wait-pools-stopped RUNDIR
                      Wait until all pools are stopped
+    wait-workloads-stopped RUNDIR
+                     Wait until all workloads are stopped
     stop-cluster RUNDIR
     cleanup-cluster RUNDIR
                      Wipe cluster state to pristine
@@ -38,20 +40,31 @@ backend() {
 local op=${1:-$(usage_backend)} # No need to shift -- backends will use the op.
 
 case "${op}" in
-    is-running )                 backend_$WB_BACKEND "$@";;
+    # Prepare functions
     setenv-defaults )            backend_$WB_BACKEND "$@";;
     allocate-run )               backend_$WB_BACKEND "$@";;
     describe-run )               backend_$WB_BACKEND "$@";;
+    # Start functions
+    is-running )                 backend_$WB_BACKEND "$@";;
+    start-cluster )              backend_$WB_BACKEND "$@";;
     deploy-genesis )             backend_$WB_BACKEND "$@";;
-    start )                      backend_$WB_BACKEND "$@";;
+    # Sceneario functions
+    start-tracers )              backend_$WB_BACKEND "$@";;
     start-nodes )                backend_$WB_BACKEND "$@";;
+    start-generator )            backend_$WB_BACKEND "$@";;
+    start-workloads )            backend_$WB_BACKEND "$@";;
+    start-healthchecks )         backend_$WB_BACKEND "$@";;
+    # Fine grained
     start-node )                 backend_$WB_BACKEND "$@";;
     stop-node )                  backend_$WB_BACKEND "$@";;
     wait-node )                  backend_$WB_BACKEND "$@";;
     wait-node-stopped )          backend_$WB_BACKEND "$@";;
     get-node-socket-path )       backend_$WB_BACKEND "$@";;
-    start-generator )            backend_$WB_BACKEND "$@";;
     wait-pools-stopped )         backend_$WB_BACKEND "$@";;
+    wait-workloads-stopped )     backend_$WB_BACKEND "$@";;
+    # Stop functions
+    stop-all )                   backend_$WB_BACKEND "$@";;
+    fetch-logs )                 backend_$WB_BACKEND "$@";;
     stop-cluster )               backend_$WB_BACKEND "$@";;
     cleanup-cluster )            backend_$WB_BACKEND "$@";;
 
@@ -71,9 +84,17 @@ case "${op}" in
 
     assert-stopped )
         local running_components=($(backend is-running "run/current"))
-        test ${#running_components[*]} -gt 0 &&
-          fatal "backend reports running components ($(blue ${running_components[*]}))$(red . Please stop first:)  $(yellow stop-cluster)" ||
-          true
+
+        if test ${#running_components[*]} -gt 0
+        then
+          newline
+          progress "$(red FATAL)" "backend reports running components (${running_components[*]})"
+          progress "hint"         "  1. if any other local cluster is running on this machine, please use: $(yellow stop-cluster)"
+          progress "hint"         "  2. if any other cardano-node process is active on this machine, please shut it down first"
+          progress "hint"         "$(green any active cluster or node process may significantly impair metrics taken during benchmark)"
+          fatal "aborted due to active components"
+        fi
+        true
         ;;
 
     * ) set +x; usage_backend;; esac

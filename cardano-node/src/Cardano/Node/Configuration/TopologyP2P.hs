@@ -2,7 +2,6 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PackageImports #-}
 
 module Cardano.Node.Configuration.TopologyP2P
   ( TopologyError(..)
@@ -16,7 +15,6 @@ module Cardano.Node.Configuration.TopologyP2P
   , NodeHostIPv6Address(..)
   , NodeSetup(..)
   , PeerAdvertise(..)
-  , UseLedger(..)
   , nodeAddressToSockAddr
   , readTopologyFile
   , readTopologyFileOrError
@@ -24,58 +22,36 @@ module Cardano.Node.Configuration.TopologyP2P
   )
 where
 
+import           Cardano.Node.Configuration.NodeAddress
+import           Cardano.Node.Configuration.POM (NodeConfiguration (..))
+import           Cardano.Node.Configuration.Topology (TopologyError (..))
+import           Cardano.Node.Types
+import           Cardano.Tracing.OrphanInstances.Network ()
+import           Ouroboros.Network.NodeToNode (PeerAdvertise (..))
+import           Ouroboros.Network.PeerSelection.Bootstrap (UseBootstrapPeers (..))
+import           Ouroboros.Network.PeerSelection.LedgerPeers.Type (UseLedgerPeers (..))
+import           Ouroboros.Network.PeerSelection.PeerTrustable (PeerTrustable (..))
+import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPoint (..))
+import           Ouroboros.Network.PeerSelection.State.LocalRootPeers (HotValency (..),
+                   WarmValency (..))
+
+import           Control.Applicative (Alternative (..))
 import           Control.Exception (IOException)
 import qualified Control.Exception as Exception
 import           Control.Exception.Base (Exception (..))
-import           Control.Monad (MonadPlus (..))
 import           Data.Aeson
-import           Data.Bifunctor (Bifunctor (..))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import           Data.Text (Text)
 import qualified Data.Text as Text
 import           Data.Word (Word64)
 
-import           "contra-tracer" Control.Tracer (Tracer, traceWith)
-
-import           Cardano.Node.Configuration.POM (NodeConfiguration (..))
-import           Cardano.Slotting.Slot (SlotNo (..))
-
-import           Cardano.Node.Configuration.NodeAddress
-import           Cardano.Node.Configuration.Topology (TopologyError (..))
-import           Cardano.Node.Startup (StartupTrace (..))
-import           Cardano.Node.Types
-
-import           Ouroboros.Network.NodeToNode (PeerAdvertise (..))
-import           Ouroboros.Network.PeerSelection.LedgerPeers (UseLedgerAfter (..))
-import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPoint (..))
-
-
-
--- | A newtype wrapper around 'UseLedgerAfter' which provides 'FromJSON' and
--- 'ToJSON' instances.
---
--- 'UseLedgerAfter' is used to configure from which slot a p2p node can use on
--- chain root peers.
---
-newtype UseLedger = UseLedger UseLedgerAfter deriving (Eq, Show)
-
-instance FromJSON UseLedger where
-  parseJSON (Data.Aeson.Number n) =
-    if n >= 0 then return $ UseLedger $ UseLedgerAfter $ SlotNo $ floor n
-              else return $ UseLedger   DontUseLedger
-  parseJSON _ = mzero
-
-instance ToJSON UseLedger where
-  toJSON (UseLedger (UseLedgerAfter (SlotNo n))) = Number $ fromIntegral n
-  toJSON (UseLedger DontUseLedger)               = Number (-1)
-
 data NodeSetup = NodeSetup
   { nodeId          :: !Word64
   , nodeIPv4Address :: !(Maybe NodeIPv4Address)
   , nodeIPv6Address :: !(Maybe NodeIPv6Address)
   , producers       :: ![RootConfig]
-  , useLedger       :: !UseLedger
+  , useLedger       :: !UseLedgerPeers
   } deriving (Eq, Show)
 
 instance FromJSON NodeSetup where
@@ -85,7 +61,7 @@ instance FromJSON NodeSetup where
                   <*> o .:  "nodeIPv4Address"
                   <*> o .:  "nodeIPv6Address"
                   <*> o .:  "producers"
-                  <*> o .:? "useLedgerAfterSlot" .!= UseLedger DontUseLedger
+                  <*> o .:? "useLedgerAfterSlot" .!= DontUseLedgerPeers
 
 instance ToJSON NodeSetup where
   toJSON ns =
@@ -107,7 +83,7 @@ data RootConfig = RootConfig
     -- or domain name and a port number.
   , rootAdvertise    :: PeerAdvertise
     -- ^ 'advertise' configures whether the root should be advertised through
-    -- gossip.
+    -- peer sharing.
   } deriving (Eq, Show)
 
 instance FromJSON RootConfig where
@@ -135,28 +111,40 @@ rootConfigToRelayAccessPoint RootConfig { rootAccessPoints, rootAdvertise } =
 
 -- | A local root peers group.  Local roots are treated by the outbound
 -- governor in a special way.  The node will make sure that a node has the
--- requested number ('valency') of connections to the local root peer group.
+-- requested number ('valency'/'hotValency') of connections to the local root peer group.
+-- 'warmValency' value is the value of warm/established connections that the node
+-- will attempt to maintain. By default this value will be equal to 'hotValency'.
 --
 data LocalRootPeersGroup = LocalRootPeersGroup
   { localRoots :: RootConfig
-  , valency    :: Int
+  , hotValency :: HotValency
+  , warmValency :: WarmValency
+  , trustable   :: PeerTrustable
+    -- ^ 'trustable' configures whether the root should be trusted in fallback
+    -- state.
   } deriving (Eq, Show)
 
 -- | Does not use the 'FromJSON' instance of 'RootConfig', so that
--- 'accessPoints', 'advertise' and 'valency' fields are attached to the same
--- object.
+-- 'accessPoints', 'advertise', 'valency' and 'warmValency' fields are attached to the
+-- same object.
 instance FromJSON LocalRootPeersGroup where
-  parseJSON = withObject "LocalRootPeersGroup" $ \o ->
+  parseJSON = withObject "LocalRootPeersGroup" $ \o -> do
+                hv@(HotValency v) <- o .: "valency"
+                                 <|> o .: "hotValency"
                 LocalRootPeersGroup
                   <$> parseJSON (Object o)
-                  <*> o .: "valency"
+                  <*> pure hv
+                  <*> o .:? "warmValency" .!= WarmValency v
+                  <*> o .:? "trustable" .!= IsNotTrustable
 
 instance ToJSON LocalRootPeersGroup where
   toJSON lrpg =
     object
       [ "accessPoints" .= rootAccessPoints (localRoots lrpg)
       , "advertise" .= rootAdvertise (localRoots lrpg)
-      , "valency" .= valency lrpg
+      , "hotValency" .= hotValency lrpg
+      , "warmValency" .= warmValency lrpg
+      , "trustable" .= trustable lrpg
       ]
 
 newtype LocalRootPeersGroups = LocalRootPeersGroups
@@ -179,101 +167,95 @@ instance FromJSON PublicRootPeers where
 instance ToJSON PublicRootPeers where
   toJSON = toJSON . publicRoots
 
-data NetworkTopology = RealNodeTopology !LocalRootPeersGroups ![PublicRootPeers] !UseLedger
+data NetworkTopology = RealNodeTopology { ntLocalRootPeersGroups :: !LocalRootPeersGroups
+                                        , ntPublicRootPeers      :: ![PublicRootPeers]
+                                        , ntUseLedgerPeers       :: !UseLedgerPeers
+                                        , ntUseBootstrapPeers    :: !UseBootstrapPeers
+                                        }
   deriving (Eq, Show)
 
 instance FromJSON NetworkTopology where
   parseJSON = withObject "NetworkTopology" $ \o ->
-                RealNodeTopology <$> (o .: "localRoots"                                     )
-                                 <*> (o .: "publicRoots"                                    )
-                                 <*> (o .:? "useLedgerAfterSlot" .!= UseLedger DontUseLedger)
+                RealNodeTopology <$> (o .: "localRoots"                                  )
+                                 <*> (o .: "publicRoots"                                 )
+                                 <*> (o .:? "useLedgerAfterSlot" .!= DontUseLedgerPeers  )
+                                 <*> (o .:? "bootstrapPeers" .!= DontUseBootstrapPeers)
 
 instance ToJSON NetworkTopology where
   toJSON top =
     case top of
-      RealNodeTopology lrpg prp ul -> object [ "localRoots"         .= lrpg
-                                             , "publicRoots"        .= prp
-                                             , "useLedgerAfterSlot" .= ul
-                                             ]
-
---
--- Legacy p2p topology file format
---
-
--- | A newtype wrapper which provides legacy 'FromJSON' instances.
---
-newtype Legacy a = Legacy { getLegacy :: a }
-
-instance FromJSON (Legacy a) => FromJSON (Legacy [a]) where
-  parseJSON = fmap (Legacy . map getLegacy) . parseJSONList
-
-instance FromJSON (Legacy LocalRootPeersGroup) where
-  parseJSON = withObject "LocalRootPeersGroup" $ \o ->
-                fmap Legacy $ LocalRootPeersGroup
-                  <$> o .: "localRoots"
-                  <*> o .: "valency"
-
-instance FromJSON (Legacy LocalRootPeersGroups) where
-  parseJSON = withObject "LocalRootPeersGroups" $ \o ->
-                Legacy . LocalRootPeersGroups . getLegacy
-                  <$> o .: "groups"
-
-instance FromJSON (Legacy PublicRootPeers) where
-  parseJSON = withObject "PublicRootPeers" $ \o ->
-                Legacy . PublicRootPeers
-                  <$> o .: "publicRoots"
-
-instance FromJSON (Legacy NetworkTopology) where
-  parseJSON = fmap Legacy
-            . withObject "NetworkTopology" (\o ->
-                RealNodeTopology <$> fmap getLegacy (o .: "LocalRoots")
-                                 <*> fmap getLegacy (o .: "PublicRoots")
-                                 <*> (o .:? "useLedgerAfterSlot" .!= UseLedger DontUseLedger))
+      RealNodeTopology { ntLocalRootPeersGroups
+                       , ntPublicRootPeers
+                       , ntUseLedgerPeers
+                       , ntUseBootstrapPeers
+                       } -> object [ "localRoots"         .= ntLocalRootPeersGroups
+                                   , "publicRoots"        .= ntPublicRootPeers
+                                   , "useLedgerAfterSlot" .= ntUseLedgerPeers
+                                   , "bootstrapPeers"     .= ntUseBootstrapPeers
+                                   ]
 
 -- | Read the `NetworkTopology` configuration from the specified file.
 --
-readTopologyFile :: Tracer IO (StartupTrace blk)
-                 -> NodeConfiguration -> IO (Either Text NetworkTopology)
-readTopologyFile tr nc = do
+readTopologyFile :: NodeConfiguration -> IO (Either Text NetworkTopology)
+readTopologyFile nc = do
   eBs <- Exception.try $ BS.readFile (unTopology $ ncTopologyFile nc)
 
   case eBs of
     Left e -> return . Left $ handler e
     Right bs ->
       let bs' = LBS.fromStrict bs in
-      first handlerJSON (eitherDecode bs')
-      `combine`
-      first handlerJSON (eitherDecode bs')
+        return $ case eitherDecode bs' of
+          Left err -> Left (handlerJSON err)
+          Right t
+            | isValidTrustedPeerConfiguration t -> Right t
+            | otherwise                         -> Left handlerBootstrap
+  where
+    handler :: IOException -> Text
+    handler e = Text.pack $ "Cardano.Node.Configuration.Topology.readTopologyFile: "
+                          ++ displayException e
+    handlerJSON :: String -> Text
+    handlerJSON err = mconcat
+      [ "Is your topology file formatted correctly? "
+      , "Expecting P2P Topology file format. "
+      , "The port and valency fields should be numerical. "
+      , "If you specified the correct topology file "
+      , "make sure that you correctly setup EnableP2P "
+      , "configuration flag. "
+      , Text.pack err
+      ]
+    handlerBootstrap :: Text
+    handlerBootstrap = mconcat
+      [ "You seem to have not configured any trustable peers. "
+      , "This is important in order for the node to make progress "
+      , "in bootstrap mode. Make sure you provide at least one bootstrap peer "
+      , "source. "
+      ]
 
- where
-  combine :: Either Text NetworkTopology
-          -> Either Text (Legacy NetworkTopology)
-          -> IO (Either Text NetworkTopology)
-  combine a b = case (a, b) of
-    (Right {}, _)     -> return a
-    (_, Right {})     -> traceWith tr NetworkConfigLegacy
-                           >> return (getLegacy <$> b)
-    (Left _, Left _)  -> -- ignore parsing error of legacy format
-                         return a
-
-  handler :: IOException -> Text
-  handler e = Text.pack $ "Cardano.Node.Configuration.Topology.readTopologyFile: "
-                        ++ displayException e
-  handlerJSON :: String -> Text
-  handlerJSON err = mconcat
-    [ "Is your topology file formatted correctly? "
-    , "Expecting P2P Topology file format. "
-    , "The port and valency fields should be numerical. "
-    , "If you specified the correct topology file "
-    , "make sure that you correctly setup EnableP2P "
-    , "configuration flag. "
-    , Text.pack err
-    ]
-
-readTopologyFileOrError :: Tracer IO (StartupTrace blk)
-                        -> NodeConfiguration -> IO NetworkTopology
-readTopologyFileOrError tr nc =
-      readTopologyFile tr nc
+readTopologyFileOrError :: NodeConfiguration -> IO NetworkTopology
+readTopologyFileOrError nc =
+      readTopologyFile nc
   >>= either (\err -> error $ "Cardano.Node.Configuration.TopologyP2P.readTopologyFile: "
                            <> Text.unpack err)
              pure
+
+--
+-- Checking for chance of progress in bootstrap phase
+--
+
+-- | This function returns false if non-trustable peers are configured
+--
+isValidTrustedPeerConfiguration :: NetworkTopology -> Bool
+isValidTrustedPeerConfiguration (RealNodeTopology (LocalRootPeersGroups lprgs) _ _ ubp) =
+    case ubp of
+      DontUseBootstrapPeers   -> True
+      UseBootstrapPeers []    -> anyTrustable
+      UseBootstrapPeers (_:_) -> True
+  where
+    anyTrustable =
+      any (\(LocalRootPeersGroup lr _ _ pt) -> case pt of
+              IsNotTrustable -> False
+              IsTrustable    -> not
+                              . null
+                              . rootAccessPoints
+                              $ lr
+          ) lprgs

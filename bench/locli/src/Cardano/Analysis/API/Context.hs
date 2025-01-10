@@ -1,21 +1,22 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE GeneralisedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PatternGuards #-}
 {-# LANGUAGE StrictData #-}
 {-# LANGUAGE UndecidableInstances #-}
 module Cardano.Analysis.API.Context (module Cardano.Analysis.API.Context) where
 
-import Cardano.Prelude
+import           Cardano.Prelude
 
-import Control.Monad (fail)
-
-import Data.Aeson ( FromJSON (..), ToJSON (..), Value
-                  , withObject, object, (.:), (.:?), (.=))
-import Data.Aeson.Key qualified as AE
-import Data.Aeson.KeyMap qualified as AE
-import Data.Aeson.Types qualified as AE
-import Data.Map.Strict qualified as Map
-import Data.Text qualified as T
-import Data.Time.Clock (UTCTime, NominalDiffTime)
+import           Control.Monad (fail)
+import           Data.Aeson (FromJSON (..), ToJSON (..), Value, object, withObject, (.!=), (.:),
+                   (.:?), (.=))
+import qualified Data.Aeson.Key as AE
+import qualified Data.Aeson.KeyMap as AE
+import qualified Data.Aeson.Types as AE
+import qualified Data.Map.Strict as Map
+import qualified Data.Text as T
+import           Data.Time.Clock (NominalDiffTime, UTCTime)
 
 
 -- This is difficult: we have two different genesis-related structures:
@@ -26,8 +27,17 @@ data GenesisSpec
   = GenesisSpec
   { delegators          :: Word64
   , utxo                :: Word64
+  , dreps               :: Word64
   }
-  deriving (Eq, Generic, Show, ToJSON, FromJSON, NFData)
+  deriving (Eq, Generic, Show, ToJSON, NFData)
+
+-- support legacy profile content that does not specify DRep count
+instance FromJSON GenesisSpec where
+  parseJSON = withObject "profile genesis" $ \o ->
+    GenesisSpec
+      <$> o .:  "delegators"
+      <*> o .:  "utxo"
+      <*> o .:? "dreps"       .!= 0
 
 -- | Partial 'Cardano.Ledger.Shelley.Genesis.ShelleyGenesis'
 data Genesis
@@ -63,6 +73,26 @@ data PParams
   }
   deriving (Eq, Generic, Show, FromJSON, ToJSON, NFData)
 
+data PlutusParams
+  = PlutusParams
+  { ppType            :: Text
+  , ppScript          :: Text
+  }
+  deriving (Eq, Generic, Show, NFData)
+
+instance FromJSON PlutusParams where
+  parseJSON = withObject "PlutusParams" $ \v ->
+    PlutusParams
+      <$> v .:? "type"    .!= ""
+      <*> v .:? "script"  .!= ""
+
+instance ToJSON PlutusParams where
+  toJSON PlutusParams{..} =
+    object
+      [ "type"    .= ppType
+      , "script"  .= ppScript
+      ]
+
 data GeneratorProfile
   = GeneratorProfile
   { add_tx_size      :: Word64
@@ -70,10 +100,27 @@ data GeneratorProfile
   , outputs_per_tx   :: Word64
   , tps              :: Double
   , tx_count         :: Word64
-  , plutusMode       :: Maybe Bool
-  , plutusLoopScript :: Maybe FilePath
+  , plutusMode       :: Maybe Bool            -- legacy format
+  , plutusAutoMode   :: Maybe Bool            -- legacy format
+  , plutus           :: Maybe PlutusParams
   }
-  deriving (Eq, Generic, Show, FromJSON, ToJSON, NFData)
+  deriving (Eq, Generic, Show, ToJSON, NFData)
+
+instance FromJSON GeneratorProfile where
+  parseJSON o = cleanup <$> AE.genericParseJSON AE.defaultOptions o
+    where
+      cleanup g = case g of
+        GeneratorProfile{plutus = Just PlutusParams{..}}
+          | T.null ppType || T.null ppScript -> g {plutus = Nothing}
+        _ -> g
+
+plutusLoopScript :: GeneratorProfile -> Maybe Text
+plutusLoopScript GeneratorProfile{plutusMode, plutusAutoMode, plutus}
+  | Just True <- (&&) <$> plutusAutoMode <*> plutusMode
+    = Just "Loop"
+  | otherwise
+    = ppScript `fmap` plutus
+
 
 newtype Commit   = Commit  { unCommit  :: Text } deriving newtype (Eq, Show, FromJSON, ToJSON, NFData)
 newtype Branch   = Branch  { unBranch  :: Text } deriving newtype (Eq, Show, FromJSON, ToJSON, NFData)
@@ -108,7 +155,7 @@ unknownComponent ciName = ComponentInfo
 instance FromJSON ComponentInfo where
   parseJSON = withObject "Component" $ \v -> do
     ciName    <- v .: "name"
-    ciCommit  <- v .: "commit"
+    ciCommit  <- v .:? "commit" .!= Commit "unknown"      -- workaround for commit hash missing from manifest
     ciBranch  <- v .:? "branch"
     ciStatus  <- v .:? "status"
     ciVersion <- v .: "version"
@@ -158,13 +205,14 @@ manifestPackages =
 
 data Metadata
   = Metadata
-  { tag             :: Text
-  , batch           :: Text
-  , ident           :: Text
-  , profile         :: Text
-  , era             :: Text
-  , manifest        :: Manifest
-  , profile_content :: AE.KeyMap Value
+  { tag               :: Text
+  , batch             :: Text
+  , ident             :: Text
+  , node_ghc_version  :: Text
+  , profile           :: Text
+  , era               :: Text
+  , manifest          :: Manifest
+  , profile_content   :: AE.KeyMap Value
   }
   deriving (Generic, NFData, Show, ToJSON)
 
@@ -172,20 +220,21 @@ instance FromJSON Metadata where
   parseJSON =
     withObject "Metadata" $ \v -> do
 
-      tag             <- v .: "tag"
-      batch           <- v .: "batch"
-      manifest        <- (v .: "manifest")
+      tag              <- v .: "tag"
+      batch            <- v .: "batch"
+      manifest         <- (v .: "manifest")
                          <|> compatParseManifest v
-      profile         <- v .: "profile"
-      profile_content <- v .: "profile_content"
-      generator       <- profile_content .: "generator"
+      profile          <- v .: "profile"
+      profile_content  <- v .: "profile_content"
+      generator        <- profile_content .: "generator"
 
-      ident           <- (v .:? "ident")
-                          <&> fromMaybe (unVersion . ciVersion $
+      ident            <- (v .:? "ident")
+                         <&> fromMaybe (unVersion . ciVersion $
                                          getComponent "cardano-node" manifest)
-      eraDirect       <- v .:?  "era"
-      eraProfile      <- profile_content .:? "era"
-      eraGenerator    <- generator .:? "era"
+      node_ghc_version <- v .:?  "node_ghc_version" .!= "unknown"
+      eraDirect        <- v .:?  "era"
+      eraProfile       <- profile_content .:? "era"
+      eraGenerator     <- generator .:? "era"
       era <- case eraDirect <|> eraProfile <|> eraGenerator of
         Just x -> pure x
         Nothing -> fail "While parsing run metafile:  missing era specification"

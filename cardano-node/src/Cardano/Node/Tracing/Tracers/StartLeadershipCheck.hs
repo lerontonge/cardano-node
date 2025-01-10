@@ -1,9 +1,9 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE PackageImports #-}
 
 module Cardano.Node.Tracing.Tracers.StartLeadershipCheck
   ( TraceStartLeadershipCheckPlus (..)
@@ -13,7 +13,6 @@ module Cardano.Node.Tracing.Tracers.StartLeadershipCheck
 
 
 import           Cardano.Logging
-import qualified "trace-dispatcher" Control.Tracer as T
 
 import           Control.Concurrent.STM (atomically)
 import           Data.IORef (readIORef)
@@ -52,33 +51,37 @@ data TraceStartLeadershipCheckPlus =
 forgeTracerTransform ::
   (  IsLedger (LedgerState blk)
   ,  LedgerQueries blk
+#if __GLASGOW_HASKELL__ >= 906
+  , AF.HasHeader blk
+#endif
   ,  AF.HasHeader (Header blk))
   => NodeKernelData blk
   -> Trace IO (ForgeTracerType blk)
   -> IO (Trace IO (ForgeTracerType blk))
-forgeTracerTransform nodeKern (Trace tr) = pure $ Trace $ T.arrow $ T.emit $
-    \case
-      (lc, Right (Left slc@(TraceStartLeadershipCheck slotNo))) -> do
-        query <- mapNodeKernelDataIO
-                    (\nk ->
-                       (,,)
-                         <$> nkQueryLedger (ledgerUtxoSize . ledgerState) nk
-                         <*> nkQueryLedger (ledgerDelegMapSize . ledgerState) nk
-                         <*> nkQueryChain fragmentChainDensity nk)
-                    nodeKern
-        case query of
-          SNothing -> T.traceWith tr (lc, Right (Left slc))
-          SJust (utxoSize, delegMapSize, chainDensity) ->
-                let msg = TraceStartLeadershipCheckPlus
-                            slotNo
-                            utxoSize
-                            delegMapSize
-                            (fromRational chainDensity)
-                in T.traceWith tr (lc, Right (Right msg))
-      (lc, Right a) ->
-          T.traceWith tr (lc, Right a)
-      (lc, Left control) ->
-          T.traceWith tr (lc, Left control)
+forgeTracerTransform nodeKern (Trace tr) =
+    contramapM (Trace tr)
+      (\case
+          (lc, Right (Left slc@(TraceStartLeadershipCheck slotNo))) -> do
+            query <- mapNodeKernelDataIO
+                        (\nk ->
+                          (,,)
+                            <$> nkQueryLedger (ledgerUtxoSize . ledgerState) nk
+                            <*> nkQueryLedger (ledgerDelegMapSize . ledgerState) nk
+                            <*> nkQueryChain fragmentChainDensity nk)
+                        nodeKern
+            case query of
+              SNothing -> pure (lc, Right (Left slc))
+              SJust (utxoSize, delegMapSize, chainDensity) ->
+                    let msg = TraceStartLeadershipCheckPlus
+                                slotNo
+                                utxoSize
+                                delegMapSize
+                                (fromRational chainDensity)
+                    in pure (lc, Right (Right msg))
+          (lc, Right a) ->
+              pure (lc, Right a)
+          (lc, Left control) ->
+              pure (lc, Left control))
 
 nkQueryLedger ::
      IsLedger (LedgerState blk)
@@ -89,7 +92,11 @@ nkQueryLedger f NodeKernel{getChainDB} =
   f <$> atomically (ChainDB.getCurrentLedger getChainDB)
 
 fragmentChainDensity ::
+#if __GLASGOW_HASKELL__ >= 906
+  (AF.HasHeader blk, AF.HasHeader (Header blk))
+#else
   AF.HasHeader (Header blk)
+#endif
   => AF.AnchoredFragment (Header blk) -> Rational
 fragmentChainDensity frag = calcDensity blockD slotD
   where

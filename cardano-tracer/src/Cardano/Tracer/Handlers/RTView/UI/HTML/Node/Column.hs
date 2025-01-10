@@ -5,15 +5,6 @@ module Cardano.Tracer.Handlers.RTView.UI.HTML.Node.Column
   , deleteNodeColumn
   ) where
 
-import           Control.Monad (forM, void)
-import           Control.Monad.Extra (whenJustM)
-import           Data.List.NonEmpty (NonEmpty)
-import qualified Data.List.NonEmpty as NE
-import           Data.Text (unpack)
-import qualified Graphics.UI.Threepenny as UI
-import           Graphics.UI.Threepenny.Core
-import           System.FilePath ((</>))
-
 import           Cardano.Tracer.Configuration
 import           Cardano.Tracer.Environment
 import           Cardano.Tracer.Handlers.RTView.UI.HTML.Node.EKG
@@ -23,6 +14,16 @@ import           Cardano.Tracer.Handlers.RTView.UI.JS.Utils
 import           Cardano.Tracer.Handlers.RTView.UI.Utils
 import           Cardano.Tracer.Types
 import           Cardano.Tracer.Utils
+
+import           Control.Monad (forM, void)
+import           Control.Monad.Extra (whenJustM)
+import           Data.List.NonEmpty (NonEmpty)
+import qualified Data.List.NonEmpty as NE
+import           Data.Text (unpack)
+import           System.FilePath ((</>))
+
+import qualified Graphics.UI.Threepenny as UI
+import           Graphics.UI.Threepenny.Core
 
 -- | For every connected node the new column should be added.
 addNodeColumn
@@ -49,13 +50,15 @@ addNodeColumn tracerEnv loggingConfig nodeId@(NodeId anId) = do
                                   #. "button is-info"
                                   # set UI.enabled False
                                   # set text "Details"
-  on UI.click peersDetailsButton . const $ fadeInModal peersTable
+  on_ UI.click peersDetailsButton do
+    fadeInModal peersTable
 
   ekgMetricsWindow <- mkEKGMetricsWindow id'
   ekgMetricsButton <- UI.button ## (id' <> "__node-ekg-metrics-button")
                                 #. "button is-info"
                                 # set text "Details"
-  on UI.click ekgMetricsButton . const $ fadeInModal ekgMetricsWindow
+  on_ UI.click ekgMetricsButton do
+    fadeInModal ekgMetricsWindow
 
   addNodeCellH "name"    [ image "rt-view-node-chart-label has-tooltip-multiline has-tooltip-left" rectangleSVG
                                  ## (id' <> "__node-chart-label")
@@ -351,7 +354,7 @@ logsSettings loggingConfig nodeName =
 
         copyPath <- UI.button #. "button is-info"
                                #+ [image "rt-view-copy-icon-on-button" copySVG]
-        on UI.click copyPath . const $
+        on_ UI.click copyPath do
           copyTextToClipboard pathToSubdir
 
         return $
@@ -373,7 +376,7 @@ logsSettings loggingConfig nodeName =
       JournalMode -> do
         copyId <- UI.button #. "button is-info"
                                #+ [image "rt-view-copy-icon" copySVG]
-        on UI.click copyId . const $
+        on_ UI.click copyId do
           copyTextToClipboard (unpack nodeName)
 
         return $

@@ -11,14 +11,13 @@ module Trace.Forward.Utils.TraceObject
   , getTraceObjectsFromReply
   ) where
 
-import           Control.Concurrent.STM (STM, atomically, retry)
+import           Control.Concurrent.STM (STM, atomically, check)
 import           Control.Concurrent.STM.TBQueue
 import           Control.Concurrent.STM.TVar
-import           Control.Monad (unless, when, (<$!>))
+import           Control.Monad (forM_, replicateM, unless, when, (<$!>))
 import           Control.Monad.Extra (whenM)
 import qualified Data.List.NonEmpty as NE
 import           Data.Word (Word16)
-import           System.IO
 
 import           Trace.Forward.Configuration.TraceObject
 import qualified Trace.Forward.Protocol.TraceObject.Forwarder as Forwarder
@@ -30,12 +29,14 @@ data ForwardSink lo = ForwardSink
   , disconnectedSize :: !Word
   , connectedSize    :: !Word
   , wasUsed          :: !(TVar Bool)
+  , overflowCallback :: !([lo] -> IO ())
   }
 
 initForwardSink
   :: ForwarderConfiguration lo
+  -> ([lo] -> IO ())
   -> IO (ForwardSink lo)
-initForwardSink ForwarderConfiguration{disconnectedQueueSize, connectedQueueSize} = do
+initForwardSink ForwarderConfiguration{disconnectedQueueSize, connectedQueueSize} callback = do
   -- Initially we always create a big queue, because during node's start
   -- the number of tracing items may be very big.
   (queue, used) <-
@@ -46,6 +47,7 @@ initForwardSink ForwarderConfiguration{disconnectedQueueSize, connectedQueueSize
     , disconnectedSize = disconnectedQueueSize
     , connectedSize    = connectedQueueSize
     , wasUsed          = used
+    , overflowCallback = callback
     }
 
 -- | There are 4 possible cases when we try to write tracing item:
@@ -53,12 +55,16 @@ initForwardSink ForwarderConfiguration{disconnectedQueueSize, connectedQueueSize
 --   2. The queue is __already__ empty (all previously written items were taken from it).
 --   3. The queue is full. In this case flush all tracing items to stdout and continue.
 --   4. The queue isn't empty and isn't full. Just continue writing.
-writeToSink
-  :: Show lo
-  => ForwardSink lo
+writeToSink ::
+     ForwardSink lo
   -> lo
   -> IO ()
-writeToSink ForwardSink{forwardQueue, disconnectedSize, connectedSize, wasUsed} traceObject = do
+writeToSink ForwardSink{
+              forwardQueue,
+              disconnectedSize,
+              connectedSize,
+              wasUsed,
+              overflowCallback} traceObject = do
   condToFlush <- atomically $ do
     q <- readTVar forwardQueue
     ((,) <$> isFullTBQueue q
@@ -76,11 +82,8 @@ writeToSink ForwardSink{forwardQueue, disconnectedSize, connectedSize, wasUsed} 
       (_,    _)    -> do
                           writeTBQueue q traceObject
                           pure Nothing
-  case condToFlush of
-    Nothing -> pure ()
-    Just li -> do
-                  mapM_ print li
-                  hFlush stdout
+  forM_ condToFlush overflowCallback
+
  where
   -- The queue is full, but if it's a small queue, we can switch it
   -- to a big one and give a chance not to flush items to stdout yet.
@@ -116,36 +119,41 @@ writeToSink ForwardSink{forwardQueue, disconnectedSize, connectedSize, wasUsed} 
 readFromSink
   :: ForwardSink lo -- ^ The sink contains the queue we read 'TraceObject's from.
   -> Forwarder.TraceObjectForwarder lo IO ()
-readFromSink sink@ForwardSink{forwardQueue, wasUsed} =
+readFromSink ForwardSink{forwardQueue, wasUsed} =
   Forwarder.TraceObjectForwarder
-    { Forwarder.recvMsgTraceObjectsRequest = \blocking (NumberOfTraceObjects n) -> do
-        replyList <-
-          case blocking of
-            TokBlocking -> do
-              objs <- atomically $ getNTraceObjects n forwardQueue >>= \case
-                []     -> retry -- No 'TraceObject's yet, just wait...
+    { Forwarder.recvMsgTraceObjectsRequest = \blocking (NumberOfTraceObjects n) ->
+        case blocking of
+          TokBlocking -> do
+            objs <- atomically $ do
+              queue <- readTVar forwardQueue
+              check . not =<< isEmptyTBQueue queue
+              res <- getNTraceObjectsNonBlocking n queue >>= \case
+                []     -> error "impossible"
                 (x:xs) -> return $ x NE.:| xs
-              atomically . modifyTVar' wasUsed . const $ True
-              return $ BlockingReply objs
-            TokNonBlocking -> do
-              objs <- atomically $ getNTraceObjects n forwardQueue
-              unless (null objs) $
-                atomically . modifyTVar' wasUsed . const $ True
-              return $ NonBlockingReply objs
-        return (replyList, readFromSink sink)
+              modifyTVar' wasUsed . const $ True
+              pure res
+            return $ BlockingReply objs
+          TokNonBlocking -> do
+            objs <- atomically $ do
+              queue <- readTVar forwardQueue
+              res <- getNTraceObjectsNonBlocking n queue
+              unless (null res) $
+                modifyTVar' wasUsed . const $ True
+              pure res
+            return $ NonBlockingReply objs
     , Forwarder.recvMsgDone = return ()
     }
 
--- | Returns at most N 'TraceObject's from the queue.
-getNTraceObjects
+getNTraceObjectsNonBlocking
   :: Word16
-  -> TVar (TBQueue lo)
+  -> TBQueue lo
   -> STM [lo]
-getNTraceObjects 0 _ = return []
-getNTraceObjects n q =
-  readTVar q >>= tryReadTBQueue >>= \case
-    Just lo' -> (lo' :) <$> getNTraceObjects (n - 1) q
-    Nothing  -> return []
+getNTraceObjectsNonBlocking 0 _ = return []
+getNTraceObjectsNonBlocking n q = do
+  len <- lengthTBQueue q
+  if len <= fromIntegral n
+    then flushTBQueue q
+    else replicateM (fromIntegral n) (readTBQueue q)
 
 getTraceObjectsFromReply
   :: BlockingReplyList blocking lo -- ^ The reply with list of 'TraceObject's.

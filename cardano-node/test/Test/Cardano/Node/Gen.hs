@@ -1,6 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 {-# OPTIONS_GHC -Wno-unticked-promoted-constructors #-}
@@ -17,28 +17,31 @@ module Test.Cardano.Node.Gen
   , genNodeSetup
   ) where
 
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as Aeson.KeyMap
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Vector as Vector
+import           Cardano.Api (textShow)
 
 import           Cardano.Node.Configuration.NodeAddress (NodeAddress' (..), NodeHostIPAddress (..),
                    NodeHostIPv4Address (..), NodeHostIPv6Address (..), NodeIPAddress,
                    NodeIPv4Address, NodeIPv6Address)
 import           Cardano.Node.Configuration.TopologyP2P (LocalRootPeersGroup (..),
                    LocalRootPeersGroups (..), NetworkTopology (..), NodeSetup (..),
-                   PeerAdvertise (..), PublicRootPeers (..), RootConfig (..), UseLedger (..))
+                   PeerAdvertise (..), PublicRootPeers (..), RootConfig (..))
 import           Cardano.Slotting.Slot (SlotNo (..))
-import           Ouroboros.Network.PeerSelection.LedgerPeers (UseLedgerAfter (..))
+import           Ouroboros.Network.PeerSelection.Bootstrap
+import           Ouroboros.Network.PeerSelection.LedgerPeers.Type (AfterSlot (..),
+                   UseLedgerPeers (..))
+import           Ouroboros.Network.PeerSelection.PeerTrustable
 import           Ouroboros.Network.PeerSelection.RelayAccessPoint (DomainAccessPoint (..),
                    RelayAccessPoint (..))
+import           Ouroboros.Network.PeerSelection.State.LocalRootPeers (HotValency (..),
+                   WarmValency (..))
 
-
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as Aeson.KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.IP as IP
-
-import           Cardano.Api (textShow)
-
+import qualified Data.Vector as Vector
 import           Data.Word (Word32)
+
 import           Hedgehog (Gen)
 import           Hedgehog.Corpus (cooking)
 import qualified Hedgehog.Gen as Gen
@@ -50,7 +53,8 @@ genNetworkTopology =
   Gen.choice
     [ RealNodeTopology <$> genLocalRootPeersGroups
                        <*> Gen.list (Range.linear 0 10) genPublicRootPeers
-                       <*> genUseLedger
+                       <*> genUseLedgerPeers
+                       <*> genUseBootstrapPeers
     ]
 
 -- | Generate valid encodings of p2p topology files
@@ -145,7 +149,7 @@ genNodeSetup =
     <*> Gen.maybe (genNodeAddress' genNodeHostIPv4Address)
     <*> Gen.maybe (genNodeAddress' genNodeHostIPv6Address)
     <*> Gen.list (Range.linear 0 6) genRootConfig
-    <*> genUseLedger
+    <*> genUseLedgerPeers
 
 genDomainAddress :: Gen DomainAccessPoint
 genDomainAddress =
@@ -174,8 +178,9 @@ genRootConfig = do
 genLocalRootPeersGroup :: Gen LocalRootPeersGroup
 genLocalRootPeersGroup = do
     ra <- genRootConfig
-    val <- Gen.int (Range.linear 0 (length (rootAccessPoints ra)))
-    return (LocalRootPeersGroup ra val)
+    hval <- Gen.int (Range.linear 0 (length (rootAccessPoints ra)))
+    wval <- WarmValency <$> Gen.int (Range.linear 0 hval)
+    LocalRootPeersGroup ra (HotValency hval) wval <$> genPeerTrustable
 
 genLocalRootPeersGroups :: Gen LocalRootPeersGroups
 genLocalRootPeersGroups =
@@ -187,8 +192,18 @@ genPublicRootPeers =
   PublicRootPeers
     <$> genRootConfig
 
-genUseLedger :: Gen UseLedger
-genUseLedger = do
+genUseLedgerPeers :: Gen UseLedgerPeers
+genUseLedgerPeers = do
     slot <- Gen.integral (Range.linear (-1) 10) :: Gen Integer
-    if slot >= 0 then return $ UseLedger $ UseLedgerAfter $ SlotNo $ fromIntegral slot
-                 else return $ UseLedger   DontUseLedger
+    return $ case compare slot 0 of
+      GT -> UseLedgerPeers $ After $ SlotNo $ fromIntegral slot
+      EQ -> UseLedgerPeers Always
+      LT -> DontUseLedgerPeers
+
+genUseBootstrapPeers :: Gen UseBootstrapPeers
+genUseBootstrapPeers = do
+  domains <- Gen.list (Range.linear 0 6) genRelayAddress
+  Gen.element [ DontUseBootstrapPeers , UseBootstrapPeers domains ]
+
+genPeerTrustable :: Gen PeerTrustable
+genPeerTrustable = Gen.element [ IsNotTrustable, IsTrustable ]

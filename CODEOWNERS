@@ -1,31 +1,25 @@
 # catch-all
 
-* @input-output-hk/cardano-sl
+* @intersectmbo/cardano-node-maintainers
 
 # Specific reviewers for code pieces
 # NB - The last matching pattern takes precedence
 
-# Technical writers
-# /doc folder and README.* needs to be owned by @docs-access
-doc/                                                          @input-output-hk/docs-access @input-output-hk/cardano-sl
-README.*                                                      @input-output-hk/docs-access @input-output-hk/cardano-sl
-CONTRIBUTING.rst                                              @input-output-hk/docs-access @input-output-hk/cardano-sl
-
 # Perf/Tracing
-bench/                                                        @input-output-hk/performance-tracing
-nix/workbench/                                                @input-output-hk/performance-tracing
-trace-dispatcher/                                             @input-output-hk/performance-tracing
-trace-forward/                                                @input-output-hk/performance-tracing
-trace-resources/                                              @input-output-hk/performance-tracing
-Makefile                                                      @input-output-hk/performance-tracing
-*.mk                                                          @input-output-hk/performance-tracing
+bench/                                                        @intersectmbo/performance-and-tracing
+nix/workbench/                                                @intersectmbo/performance-and-tracing
+trace-dispatcher/                                             @intersectmbo/performance-and-tracing
+trace-forward/                                                @intersectmbo/performance-and-tracing
+trace-resources/                                              @intersectmbo/performance-and-tracing
+Makefile                                                      @intersectmbo/performance-and-tracing
+*.mk                                                          @intersectmbo/performance-and-tracing
 
 # DevOps
-nix/                                                          @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-*.nix                                                         @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-flake.lock                                                    @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-.buildkite                                                    @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-.github                                                       @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-ci/                                                           @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-configuration/                                                @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
-docker-compose.yml                                            @input-output-hk/core-tech-devx @input-output-hk/core-tech-release
+nix/                                                          @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1
+*.nix                                                         @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1
+flake.lock                                                    @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1
+.github/workflows                                             @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1 @intersectmbo/cardano-node-maintainers
+ci/                                                           @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1
+configuration/                                                @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1
+docker-compose.yml                                            @intersectmbo/core-tech-devx @intersectmbo/core-tech-release-1
+

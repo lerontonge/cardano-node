@@ -6,15 +6,14 @@ module Cardano.Logging.FrequencyLimiter (
   , LimiterSpec (..)
 )where
 
-import           Control.Monad.IO.Unlift
-import           Data.Text
-import           Data.Time.Clock.System
-
-import qualified Control.Tracer as T
-
 import           Cardano.Logging.Trace
 import           Cardano.Logging.TraceDispatcherMessage
 import           Cardano.Logging.Types
+
+import           Control.Monad.IO.Unlift
+import qualified Control.Tracer as T
+import           Data.Text
+import           Data.Time.Clock.System
 
 -- | Threshold for starting and stopping of the limiter
 budgetLimit :: Double
@@ -80,7 +79,7 @@ limitFrequency
   -> m (Trace m a) -- the original trace
 limitFrequency thresholdFrequency limiterName ltracer vtracer = do
     timeNow <- systemTimeToSeconds <$> liftIO getSystemTime
-    foldMTraceM
+    foldTraceM
       (checkLimiting (1.0 / thresholdFrequency))
       (FrequencyRec Nothing timeNow 0.0 0.0 Nothing)
       (Trace $ T.contramap unfoldTrace (unpackTrace (filterTraceMaybe vtracer)))
@@ -115,7 +114,8 @@ limitFrequency thresholdFrequency limiterName ltracer vtracer = do
           if normaSpendReward + frBudget >= budgetLimit
             then do  -- start limiting
               traceWith
-                (setSeverity Info (withLoggingContext lc ltracer))
+                (appendPrefixNames ["Reflection"]
+                                   (setSeverity Info (withLoggingContext lc ltracer)))
                 (StartLimiting limiterName)
               pure fs  { frMessage     = Just message
                        , frLastTime    = timeNow
@@ -133,7 +133,8 @@ limitFrequency thresholdFrequency limiterName ltracer vtracer = do
            if normaSpendReward + frBudget <= (- budgetLimit)
             then do -- stop limiting
               traceWith
-                (setSeverity Info (withLoggingContext lc ltracer))
+                (appendPrefixNames  ["Reflection"]
+                                    (setSeverity Info (withLoggingContext lc ltracer)))
                 (StopLimiting limiterName nSuppressed)
               pure fs  { frMessage     = Just message
                        , frLastTime    = timeNow
@@ -147,8 +148,9 @@ limitFrequency thresholdFrequency limiterName ltracer vtracer = do
                 newFrLastRem <- if lastReminder > reminderPeriod
                                   then do
                                     traceWith
-                                      (setSeverity Info
-                                        (withLoggingContext lc ltracer))
+                                      (appendPrefixNames ["Reflection"]
+                                        (setSeverity Info
+                                          (withLoggingContext lc ltracer)))
                                       (RememberLimiting limiterName nSuppressed)
                                     pure timeNow
                                   else pure frLastRem

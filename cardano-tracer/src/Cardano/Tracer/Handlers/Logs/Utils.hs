@@ -1,23 +1,30 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Cardano.Tracer.Handlers.Logs.Utils
-  ( createEmptyLog
+  ( createOrUpdateEmptyLog
   , createEmptyLogRotation
   , getTimeStampFromLog
   , isItLog
+  , logExtension
+  , logPrefix
+  , timeStampFormat
   ) where
 
-import           Control.Monad (void)
+import           Cardano.Tracer.Configuration (LogFormat (..), LoggingParams (..))
+import           Cardano.Tracer.Types (HandleRegistry, HandleRegistryKey)
+import           Cardano.Tracer.Utils (modifyRegistry_)
+
 import           Control.Concurrent.Extra (Lock, withLock)
-import qualified Data.ByteString as BS
+import           Data.Foldable (for_)
+import qualified Data.Map as Map
 import           Data.Maybe (isJust)
 import qualified Data.Text as T
 import           Data.Time.Clock (UTCTime)
 import           Data.Time.Clock.System (getSystemTime, systemToUTCTime)
 import           Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
-import           System.FilePath ((<.>), (</>), takeBaseName, takeExtension, takeFileName)
-
-import           Cardano.Tracer.Configuration (LogFormat (..))
+import           System.Directory (createDirectoryIfMissing)
+import           System.FilePath (takeBaseName, takeExtension, takeFileName, (<.>), (</>))
+import           System.IO (IOMode (WriteMode), hClose, openFile)
 
 logPrefix :: String
 logPrefix = "node-"
@@ -42,20 +49,30 @@ isItLog format pathToLog = hasProperPrefix && hasTimestamp && hasProperExt
 
 createEmptyLogRotation
   :: Lock
+  -> HandleRegistryKey
+  -> HandleRegistry
   -> FilePath
-  -> LogFormat
   -> IO ()
-createEmptyLogRotation currentLogLock subDirForLogs format =
-  withLock currentLogLock $
-    void $ createEmptyLog subDirForLogs format
+createEmptyLogRotation currentLogLock key registry subDirForLogs = do
+  -- The root directory (as a parent for subDirForLogs) will be created as well if needed.
+  createDirectoryIfMissing True subDirForLogs
+  createOrUpdateEmptyLog currentLogLock key registry subDirForLogs
 
 -- | Create an empty log file (with the current timestamp in the name).
-createEmptyLog :: FilePath -> LogFormat -> IO FilePath
-createEmptyLog subDirForLogs format = do
-  ts <- formatTime defaultTimeLocale timeStampFormat . systemToUTCTime <$> getSystemTime
-  let pathToLog = subDirForLogs </> logPrefix <> ts <.> logExtension format
-  BS.writeFile pathToLog BS.empty
-  return pathToLog
+createOrUpdateEmptyLog :: Lock -> HandleRegistryKey -> HandleRegistry -> FilePath -> IO ()
+createOrUpdateEmptyLog currentLogLock key@(_, LoggingParams{logFormat = format}) registry subDirForLogs = do
+  withLock currentLogLock do
+    ts <- formatTime defaultTimeLocale timeStampFormat . systemToUTCTime <$> getSystemTime
+    let pathToLog = subDirForLogs </> logPrefix <> ts <.> logExtension format
+
+    modifyRegistry_ registry \handles -> do
+
+      for_ @Maybe (Map.lookup key handles) \(handle, _filePath) ->
+        hClose handle
+
+      newHandle <- openFile pathToLog WriteMode
+      let newMap = Map.insert key (newHandle, pathToLog) handles
+      pure newMap
 
 getTimeStampFromLog :: FilePath -> Maybe UTCTime
 getTimeStampFromLog pathToLog =

@@ -1,33 +1,26 @@
 {-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Cardano.Tracer.Handlers.Logs.File
   ( writeTraceObjectsToFile
   ) where
 
-import           Control.Concurrent.Extra (Lock, withLock)
-import           Control.Monad (unless)
-import           Control.Monad.Extra (ifM)
-import           Data.Aeson (Value, decodeStrict', pairs, (.=))
-import           Data.Aeson.Encoding (encodingToLazyByteString)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
-import           Data.Char (isDigit)
-import           Data.Maybe (mapMaybe)
-import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import           Data.Time.Format (defaultTimeLocale, formatTime)
-import           System.Directory (createDirectoryIfMissing, doesDirectoryExist, makeAbsolute)
-import           System.Directory.Extra (listFiles)
-import           System.FilePath ((</>))
-
 import           Cardano.Logging (TraceObject (..))
-
 import           Cardano.Tracer.Configuration
 import           Cardano.Tracer.Handlers.Logs.Utils
 import           Cardano.Tracer.Types
-import           Cardano.Tracer.Utils
+import           Cardano.Tracer.Utils (nl, readRegistry)
+
+import           Control.Concurrent.Extra (Lock)
+import           Control.Monad (unless)
+import qualified Data.ByteString.Char8 as BS8
+import qualified Data.Map as Map
+import           Data.Maybe (fromJust, fromMaybe)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import           System.Directory (makeAbsolute)
+import           System.FilePath ((</>))
+import           System.IO (hFlush)
 
 -- | Append the list of 'TraceObject's to the latest log via symbolic link.
 --
@@ -36,92 +29,47 @@ import           Cardano.Tracer.Utils
 -- the symbolic link will be switched to the new log file and writing can
 -- be interrupted. To prevent it, we use 'Lock'.
 writeTraceObjectsToFile
-  :: NodeName
+  :: HandleRegistry
+  -> LoggingParams
+  -> NodeName
   -> Lock
-  -> FilePath
-  -> LogFormat
   -> [TraceObject]
   -> IO ()
-writeTraceObjectsToFile nodeName currentLogLock rootDir format traceObjects = do
-  rootDirAbs <- makeAbsolute rootDir
-  let converter = case format of
-                    ForHuman   -> traceObjectToText
-                    ForMachine -> traceObjectToJSON
-  let itemsToWrite = mapMaybe converter traceObjects
-  unless (null itemsToWrite) $ do
-    pathToCurrentLog <- getPathToCurrentlog nodeName rootDirAbs format
-    let preparedLine = TE.encodeUtf8 $ T.concat itemsToWrite
-    withLock currentLogLock $
-      BS.appendFile pathToCurrentLog preparedLine
+writeTraceObjectsToFile registry loggingParams@LoggingParams{logRoot, logFormat} nodeName currentLogLock traceObjects = do
+  let converter :: TraceObject -> T.Text
+      converter = case logFormat of
+        ForHuman   -> traceTextForHuman
+        ForMachine -> traceTextForMachine
 
--- | Returns the path to the current log. Prepares the structure for the log files if needed:
---
---   /rootDir
---     /subDirForNode1
---       logs from node 1
---     /subDirForNode2
---       logs from node 2
---     ...
---     /subDirForNodeN
---       logs from node N
---
-getPathToCurrentlog
-  :: NodeName
-  -> FilePath
-  -> LogFormat
-  -> IO FilePath
-getPathToCurrentlog nodeName rootDirAbs format =
-  ifM (doesDirectoryExist subDirForLogs)
-    getPathToCurrentLogIfExists
-    prepareLogsStructure
- where
-  subDirForLogs = rootDirAbs </> T.unpack nodeName
+      itemsToWrite :: [T.Text]
+      itemsToWrite = map converter traceObjects
 
-  getPathToCurrentLogIfExists = do
-    logsWeNeed <- filter (isItLog format) <$> listFiles subDirForLogs
-    if null logsWeNeed
-      then createEmptyLog subDirForLogs format
-      -- We can sort the logs by timestamp, the biggest one is the latest one.
-      else return $ subDirForLogs </> maximum logsWeNeed
+      preparedLines :: BS8.ByteString
+      preparedLines = TE.encodeUtf8 (nl `T.append` T.intercalate nl itemsToWrite)
 
-  prepareLogsStructure = do
-    -- The root directory (as a parent for subDirForLogs) will be created as well if needed.
-    createDirectoryIfMissing True subDirForLogs
-    createEmptyLog subDirForLogs format
+  unless (null itemsToWrite) do
+    readRegistry registry >>= \handleMap -> do
+      let key = (nodeName, loggingParams)
+      case Map.lookup key handleMap of
+        Nothing -> do
+          rootDirAbs <- makeAbsolute logRoot
 
-traceObjectToText :: TraceObject -> Maybe T.Text
-traceObjectToText TraceObject{toHuman, toHostname, toNamespace, toSeverity, toThreadId, toTimestamp} =
-  case toHuman of
-    Nothing -> Nothing
-    Just msgForHuman -> Just $
-      "[" <> host <> ":" <> name <> ":" <> sev <> ":" <> thId <> "] [" <> time <> "] "
-      <> msgForHuman <> nl
- where
-  host = T.pack toHostname
-  name = mkName toNamespace
-  sev  = T.pack $ show toSeverity
-  thId = T.filter isDigit toThreadId
-  time = T.pack $ formatTime defaultTimeLocale "%F %T%2Q %Z" toTimestamp
+          let subDirForLogs :: FilePath
+              subDirForLogs = rootDirAbs </> T.unpack nodeName
 
-mkName :: [T.Text] -> T.Text
-mkName []    = "noname"
-mkName l = T.intercalate "." l
+          createEmptyLogRotation currentLogLock key registry subDirForLogs
+          handles <- readRegistry registry
+          let handle = fst (fromJust (Map.lookup key handles))
+          BS8.hPutStr handle preparedLines
+          hFlush handle
+        Just (handle, _filePath) -> do
+          BS8.hPutStr handle preparedLines
+          hFlush handle
 
-traceObjectToJSON :: TraceObject -> Maybe T.Text
-traceObjectToJSON TraceObject{toMachine, toTimestamp, toNamespace, toHostname, toSeverity, toThreadId} =
-  case toMachine of
-    Nothing  -> Nothing
-    Just msg -> Just $ toAsJSON msg <> nl
- where
-  toAsJSON msgForMachine =
-      TE.decodeUtf8
-    . LBS.toStrict
-    . encodingToLazyByteString
-    . pairs $ "at"     .= formatTime defaultTimeLocale "%F %H:%M:%S%4QZ" toTimestamp
-           <> "ns"     .= mkName toNamespace
-           <> "data"   .= case decodeStrict' $ TE.encodeUtf8 msgForMachine of
-                            Just (v :: Value) -> v
-                            Nothing -> ""
-           <> "sev"    .= T.pack (show toSeverity)
-           <> "thread" .= T.filter isDigit toThreadId
-           <> "host"   .= T.pack toHostname
+  -- when no forHuman message is implemented for a trace, fallback to forMachine
+traceTextForHuman :: TraceObject -> T.Text
+traceTextForHuman TraceObject{toHuman, toMachine} =
+  fromMaybe toMachine toHuman
+
+traceTextForMachine :: TraceObject -> T.Text
+traceTextForMachine TraceObject{toMachine} = toMachine

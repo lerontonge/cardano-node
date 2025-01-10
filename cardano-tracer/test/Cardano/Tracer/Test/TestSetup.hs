@@ -11,17 +11,17 @@ module Cardano.Tracer.Test.TestSetup
   )
 where
 
+import           Ouroboros.Network.Magic (NetworkMagic (..))
+
 import           Control.Monad (join)
 import           Data.Functor ((<&>))
 import           Data.Functor.Identity
 import           Data.Maybe
 import           Data.Monoid
 import           GHC.Generics (Generic)
-import           Generic.Data (gmappend)
-
 import           Options.Applicative
 
-import           Ouroboros.Network.Magic (NetworkMagic (..))
+import           Generic.Data (gmappend)
 
 
 data TestSetup a

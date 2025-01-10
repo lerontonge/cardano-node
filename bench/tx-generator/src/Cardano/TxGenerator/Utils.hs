@@ -11,12 +11,12 @@ module  Cardano.TxGenerator.Utils
         (module Cardano.TxGenerator.Utils)
         where
 
-import           Control.Monad.Trans.Except (ExceptT, throwE)
-import           Data.Maybe (fromJust)
-
 import           Cardano.Api as Api
 
+import qualified Cardano.Ledger.Coin as L
 import           Cardano.TxGenerator.Types
+
+import           Data.Maybe (fromJust)
 
 
 -- | `liftAnyEra` applies a function to the value in `InAnyCardanoEra`
@@ -35,34 +35,23 @@ liftAnyEra f x = case x of
 keyAddress :: forall era. IsShelleyBasedEra era => NetworkId -> SigningKey PaymentKey -> AddressInEra era
 keyAddress networkId k
   = makeShelleyAddressInEra
+      (shelleyBasedEra @era)
       networkId
       (PaymentCredentialByKey $ verificationKeyHash $ getVerificationKey k)
       NoStakeAddress
 
--- TODO: old TODO comment also said to check minimumValuePerUtxo
--- A different variable may need to be consulted now.
--- | 'inputsToOutputsWithFee' is what actually does the division
--- for 'Cardano.Benchmarking.Script.Env.SplitN', but the result
--- may not be positive if the fee exceeds the total. If so, an
--- exception is thrown, but the normal exception types risk
--- circular imports, so this ended up using a string and expects
--- callers to use 'Control.Monad.Trans.Except.withExceptT' to put
--- the strings inside of tagged data structures.
-inputsToOutputsWithFee :: Monad m => Lovelace -> Int -> [Lovelace] -> ExceptT String m [Lovelace]
-inputsToOutputsWithFee fee count inputs =
-  if total < fee then throwE $ "inputsToOutputs: insufficient funds "
-                               ++ show total ++ " < " ++ show fee
-                 else return . map (quantityToLovelace . Quantity)
-                             $ (out + rest) : replicate (count-1) out
+-- TODO: check sufficient funds and minimumValuePerUtxo
+inputsToOutputsWithFee :: L.Coin -> Int -> [L.Coin] -> [L.Coin]
+inputsToOutputsWithFee fee count inputs = map (quantityToLovelace . Quantity) outputs
   where
-    total = sum inputs
-    Quantity totalAvailable = lovelaceToQuantity $ total - fee
+    (Quantity totalAvailable) = lovelaceToQuantity $ sum inputs - fee
     (out, rest) = divMod totalAvailable (fromIntegral count)
+    outputs = (out + rest) : replicate (count-1) out
 
 -- | 'includeChange' gets use made of it as a value splitter in
 -- 'Cardano.TxGenerator.Tx.sourceToStoreTransactionNew' by
 -- 'Cardano.Benchmarking.Script.Core.evalGenerator'.
-includeChange :: Lovelace -> [Lovelace] -> [Lovelace] -> PayWithChange
+includeChange :: L.Coin -> [L.Coin] -> [L.Coin] -> PayWithChange
 includeChange fee spend have = case compare changeValue 0 of
   GT -> PayWithChange changeValue spend
   EQ -> PayExact spend
@@ -77,28 +66,16 @@ includeChange fee spend have = case compare changeValue 0 of
 
 -- | `mkTxFee` reinterprets the `Either` returned by
 -- `txFeesExplicitInEra` with `TxFee` constructors.
-mkTxFee :: forall era. IsCardanoEra era => Lovelace -> TxFee era
-mkTxFee f = either
-  TxFeeImplicit
-  (`TxFeeExplicit` f)
-  (txFeesExplicitInEra (cardanoEra @era))
+mkTxFee :: IsShelleyBasedEra era => L.Coin -> TxFee era
+mkTxFee = TxFeeExplicit shelleyBasedEra
 
 -- | `mkTxValidityUpperBound` rules out needing the
 -- `TxValidityNoUpperBound` with the constraint of `IsShelleyBasedEra`.
 mkTxValidityUpperBound :: forall era. IsShelleyBasedEra era => SlotNo -> TxValidityUpperBound era
-mkTxValidityUpperBound =
-  TxValidityUpperBound (fromJust $ validityUpperBoundSupportedInEra (cardanoEra @era))
-
--- | `mkTxOutValueAdaOnly` reinterprets the `Either` returned by
--- `multiAssetSupportedInEra` with `TxOutValue` constructors.
-mkTxOutValueAdaOnly :: forall era . IsShelleyBasedEra era => Lovelace -> TxOutValue era
-mkTxOutValueAdaOnly l = either
-  (`TxOutAdaOnly` l)
-  (\p -> TxOutValue p $ lovelaceToValue l)
-  (multiAssetSupportedInEra (cardanoEra @era))
+mkTxValidityUpperBound slotNo =
+  TxValidityUpperBound (fromJust $ forEraMaybeEon (cardanoEra @era)) (Just slotNo)
 
 -- | `mkTxInModeCardano` never uses the `TxInByronSpecial` constructor
 -- because its type enforces it being a Shelley-based era.
-mkTxInModeCardano :: forall era . IsShelleyBasedEra era => Tx era -> TxInMode CardanoMode
-mkTxInModeCardano tx =
-  TxInMode tx (fromJust $ toEraInMode (cardanoEra @era) CardanoMode)
+mkTxInModeCardano :: IsShelleyBasedEra era => Tx era -> TxInMode
+mkTxInModeCardano = TxInMode shelleyBasedEra

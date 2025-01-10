@@ -9,18 +9,8 @@ module Cardano.Tracer.Handlers.RTView.Update.Logs
   , updateLogsLiveViewNodes
   ) where
 
-import           Control.Concurrent.STM.TVar (readTVarIO)
-import           Control.Monad (forM_, void, when)
-import           Control.Monad.Extra (whenJustM, whenM)
-import qualified Data.Text as T
-import           Data.Time.Format (defaultTimeLocale, formatTime)
-import qualified Graphics.UI.Threepenny as UI
-import           Graphics.UI.Threepenny.Core
-
-import           Cardano.Logging (SeverityS (..))
-
+import           Cardano.Logging (SeverityS (..), showT)
 import           Cardano.Tracer.Environment
-import           Cardano.Tracer.Handlers.RTView.State.TraceObjects
 import           Cardano.Tracer.Handlers.RTView.UI.Charts
 import           Cardano.Tracer.Handlers.RTView.UI.Img.Icons
 import           Cardano.Tracer.Handlers.RTView.UI.JS.Utils
@@ -28,26 +18,37 @@ import           Cardano.Tracer.Handlers.RTView.UI.Types
 import           Cardano.Tracer.Handlers.RTView.UI.Utils
 import           Cardano.Tracer.Handlers.RTView.Update.Nodes
 import           Cardano.Tracer.Handlers.RTView.Utils
+import           Cardano.Tracer.Handlers.State.TraceObjects
 import           Cardano.Tracer.Types
 import           Cardano.Tracer.Utils
 
+import           Control.Concurrent.STM.TVar (readTVarIO)
+import           Control.Monad (forM_, void, when)
+import           Control.Monad.Extra (whenJustM, whenM)
+import qualified Data.Text as T
+import           Data.Time.Format (defaultTimeLocale, formatTime)
+
+import qualified Graphics.UI.Threepenny as UI
+import           Graphics.UI.Threepenny.Core
+
 updateLogsLiveViewItems
   :: TracerEnv
+  -> TracerEnvRTView
   -> LogsLiveViewCounters
   -> UI ()
-updateLogsLiveViewItems tracerEnv@TracerEnv{teSavedTO} llvCounters =
-  whenM logsLiveViewIsOpened $ do
+updateLogsLiveViewItems tracerEnv TracerEnvRTView{teSavedTO} llvCounters =
+  whenM logsLiveViewIsOpened do
     window <- askWindow
-    whenJustM (UI.getElementById window "node-logs-live-view-tbody") $ \el ->
-      forConnectedUI_ tracerEnv $ \nodeId@(NodeId anId) -> do
+    whenJustM (UI.getElementById window "node-logs-live-view-tbody") \el ->
+      forConnectedUI_ tracerEnv \nodeId@(NodeId anId) -> do
         nodeName        <- liftIO $ askNodeName tracerEnv nodeId
         nodeColor       <- liftIO $ getSavedColorForNode tracerEnv nodeName
         tosFromThisNode <- liftIO $ getTraceObjects teSavedTO nodeId
-        forM_ tosFromThisNode $ \trObInfo -> do
+        forM_ tosFromThisNode \trObInfo -> do
           -- We should add log items only for nodes which is "enabled" via checkbox.
           let checkId = T.unpack anId <> "__node-live-view-checkbox"
-          whenJustM (UI.getElementById window checkId) $ \checkbox -> do
-            whenM (get UI.checked checkbox) $ do
+          whenJustM (UI.getElementById window checkId) \checkbox -> do
+            whenM (get UI.checked checkbox) do
               doAddItemRow nodeId nodeName nodeColor llvCounters el trObInfo
               -- Since we have added a new item row, we have to check if there are
               -- too many items already. If so - we have to remove old item row,
@@ -56,7 +57,7 @@ updateLogsLiveViewItems tracerEnv@TracerEnv{teSavedTO} llvCounters =
               liftIO (getLogsLiveViewCounter llvCounters nodeId) >>= \case
                 Nothing -> return ()
                 Just currentNumber ->
-                  when (currentNumber > maxNumberOfLogsLiveViewItems) $ do
+                  when (currentNumber > maxNumberOfLogsLiveViewItems) do
                     -- Ok, we have to delete outdated item row.
                     let !outdatedItemNumber = currentNumber - maxNumberOfLogsLiveViewItems
                         outdatedItemId = nodeName <> "llv" <> showT outdatedItemNumber
@@ -89,8 +90,9 @@ doAddItemRow nodeId@(NodeId anId) nodeName nodeColor
   mkItemRow = do
     copyItemIcon <- image "has-tooltip-multiline has-tooltip-left rt-view-copy-icon" copySVG
                           # set dataTooltip "Click to copy this log item"
-    on UI.click copyItemIcon . const $ copyTextToClipboard $
-      "[" <> preparedTS ts <> "] [" <> show sev <> "] [" <> T.unpack ns <> "] [" <> T.unpack msg <> "]"
+    on_ UI.click copyItemIcon do
+      copyTextToClipboard $
+        "[" <> preparedTS ts <> "] [" <> show sev <> "] [" <> T.unpack ns <> "] [" <> T.unpack msg <> "]"
 
     let nodeNamePrepared = T.unpack $
           if T.length nodeName > 13

@@ -29,13 +29,14 @@ let
   profilingEff =
     if    profiling == "none"
        || profiling == "time"
+       || profiling == "time-detail"
        || profiling == "space-cost"
        || profiling == "space-heap"
        || profiling == "space-module"
        || profiling == "space-retainer"
        || profiling == "space-type"
     then profiling
-    else throw "FATAL:  WB_PROFILING must be one of:  none, time, space-cost, space-heap, space-module, space-retainer, space-type";
+    else throw "FATAL:  WB_PROFILING must be one of:  none, time, time-detail, space-cost, space-heap, space-module, space-retainer, space-type";
   project = if profilingEff != "none" then cardanoNodeProject.profiled else cardanoNodeProject;
 
   ## The default shell is defined by flake.nix: (cardanoNodeProject = flake.project.${final.system})
@@ -98,7 +99,6 @@ let
               inherit cardano-mainnet-mirror;
               inherit workbench-runner workbenchDevMode;
               inherit withHoogle;
-              withMainnet = false;
             };
     in project.shellFor {
     name = "devops-shell";
@@ -110,6 +110,7 @@ let
       cardano-cli
       bech32
       cardano-node
+      cardano-profile
       cardano-topology
       cardano-tracer
       locli
@@ -120,10 +121,11 @@ let
       cardanolib-py
       pstree
       pkgs.time
+      pkgs.util-linux
       workbench.workbench
-      workbench-interactive-start
-      workbench-interactive-stop
-      workbench-interactive-restart
+      workbench-runner.workbench-interactive-start
+      workbench-runner.workbench-interactive-stop
+      workbench-runner.workbench-interactive-restart
     ];
 
     # Disable build tools for all of hsPkgs (would include duplicates for cardano-cli, cardano-node, etc.)

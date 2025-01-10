@@ -108,20 +108,20 @@ measureBSCosts era = map (metadataSize era . Just . bsMetadata) [0..maxBSSize]
 metadataSize :: forall era . IsShelleyBasedEra era => AsType era -> Maybe TxMetadata -> Int
 metadataSize p m = dummyTxSize p m - dummyTxSize p Nothing
 
-dummyTxSizeInEra :: forall era . IsShelleyBasedEra era => TxMetadataInEra era -> Int
-dummyTxSizeInEra metadata = case createAndValidateTransactionBody dummyTx of
+dummyTxSizeInEra :: IsShelleyBasedEra era => TxMetadataInEra era -> Int
+dummyTxSizeInEra metadata = case createAndValidateTransactionBody shelleyBasedEra dummyTx of
   Right b -> BS.length $ serialiseToCBOR b
   Left err -> error $ "metaDataSize " ++ show err
  where
-  dummyTx :: TxBodyContent BuildTx era
-  dummyTx = defaultTxBodyContent
+  dummyTx = defaultTxBodyContent shelleyBasedEra
     & setTxIns
       [ ( TxIn "dbaff4e270cfb55612d9e2ac4658a27c79da4a5271c6f90853042d1403733810" (TxIx 0)
         , BuildTxWith $ KeyWitness KeyWitnessForSpending
         )
       ]
     & setTxFee (mkTxFee 0)
-    & setTxValidityRange (TxValidityNoLowerBound, mkTxValidityUpperBound 0)
+    & setTxValidityLowerBound TxValidityNoLowerBound
+    & setTxValidityUpperBound (mkTxValidityUpperBound 0)
     & setTxMetadata metadata
 
 dummyTxSize :: forall era . IsShelleyBasedEra era => AsType era -> Maybe TxMetadata -> Int
@@ -129,7 +129,7 @@ dummyTxSize _p m = (dummyTxSizeInEra @era) $ metadataInEra m
 
 metadataInEra :: forall era . IsShelleyBasedEra era => Maybe TxMetadata -> TxMetadataInEra era
 metadataInEra Nothing = TxMetadataNone
-metadataInEra (Just m) = case txMetadataSupportedInEra (cardanoEra @era) of
+metadataInEra (Just m) = case forEraMaybeEon (cardanoEra @era) of
   Nothing -> error "unreachable"
   Just e -> TxMetadataInEra e m
 

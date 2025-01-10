@@ -11,7 +11,7 @@ def era_defaults($era):
 
   ## Cluster topology and composition:
   , composition:
-    { locations:                      ["LO"]
+    { locations:                      ["loopback"]
     , n_bft_hosts:                    0
     , n_singular_hosts:               5
     , n_dense_hosts:                  1
@@ -31,7 +31,11 @@ def era_defaults($era):
     ## UTxO & delegation
     , per_pool_balance:               1000000000000000
     , funds_balance:                  10000000000000
+    , utxo_keys:                      1
     , utxo:                           0
+
+    ## DReps
+    , dreps:                          0
 
     ## Blockchain time & block density
     , active_slots_coeff:             0.05
@@ -59,14 +63,16 @@ def era_defaults($era):
       }
     }
 
+  , workloads: []
+
   , node:
     { rts_flags_override:             []
+    , heap_limit:                     null                ## optional: heap limit in MB (translates to RTS flag -M)
     , shutdown_on_slot_synced:        null
     , shutdown_on_block_synced:       null
     , tracing_backend:                "trace-dispatcher"  ## or "iohk-monitoring"
-    , ekg:                            false
     , tracer:                         true
-    , rtview:                         false
+    , utxo_lmdb:                      false               ## use LMDB backend (instead of default in-mem) on a UTxO-HD node; will be ignored by non-UTxO-HD nodes
     , verbatim:
       {
       }
@@ -82,5 +88,41 @@ def era_defaults($era):
     , finish_patience:                21
     , filters:                        ["unitary"]
     }
+
+  , tracer:
+    { rtview:                         false
+    , ekg:                            false
+    , withresources:                  false   # enable resource tracing for cardano-tracer
+    }
+
+  , cluster:
+    { nomad:
+      { namespace: "default"
+      , class: ""
+        # As they will be used in the "group.*.resources" of the Nomad Job JSON.
+      , resources:
+        { producer: {cores: 2, memory: 15000, memory_max: 16000}
+        , explorer: {cores: 2, memory: 15000, memory_max: 16000}
+        }
+      # Volumes like {source: "ssd1", destination: "/ssd1", read_only: false}
+      , host_volumes: null
+      , fetch_logs_ssh: false
+      }
+    , aws:
+      { instance_type:
+        { producer: "c5.2xlarge"
+        , explorer: "m5.4xlarge"
+        }
+      # "attr.unique.platform.aws.public-ipv4" to bind and service definition.
+      , use_public_routing: false
+      }
+    , minimun_storage:
+      { producer: 12582912 # 12×1024×1024
+      , explorer: 14155776 # 13.5×1024×1024
+      }
+    , keep_running: false
+    , ssd_directory: null
+    }
   }
+
 } | (.common * (.[$era] // {}));

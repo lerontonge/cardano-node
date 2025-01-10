@@ -6,31 +6,31 @@ module Test.Trace.Forward.Protocol.DataPoint.Tests
   ( tests
   ) where
 
-import qualified Codec.Serialise as CBOR
-import           Control.Monad.IOSim (runSimOrThrow)
-import           Control.Monad.Class.MonadST
-import           Control.Monad.Class.MonadAsync
-import           Control.Monad.Class.MonadThrow
-import           Control.Monad.ST (runST)
-import           Control.Tracer (nullTracer)
-import           Test.Tasty
-import           Test.Tasty.QuickCheck
-
-import           Network.TypedProtocol.Codec
-import           Network.TypedProtocol.Proofs
 import           Ouroboros.Network.Channel
 import           Ouroboros.Network.Driver.Simple (runConnectedPeers)
 
-import           Trace.Forward.Protocol.DataPoint.Acceptor
-import           Trace.Forward.Protocol.DataPoint.Forwarder
-import           Trace.Forward.Protocol.DataPoint.Codec
-import           Trace.Forward.Protocol.DataPoint.Type
+import qualified Codec.Serialise as CBOR
+import           Control.Monad.Class.MonadAsync
+import           Control.Monad.Class.MonadST
+import           Control.Monad.Class.MonadSTM
+import           Control.Monad.Class.MonadThrow
+import           Control.Monad.IOSim (runSimOrThrow)
+import           Control.Monad.ST (runST)
+import           Control.Tracer (nullTracer)
+import           Network.TypedProtocol.Codec
+import           Network.TypedProtocol.Proofs
 
+import           Test.Tasty
+import           Test.Tasty.QuickCheck
+import           Test.Trace.Forward.Protocol.Common
 import           Test.Trace.Forward.Protocol.DataPoint.Codec ()
 import           Test.Trace.Forward.Protocol.DataPoint.Direct
 import           Test.Trace.Forward.Protocol.DataPoint.Examples
 
-import           Test.Trace.Forward.Protocol.Common
+import           Trace.Forward.Protocol.DataPoint.Acceptor
+import           Trace.Forward.Protocol.DataPoint.Codec
+import           Trace.Forward.Protocol.DataPoint.Forwarder
+import           Trace.Forward.Protocol.DataPoint.Type
 
 tests :: TestTree
 tests = testGroup "Trace.Forward.Protocol.DataPoint"
@@ -78,23 +78,38 @@ prop_direct_DataPointForward
   -> NonNegative Int
   -> Property
 prop_direct_DataPointForward f (NonNegative n) =
-    runSimOrThrow
-      (direct
-         dataPointForwarderCount
-         (dataPointAcceptorApply f 0 n))
-  ===
-    (n, foldr ($) 0 (replicate n f))
+  runSimOrThrow (prop_direct f n)
+
+prop_direct
+  :: MonadSTM m
+  => (Int -> Int)
+  -> Int
+  -> m Property
+prop_direct f n = do
+  fwcount <- dataPointForwarderCount
+  result <- direct fwcount (dataPointAcceptorApply f 0 n)
+  return $ result === (n, foldr ($) 0 (replicate n f))
 
 prop_connect_DataPointForward
   :: (Int -> Int)
   -> NonNegative Int
   -> Bool
 prop_connect_DataPointForward f (NonNegative n) =
-  case runSimOrThrow
-         (connect
-            (dataPointForwarderPeer   dataPointForwarderCount)
-            (dataPointAcceptorPeer  $ dataPointAcceptorApply f 0 n)) of
-    (s, c, TerminalStates TokDone TokDone) -> (s, c) == (n, foldr ($) 0 (replicate n f))
+  runSimOrThrow (prop_connect f n)
+
+prop_connect
+  :: ( MonadST   m
+     , MonadAsync m
+     )
+  => (Int -> Int)
+  -> Int
+  -> m Bool
+prop_connect f n = do
+  forwarder <- dataPointForwarderPeer <$> dataPointForwarderCount
+  result <- connect forwarder (dataPointAcceptorPeer $ dataPointAcceptorApply f 0 n)
+  case result of
+    (s, c, TerminalStates TokDone TokDone) ->
+      pure $ (s, c) == (n, foldr ($) 0 (replicate n f))
 
 prop_channel
   :: ( MonadST    m
@@ -105,6 +120,7 @@ prop_channel
   -> Int
   -> m Property
 prop_channel f n = do
+  forwarder <- dataPointForwarderPeer <$> dataPointForwarderCount
   (s, c) <- runConnectedPeers createConnectedChannels
                               nullTracer
                               (codecDataPointForward CBOR.encode CBOR.decode
@@ -112,7 +128,6 @@ prop_channel f n = do
                               forwarder acceptor
   return $ (s, c) === (n, foldr ($) 0 (replicate n f))
  where
-  forwarder = dataPointForwarderPeer   dataPointForwarderCount
   acceptor  = dataPointAcceptorPeer  $ dataPointAcceptorApply f 0 n
 
 prop_channel_ST_DataPointForward

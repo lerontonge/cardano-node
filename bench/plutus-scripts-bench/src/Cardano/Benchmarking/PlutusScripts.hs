@@ -17,16 +17,20 @@ module Cardano.Benchmarking.PlutusScripts
 import           Prelude
 
 import           Data.ByteString.Lazy as LBS (ByteString)
-import           Data.Text(split, pack)
-import           Data.List(find)
-import           System.FilePath(takeBaseName)
+import           Data.List (find)
+import           Data.Text (pack, split)
+import           System.FilePath (takeBaseName)
 
 import           Cardano.Api
 
 import qualified Cardano.Benchmarking.PlutusScripts.CustomCall as CustomCall
 import qualified Cardano.Benchmarking.PlutusScripts.EcdsaSecp256k1Loop as ECDSA
-import qualified Cardano.Benchmarking.PlutusScripts.Loop as Loop
+import qualified Cardano.Benchmarking.PlutusScripts.HashOntoG2AndAdd as HashG2Add
+import qualified Cardano.Benchmarking.PlutusScripts.Loop2024 as Loop2024
+import qualified Cardano.Benchmarking.PlutusScripts.LoopV3 as LoopV3
+import qualified Cardano.Benchmarking.PlutusScripts.Ripemd160 as Ripemd160
 import qualified Cardano.Benchmarking.PlutusScripts.SchnorrSecp256k1Loop as Schnorr
+import qualified Cardano.Benchmarking.PlutusScripts.SupplementalDatum as SupplementalDatum
 import           Cardano.Benchmarking.ScriptAPI
 
 
@@ -34,8 +38,12 @@ getAllScripts :: [PlutusBenchScript]
 getAllScripts =
   [ CustomCall.script
   , ECDSA.script
-  , Loop.script
+  , HashG2Add.script
+  , Loop2024.script
+  , LoopV3.script
+  , Ripemd160.script
   , Schnorr.script
+  , SupplementalDatum.script
   ]
 
 listPlutusScripts ::
@@ -59,6 +67,7 @@ encodePlutusScript
   = \case
     ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV1) s -> textEnvelopeToJSON Nothing s
     ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV2) s -> textEnvelopeToJSON Nothing s
+    ScriptInAnyLang (PlutusScriptLanguage PlutusScriptV3) s -> textEnvelopeToJSON Nothing s
     _                                                       -> "{}"
 
 

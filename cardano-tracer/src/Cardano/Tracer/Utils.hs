@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -22,6 +21,7 @@ module Cardano.Tracer.Utils
   , initConnectedNodesNames
   , initDataPointRequestors
   , initProtocolsBrake
+  , logTrace
   , lift2M
   , lift3M
   , forMM
@@ -29,39 +29,62 @@ module Cardano.Tracer.Utils
   , nl
   , runInLoop
   , showProblemIfAny
-  , showT
+  , memberRegistry
+  , showRegistry
+  , newRegistry
+  , lookupRegistry
+  , elemsRegistry
+  , clearRegistry
+  , modifyRegistry_
+  , readRegistry
+  , getProcessId
+  , sequenceConcurrently_
   ) where
 
+import           Cardano.Node.Startup (NodeInfo (..))
+import           Cardano.Tracer.Configuration
+import           Cardano.Tracer.Environment
+import           Cardano.Tracer.Handlers.Utils
+import           Cardano.Tracer.Types
+import           Ouroboros.Network.Socket (ConnectionId (..))
+
+#if MIN_VERSION_base(4,18,0)
+-- Do not know why.
+import           Control.Applicative (liftA3)
+#else
 import           Control.Applicative (liftA2, liftA3)
+#endif
 import           Control.Concurrent (killThread, mkWeakThreadId, myThreadId)
+import           Control.Concurrent.Async (Concurrently(..))
 import           Control.Concurrent.Extra (Lock)
+import           Control.Concurrent.MVar (newMVar, swapMVar, readMVar, tryReadMVar, modifyMVar_)
 import           Control.Concurrent.STM (atomically)
 import           Control.Concurrent.STM.TVar (modifyTVar', newTVarIO, readTVarIO)
-import           Control.Exception (SomeException, SomeAsyncException (..), finally,
-                   fromException, try, tryJust)
+import           Control.Exception (SomeAsyncException (..), SomeException, finally, fromException,
+                   try, tryJust)
 import           Control.Monad (forM_)
 import           Control.Monad.Extra (whenJustM)
-import           "contra-tracer" Control.Tracer (showTracing, stdoutTracer, traceWith)
-import           Data.Bimap ((!>))
+import           "contra-tracer" Control.Tracer (stdoutTracer, traceWith)
+import           Data.Word (Word32)
 import qualified Data.Bimap as BM
+import           Data.Foldable (traverse_)
+import           Data.Functor ((<&>), void)
 import           Data.List.Extra (dropPrefix, dropSuffix, replace)
-import qualified Data.Map.Strict as M
+import qualified Data.Map.Strict as Map
 import qualified Data.Set as S
 import qualified Data.Text as T
 import           Data.Tuple.Extra (uncurry3)
-import           System.IO (hFlush, stdout)
+import           System.IO (hClose, hFlush, stdout)
 import           System.Mem.Weak (deRefWeak)
 import qualified System.Signal as S
 import           System.Time.Extra (sleep)
 
-import           Cardano.Node.Startup (NodeInfo (..))
-
-import           Ouroboros.Network.Socket (ConnectionId (..))
-
-import           Cardano.Tracer.Configuration
-import           Cardano.Tracer.Environment
-import           Cardano.Tracer.Handlers.RTView.Update.Utils
-import           Cardano.Tracer.Types
+#if defined(mingw32_HOST_OS)
+import           System.Win32.Process (getCurrentProcessId)
+#else
+import           System.Posix.Process (getProcessID)
+import           System.Posix.Types (CPid (..))
+#endif
 
 -- | Run monadic action in a loop. If there's an exception,
 --   it will re-run the action again, after pause that grows.
@@ -104,7 +127,7 @@ showProblemIfAny verb action =
     Right _ -> return ()
 
 logTrace :: String -> IO ()
-logTrace = traceWith $ showTracing stdoutTracer
+logTrace = traceWith stdoutTracer
 
 connIdToNodeId :: Show addr => ConnectionId addr -> NodeId
 connIdToNodeId ConnectionId{remoteAddress} = NodeId preparedAddress
@@ -132,10 +155,10 @@ initConnectedNodesNames :: IO ConnectedNodesNames
 initConnectedNodesNames = newTVarIO BM.empty
 
 initAcceptedMetrics :: IO AcceptedMetrics
-initAcceptedMetrics = newTVarIO M.empty
+initAcceptedMetrics = newTVarIO Map.empty
 
 initDataPointRequestors :: IO DataPointRequestors
-initDataPointRequestors = newTVarIO M.empty
+initDataPointRequestors = newTVarIO Map.empty
 
 initProtocolsBrake :: IO ProtocolsBrake
 initProtocolsBrake = newTVarIO False
@@ -174,7 +197,7 @@ askNodeId
 askNodeId TracerEnv{teConnectedNodesNames} nodeName = do
   nodesNames <- readTVarIO teConnectedNodesNames
   return $! if nodeName `BM.memberR` nodesNames
-              then Just $ nodesNames !> nodeName
+              then Just $ nodesNames BM.!> nodeName
               else Nothing
 
 -- | Stop the protocols. As a result, 'MsgDone' will be sent and interaction
@@ -203,9 +226,6 @@ nl = "\n"
 nl = "\r\n"
 #endif
 
-showT :: Show a => a -> T.Text
-showT = T.pack . show
-
 -- | If 'cardano-tracer' process is going to die (by receiving some system signal),
 --   we want to do something before it stops.
 beforeProgramStops :: IO () -> IO ()
@@ -223,3 +243,50 @@ beforeProgramStops action = do
     , S.sigINT
     , S.sigTERM
     ]
+
+memberRegistry :: Ord a => a -> Registry a b -> IO Bool
+memberRegistry a (Registry registry) = do
+  tryReadMVar registry <&> \case
+    Nothing -> False
+    Just set -> Map.member a set
+
+showRegistry :: Show a => Show b => Registry a b -> IO ()
+showRegistry (Registry registry) = do
+  tryReadMVar registry >>= \case
+    Nothing -> error "showRegistry: tryReadMVar failed."
+    Just set -> print set
+
+newRegistry :: IO (Registry a b)
+newRegistry = Registry <$> newMVar Map.empty
+
+lookupRegistry :: Ord a => Ord b => a -> b -> Registry (a, b) c -> IO (Maybe c)
+lookupRegistry key key1 (Registry registry) = do
+  Map.lookup (key, key1) <$> readMVar registry
+
+elemsRegistry :: Registry a b -> IO [b]
+elemsRegistry (Registry registry) = do
+  fmap Map.elems (readMVar registry)
+
+clearRegistry :: HandleRegistry -> IO ()
+clearRegistry registry@(Registry mvar) = do
+  elemsRegistry registry >>= traverse_ (hClose . fst)
+  void do
+    swapMVar mvar Map.empty
+
+modifyRegistry_ :: Registry a b -> (Map.Map a b -> IO (Map.Map a b)) -> IO ()
+modifyRegistry_ (Registry registry) = modifyMVar_ registry
+
+readRegistry :: Registry a b -> IO (Map.Map a b)
+readRegistry (Registry registry) = readMVar registry
+
+getProcessId :: IO Word32
+getProcessId =
+#if defined(mingw32_HOST_OS)
+  getCurrentProcessId
+#else
+  do CPid pid <- getProcessID
+     return $ fromIntegral pid
+#endif
+
+sequenceConcurrently_ :: Traversable t => t (IO a) -> IO ()
+sequenceConcurrently_ = runConcurrently . traverse_ Concurrently

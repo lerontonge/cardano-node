@@ -1,5 +1,5 @@
 { pkgs
-, runJq
+, jsonFilePretty
 
 , backend
 , profile
@@ -9,69 +9,68 @@
 with pkgs.lib;
 
 let
-  finaliseTracerService =
-    svc: recursiveUpdate svc
-      ({
-        configFile     = "config.json";
-        logRoot        = ".";
-      } // optionalAttrs backend.useCabalRun {
-        executable     = "cardano-tracer";
-      } // optionalAttrs profile.node.rtview {
-        RTView         = {
-          epHost = "127.0.0.1";
-          epPort = 3300;
-        };
-      });
-
-  ##
-  ## nodeSpecsTracerConfig :: Map NodeId NodeSpec -> TracerConfig
-  ##
-  nodeSpecsTracerConfig =
-    nodeSpecs:
-    let
-    in
-        finaliseTracerService
-        {
-          ## In both the local and remote scenarios, it's most frequently convenient to act as an acceptor.
-          acceptingSocket = "tracer.socket";
-
-          networkMagic = profile.genesis.network_magic;
-
-          dsmPassthrough = {
-            # rtsOpts = ["-xc"];
-          };
-        };
 
   ## Given an env config, evaluate it and produce the service.
   ##
   ## tracerConfigServiceConfig :: TracerConfig -> NixosServiceConfig
   ##
   tracerConfigServiceConfig =
-    tracerConfig:
     let
-    systemdCompat.options = {
-      systemd.services = mkOption {};
-      systemd.sockets = mkOption {};
-      users = mkOption {};
-      assertions = mkOption {};
-    };
-    eval = let
-      extra = {
-        services.cardano-tracer = {
-          enable = true;
-        } // tracerConfig;
+      tracerConfig =
+        {
+          ## In both the local and remote scenarios, it's most frequently
+          ## convenient to act as an acceptor.
+          acceptingSocket = "tracer.socket";
+          networkMagic = profile.genesis.network_magic;
+          dsmPassthrough = {
+            # rtsOpts = ["-xc"];
+          } // optionalAttrs (profile.tracer.withresources or false) {
+            rtsOpts = [ "-scardano-tracer.gcstats" ];
+          };
+          configFile     = "config.json";
+          logRoot        = ".";
+          metricsHelp    = "../../../cardano-tracer/configuration/metrics_help.json";
+        } // optionalAttrs backend.useCabalRun {
+          executable     = "cardano-tracer";
+        } // optionalAttrs profile.tracer.rtview {
+          RTView         = {
+            epHost = "127.0.0.1";
+            epPort = 3300;
+          };
+        } // optionalAttrs (profile.tracer.withresources or false) {
+          resourceFreq = 1000;
+        }
+      ;
+      systemdCompat.options = {
+        systemd.services = mkOption {};
+        systemd.sockets = mkOption {};
+        users = mkOption {};
+        assertions = mkOption {};
+        environment = mkOption {};
       };
-    in evalModules {
-      prefix = [];
-      modules = import ../../nixos/module-list.nix
-                ++ [ (import ../../nixos/cardano-tracer-service.nix pkgs)
-                     systemdCompat extra
-                     { config._module.args = { inherit pkgs; }; }
-                   ]
-                ++ [ backend.service-modules.tracer or {} ];
-      # args = { inherit pkgs; };
-    };
-    in eval.config.services.cardano-tracer;
+      eval =
+        let
+          extra = {
+            services.cardano-tracer = {
+              enable = true;
+            } // tracerConfig;
+          };
+        in evalModules {
+          prefix = [];
+          modules =    import ../../nixos/module-list.nix
+                    ++ [
+                         (import ../../nixos/cardano-tracer-service.nix pkgs)
+                           systemdCompat
+                           extra
+                           { config._module.args = { inherit pkgs; }; }
+                       ]
+                    ++ [ backend.service-modules.tracer or {} ]
+          ;
+          # args = { inherit pkgs; };
+        }
+      ;
+    in
+      eval.config.services.cardano-tracer;
 
   ##
   ## generator-service :: (TracerConfig, NixosServiceConfig, Config, StartScript)
@@ -79,46 +78,24 @@ let
   tracer-service =
     (nodeSpecs:
     let
-      tracerConfig          = nodeSpecsTracerConfig nodeSpecs;
-      nixosServiceConfig    = tracerConfigServiceConfig tracerConfig;
-      nixosServiceConfigFns = ["configJSONfn"];
+      nixosServiceConfig    = tracerConfigServiceConfig;
       execConfig            = nixosServiceConfig.configJSONfn nixosServiceConfig;
     in {
-      tracer-config = {
-        value = tracerConfig;
-        JSON  = runJq "tracer-config.json"
-                  ''--null-input --sort-keys
-                    --argjson x '${__toJSON tracerConfig}'
-                  '' "$x";
-      };
-
-      serviceConfig = {
-        ## XXX: service == appallingly bad name -- it's bona-fide NixOS service "config", not a service!
-        value = nixosServiceConfig;
-        JSON  = runJq "service-config.json"
-                  ''--null-input --sort-keys
-                    --argjson x '${__toJSON (removeAttrs nixosServiceConfig nixosServiceConfigFns)}'
-                  '' "$x";
-      };
-
-      config = rec {
-        value = execConfig;
-        JSON  = runJq "config.json"
-                  ''--null-input
-                    --argjson x '${__toJSON execConfig}'
-                  '' "$x";
-      };
-
-      startupScript = rec {
-        JSON = pkgs.writeScript "startup-tracer.sh" value;
+      start = rec {
         value = ''
           #!${pkgs.stdenv.shell}
 
           ${nixosServiceConfig.script}
           '';
+        JSON = pkgs.writeScript "startup-tracer.sh" value;
+      };
+
+      config = rec {
+        value = execConfig;
+        JSON  = jsonFilePretty "config.json" (__toJSON execConfig);
       };
     })
-    nodeSpecs.value;
+    nodeSpecs;
 in
 {
   inherit tracer-service;

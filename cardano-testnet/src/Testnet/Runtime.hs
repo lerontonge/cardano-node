@@ -1,227 +1,361 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Testnet.Runtime
-  ( LeadershipSlot(..)
-  , NodeLoggingFormat(..)
-  , PaymentKeyPair(..)
-  , StakingKeyPair(..)
-  , TmpAbsolutePath(..)
-  , TestnetRuntime(..)
-  , NodeRuntime(..)
-  , PoolNode(..)
-  , PoolNodeKeys(..)
-  , Delegator(..)
-  , allNodes
-  , bftSprockets
-  , poolSprockets
-  , poolNodeStdout
-  , readNodeLoggingFormat
-  , startNode
-  , ShelleyGenesis(..)
-  , shelleyGenesis
-  , getStartTime
-  , fromNominalDiffTimeMicro
+  ( startNode
+  , startLedgerNewEpochStateLogging
+  , NodeStartFailure (..)
   ) where
+
+import           Cardano.Api
+import qualified Cardano.Api as Api
+
+import qualified Cardano.Ledger.Api as L
+import qualified Cardano.Ledger.Shelley.LedgerState as L
 
 import           Prelude
 
+import           Control.Exception.Safe
 import           Control.Monad
-import           Control.Monad.Error.Class
-import           Control.Monad.IO.Class
-import           Control.Monad.Trans.Except
-import qualified Data.Aeson as A
-import qualified Data.List as L
-import           Data.Text (Text)
-import           Data.Time.Clock (UTCTime)
-import           GHC.Generics (Generic)
+import           Control.Monad.State.Strict
+import           Control.Monad.Trans.Resource
+import           Data.Aeson
+import           Data.Aeson.Encode.Pretty (encodePretty)
+import           Data.Algorithm.Diff
+import           Data.Algorithm.DiffOutput
+import           Data.Bifunctor (first)
+import qualified Data.ByteString.Lazy.Char8 as BSC
+import           Data.List (isInfixOf)
+import qualified Data.List as List
 import           GHC.Stack
-import qualified Hedgehog as H
-import           Hedgehog.Extras.Stock.IO.Network.Sprocket (Sprocket (..))
-import qualified Hedgehog.Extras.Stock.IO.Network.Sprocket as IO
-import qualified Hedgehog.Extras.Stock.String as S
-import qualified Hedgehog.Extras.Test.Base as H
-import qualified Hedgehog.Extras.Test.File as H
-import qualified Hedgehog.Extras.Test.Process as H
+import qualified GHC.Stack as GHC
+import           Network.Socket (HostAddress, PortNumber)
+import           Prettyprinter (unAnnotate)
+import qualified System.Directory as IO
 import           System.FilePath
-import qualified System.Info as OS
 import qualified System.IO as IO
 import qualified System.Process as IO
 
-import           Cardano.Api
-import qualified Cardano.Chain.Genesis as G
-import           Cardano.Crypto.ProtocolMagic (RequiresNetworkMagic (..))
-import           Cardano.Ledger.Crypto (StandardCrypto)
-import           Cardano.Ledger.Shelley.Genesis
-import           Cardano.Node.Configuration.POM
-import qualified Cardano.Node.Protocol.Byron as Byron
-import           Cardano.Node.Types
 import           Testnet.Filepath
-import qualified Testnet.Process.Run as H
+import qualified Testnet.Ping as Ping
+import           Testnet.Process.Run
+import           Testnet.Types (TestnetNode (..), TestnetRuntime (configurationFile),
+                   showIpv4Address, testnetSprockets)
 
-data NodeLoggingFormat = NodeLoggingFormatAsJson | NodeLoggingFormatAsText deriving (Eq, Show)
+import           Hedgehog (MonadTest)
+import qualified Hedgehog as H
+import           Hedgehog.Extras.Stock.IO.Network.Sprocket (Sprocket (..))
+import qualified Hedgehog.Extras.Stock.IO.Network.Sprocket as H
+import qualified Hedgehog.Extras.Test.Base as H
+import qualified Hedgehog.Extras.Test.Concurrent as H
 
-data TestnetRuntime = TestnetRuntime
-  { configurationFile :: FilePath
-  , shelleyGenesisFile :: FilePath
-  , testnetMagic :: Int
-  , bftNodes :: [NodeRuntime]
-  , poolNodes :: [PoolNode]
-  , wallets :: [PaymentKeyPair]
-  , delegators :: [Delegator]
-  }
+data NodeStartFailure
+  = ProcessRelatedFailure ProcessError
+  | ExecutableRelatedFailure ExecutableError
+  | FileRelatedFailure IOException
+  | NodeExecutableError (Doc Ann)
+  | NodeAddressAlreadyInUseError (Doc Ann)
+ -- | NodePortNotOpenError IOException
+  | MaxSprocketLengthExceededError
+  deriving Show
 
-data NodeRuntime = NodeRuntime
-  { nodeName :: String
-  , nodeSprocket :: Sprocket
-  , nodeStdinHandle :: IO.Handle
-  , nodeStdout :: FilePath
-  , nodeStderr :: FilePath
-  , nodeProcessHandle :: IO.ProcessHandle
-  }
+-- | Analyze @stderr@ contents and return the appropriate error. If the node didn't start because the address
+-- was already in use, 'NodeAddressAlreadyInUse' is returned.
+mkNodeNonEmptyStderrError
+  :: String -- ^ @stderr@ contents
+  -> NodeStartFailure
+mkNodeNonEmptyStderrError stderr' = do
+  if "Address already in use" `isInfixOf` stderr'
+    then NodeAddressAlreadyInUseError $ pretty stderr'
+    else NodeExecutableError $ pretty stderr'
 
-data PoolNode = PoolNode
-  { poolRuntime :: NodeRuntime
-  , poolKeys :: PoolNodeKeys
-  }
+instance Error NodeStartFailure where
+  prettyError = \case
+    ProcessRelatedFailure e -> "Cannot initiate process:" <+> pshow e
+    ExecutableRelatedFailure e -> "Cannot run cardano-node executable" <+> pshow e
+    FileRelatedFailure e -> "File error:" <+> prettyException e
+    NodeExecutableError e -> "Cardano node process did not start:" <+> unAnnotate e
+    NodeAddressAlreadyInUseError e -> "Cardano node process did not start - address already in use:" <+> unAnnotate e
+    MaxSprocketLengthExceededError -> "Max sprocket length exceeded"
 
-data PoolNodeKeys = PoolNodeKeys
-  { poolNodeKeysColdVkey :: FilePath
-  , poolNodeKeysColdSkey :: FilePath
-  , poolNodeKeysVrfVkey :: FilePath
-  , poolNodeKeysVrfSkey :: FilePath
-  , poolNodeKeysStakingVkey :: FilePath
-  , poolNodeKeysStakingSkey :: FilePath
-  } deriving (Eq, Show)
-
-data PaymentKeyPair = PaymentKeyPair
-  { paymentVKey :: FilePath
-  , paymentSKey :: FilePath
-  } deriving (Eq, Show)
-
-data StakingKeyPair = StakingKeyPair
-  { stakingVKey :: FilePath
-  , stakingSKey :: FilePath
-  } deriving (Eq, Show)
-
-data Delegator = Delegator
-  { paymentKeyPair :: PaymentKeyPair
-  , stakingKeyPair :: StakingKeyPair
-  } deriving (Eq, Show)
-
-data LeadershipSlot = LeadershipSlot
-  { slotNumber  :: Int
-  , slotTime    :: Text
-  } deriving (Eq, Show, Generic, FromJSON)
-
-
-poolNodeStdout :: PoolNode -> FilePath
-poolNodeStdout = nodeStdout . poolRuntime
-
-bftSprockets :: TestnetRuntime -> [Sprocket]
-bftSprockets = fmap nodeSprocket . bftNodes
-
-poolSprockets :: TestnetRuntime -> [Sprocket]
-poolSprockets = fmap (nodeSprocket . poolRuntime) . poolNodes
-
-shelleyGenesis :: (H.MonadTest m, MonadIO m, HasCallStack) => TestnetRuntime -> m (ShelleyGenesis StandardCrypto)
-shelleyGenesis TestnetRuntime{shelleyGenesisFile} = withFrozenCallStack $
-  H.evalEither =<< H.evalIO (A.eitherDecodeFileStrict' shelleyGenesisFile)
-
-getStartTime :: (H.MonadTest m, MonadIO m, HasCallStack) => FilePath -> TestnetRuntime -> m UTCTime
-getStartTime tempRootPath TestnetRuntime{configurationFile} = withFrozenCallStack $ H.evalEither <=< H.evalIO . runExceptT $ do
-  byronGenesisFile <-
-    decodeNodeConfiguration configurationFile >>=
-      \case
-        NodeProtocolConfigurationCardano NodeByronProtocolConfiguration{npcByronGenesisFile} _ _ _ _ ->
-          pure $ unGenesisFile npcByronGenesisFile
-        NodeProtocolConfigurationByron NodeByronProtocolConfiguration{npcByronGenesisFile} ->
-          pure $ unGenesisFile npcByronGenesisFile
-        unsupported ->
-          throwError $ unwords
-            [ "cannot find byron configuration path in"
-            , configurationFile
-            , "- found instead:"
-            , show unsupported
-            ]
-  let byronGenesisFilePath = tempRootPath </> byronGenesisFile
-  G.gdStartTime . G.configGenesisData <$> decodeGenesisFile byronGenesisFilePath
-  where
-    decodeNodeConfiguration :: FilePath -> ExceptT String IO NodeProtocolConfiguration
-    decodeNodeConfiguration file = do
-      partialNodeCfg <- ExceptT $ A.eitherDecodeFileStrict' file
-      fmap ncProtocolConfig . liftEither . makeNodeConfiguration $ defaultPartialNodeConfiguration <> partialNodeCfg
-    decodeGenesisFile :: FilePath -> ExceptT String IO G.Config
-    decodeGenesisFile fp = withExceptT displayError $
-      Byron.readGenesis (GenesisFile fp) Nothing RequiresNoMagic
-
-readNodeLoggingFormat :: String -> Either String NodeLoggingFormat
-readNodeLoggingFormat = \case
-  "json" -> Right NodeLoggingFormatAsJson
-  "text" -> Right NodeLoggingFormatAsText
-  s -> Left $ "Unrecognised node logging format: " <> show s <> ".  Valid options: \"json\", \"text\""
-
-allNodes :: TestnetRuntime -> [NodeRuntime]
-allNodes tr = bftNodes tr <> fmap poolRuntime (poolNodes tr)
-
+-- TODO: We probably want a check that this node has the necessary config files to run and
+-- if it doesn't we fail hard.
 -- | Start a node, creating file handles, sockets and temp-dirs.
+--
+-- If the port in the function argument was obtained using 'H.randomPort' which binds to the port first and then
+-- closes it, on some operating systems, like MacOS, the port can get stuck in TIME_WAIT state for a
+-- significant period. Unfortunately there is no Haskell API giving the ability to check that - this
+-- means that the user of this function needs to retry on 'NodeAddressAlreadyInUseError' until this
+-- function succeeds.
+-- (see state diagram in https://www.rfc-editor.org/rfc/rfc793#section-3.2 p. 23.)
 startNode
-  :: TmpAbsolutePath
+  :: HasCallStack
+  => MonadResource m
+  => MonadCatch m
+  => MonadFail m
+  => MonadTest m
+  => TmpAbsolutePath
   -- ^ The temporary absolute path
   -> String
   -- ^ The name of the node
+  -> HostAddress
+  -- ^ Node IPv4 address
+  -> PortNumber
+  -- ^ Node port
+  -> Int
+  -- ^ Testnet magic
   -> [String]
-  -- ^ The command --socket-path and --port will be added automatically.
-  -> H.Integration NodeRuntime
-startNode tp@(TmpAbsolutePath tempAbsPath) node nodeCmd = do
+  -- ^ The command to execute to start the node.
+  -- @--socket-path@, @--port@, and @--host-addr@ gets added automatically.
+  -> ExceptT NodeStartFailure m TestnetNode
+startNode tp node ipv4 port testnetMagic nodeCmd = GHC.withFrozenCallStack $ do
   let tempBaseAbsPath = makeTmpBaseAbsPath tp
       socketDir = makeSocketDir tp
       logDir = makeLogDir tp
 
-  H.createDirectoryIfMissing_ logDir
-  H.createSubdirectoryIfMissing_ tempBaseAbsPath socketDir
+  liftIO $ createDirectoryIfMissingNew_ $ logDir </> node
+  void . liftIO $ createSubdirectoryIfMissingNew tempBaseAbsPath (socketDir </> node)
 
-  nodeStdoutFile <- H.noteTempFile logDir $ node <> ".stdout.log"
-  nodeStderrFile <- H.noteTempFile logDir $ node <> ".stderr.log"
-  sprocket <- H.noteShow $ Sprocket tempBaseAbsPath (socketDir </> node)
+  let nodeStdoutFile = logDir </> node </> "stdout.log"
+      nodeStderrFile = logDir </> node </> "stderr.log"
+      socketRelPath = socketDir </> node </> "sock"
+      sprocket = Sprocket tempBaseAbsPath socketRelPath
 
-  hNodeStdout <- H.openFile nodeStdoutFile IO.WriteMode
-  hNodeStderr <- H.openFile nodeStderrFile IO.WriteMode
+  hNodeStdout <- retryOpenFile nodeStdoutFile IO.WriteMode
+  hNodeStderr <- retryOpenFile nodeStderrFile IO.ReadWriteMode
 
-  H.diff (L.length (IO.sprocketArgumentName sprocket)) (<=) IO.maxSprocketArgumentNameLength
+  -- Sometimes the handles are not getting properly closed when node fails to start. This results in
+  -- operating system holding the file lock for longer than it's necessary. This in the end prevents retrying
+  -- node start and acquiring a lock for the same stderr/stdout files again.
+  closeHandlesOnError [hNodeStdout, hNodeStderr] $ do
 
-  portString <- fmap S.strip . H.readFile $ tempAbsPath </> node </> "port"
+    unless (List.length (H.sprocketArgumentName sprocket) <= H.maxSprocketArgumentNameLength) $
+       left MaxSprocketLengthExceededError
+
+    let socketAbsPath = H.sprocketSystemName sprocket
+
+    nodeProcess
+      <- firstExceptT ExecutableRelatedFailure
+           $ hoistExceptT liftIO $ procNode $ mconcat
+                         [ nodeCmd
+                         , [ "--socket-path", H.sprocketArgumentName sprocket
+                           , "--port", show port
+                           , "--host-addr", showIpv4Address ipv4
+                           ]
+                         ]
+
+    -- The port number if it is obtained using 'H.randomPort', it is firstly bound to and then closed. The closing
+    -- and release in the operating system is done asynchronously and can be slow. Here we wait until the port
+    -- is out of CLOSING state.
+    H.note_ $ "Waiting for port " <> show port <> " to be available before starting node"
+    H.assertM $ Ping.waitForPortClosed 30 0.1 port
+
+    (Just stdIn, _, _, hProcess, _)
+      <- firstExceptT ProcessRelatedFailure $ initiateProcess
+            $ nodeProcess
+               { IO.std_in = IO.CreatePipe, IO.std_out = IO.UseHandle hNodeStdout
+               , IO.std_err = IO.UseHandle hNodeStderr
+               , IO.cwd = Just tempBaseAbsPath
+               }
+
+    -- We force the evaluation of initiateProcess so we can be sure that
+    -- the process has started. This allows us to read stderr in order
+    -- to fail early on errors generated from the cardano-node binary.
+    _ <- liftIO (IO.getPid hProcess)
+      >>= hoistMaybe (NodeExecutableError $ "startNode:" <+> pretty node <+> "'s process did not start.")
+
+    -- Wait for socket to be created
+    eSprocketError <-
+      Ping.waitForSprocket
+        120  -- timeout
+        0.2 -- check interval
+        sprocket
+
+    -- If we do have anything on stderr, fail.
+    stdErrContents <- liftIO $ IO.readFile nodeStderrFile
+    unless (null stdErrContents) $
+      throwError $ mkNodeNonEmptyStderrError stdErrContents
+
+    -- No stderr and no socket? Fail.
+    firstExceptT
+      (\ioex ->
+        NodeExecutableError . hsep $
+          ["Socket", pretty socketAbsPath, "was not created after 120 seconds. There was no output on stderr. Exception:", prettyException ioex])
+      $ hoistEither eSprocketError
+
+    -- Ping node and fail on error
+    Ping.pingNode (fromIntegral testnetMagic) sprocket
+       >>= (firstExceptT (NodeExecutableError . ("Ping error:" <+>) . prettyError) . hoistEither)
+
+    pure $ TestnetNode
+      { nodeName = node
+      , poolKeys = Nothing -- they're set in the function caller, if present
+      , nodeIpv4 = ipv4
+      , nodePort = port
+      , nodeSprocket = sprocket
+      , nodeStdinHandle = stdIn
+      , nodeStdout = nodeStdoutFile
+      , nodeStderr = nodeStderrFile
+      , nodeProcessHandle = hProcess
+      }
+  where
+    -- close provided list of handles when 'ExceptT' throws an error
+    closeHandlesOnError :: MonadIO m => [IO.Handle] -> ExceptT e m a -> ExceptT e m a
+    closeHandlesOnError handles action =
+      catchE action $ \e -> do
+        liftIO $ mapM_ IO.hClose handles
+        throwE e
+
+    -- Sometimes even when we close the files manually, the operating system still holds the lock for some
+    -- reason. This is most prominent on MacOS. Therefore, as a last resort, instead of
+    -- failing the node startup procedure, we simply try to use a different file name for the logs, with
+    -- the suffix @-n.log@ where @n@ is an attempt number.
+    retryOpenFile :: MonadIO m
+                  => MonadCatch m
+                  => FilePath -- ^ path we're trying to open
+                  -> IO.IOMode
+                  -> ExceptT NodeStartFailure m IO.Handle
+    retryOpenFile fullPath mode = go 0
+      where
+        go :: MonadIO m
+           => MonadCatch m
+           => Int
+           -> ExceptT NodeStartFailure m IO.Handle
+        go n = do
+          let (path, extension) = splitExtension fullPath
+              path' = if n > 0
+                         then path <> "-" <> show n <> extension
+                         else fullPath
+          r <- fmap (first FileRelatedFailure) . try . liftIO $ IO.openFile path' mode
+          case r of
+            Right h -> pure h
+            Left e
+              -- give up after 1000 attempts
+              | n >= 1000 -> throwE e
+              | otherwise -> go (n + 1)
 
 
-  createProcessNode
-    <- H.procNode $ mconcat
-                    [ nodeCmd
-                    , [ "--socket-path", IO.sprocketArgumentName sprocket
-                      , "--port", portString
-                      ]
-                    ]
 
+createDirectoryIfMissingNew :: HasCallStack => FilePath -> IO FilePath
+createDirectoryIfMissingNew directory = GHC.withFrozenCallStack $ do
+  IO.createDirectoryIfMissing True directory
+  pure directory
 
-  (Just stdIn, _, _, hProcess, _)
-    <- H.createProcess
-         $ createProcessNode
-            { IO.std_in = IO.CreatePipe, IO.std_out = IO.UseHandle hNodeStdout
-            , IO.std_err = IO.UseHandle hNodeStderr
-            , IO.cwd = Just tempBaseAbsPath
-            }
+createDirectoryIfMissingNew_ :: HasCallStack => FilePath -> IO ()
+createDirectoryIfMissingNew_ directory = GHC.withFrozenCallStack $
+  void $ createDirectoryIfMissingNew directory
 
-  H.noteShowM_ $ H.getPid hProcess
+createSubdirectoryIfMissingNew :: ()
+  => HasCallStack
+  => FilePath
+  -> FilePath
+  -> IO FilePath
+createSubdirectoryIfMissingNew parent subdirectory = GHC.withFrozenCallStack $ do
+  IO.createDirectoryIfMissing True $ parent </> subdirectory
+  pure subdirectory
 
-  -- The node process can fail on startup, e.g while
-  -- parsing the configuration yaml file. If we don't fail
-  -- when stderr is populated, we end up having to wait for the
-  -- timeout to expire before we can see the error.
+-- | Start ledger's new epoch state logging for the first node in the background.
+-- Pretty JSON logs will be placed in:
+-- 1. <tmp workspace directory>/logs/ledger-new-epoch-state.log
+-- 2. <tmp workspace directory>/logs/ledger-new-epoch-state-diffs.log
+-- NB: The diffs represent the the changes in the 'NewEpochState' between each
+-- block or turn of the epoch. We have excluded the 'stashedAVVMAddresses'
+-- field of 'NewEpochState' in the JSON rendering.
+-- The logging thread will be cancelled when `MonadResource` releases all resources.
+-- Idempotent.
+startLedgerNewEpochStateLogging
+  :: HasCallStack
+  => MonadCatch m
+  => MonadResource m
+  => MonadTest m
+  => TestnetRuntime
+  -> FilePath -- ^ tmp workspace directory
+  -> m ()
+startLedgerNewEpochStateLogging testnetRuntime tmpWorkspace = withFrozenCallStack $ do
+  let logDir = makeLogDir (TmpAbsolutePath tmpWorkspace)
+      -- used as a lock to start only a single instance of epoch state logging
+      logFile = logDir </> "ledger-epoch-state.log"
+      diffFile = logDir </> "ledger-epoch-state-diffs.log"
 
-  when (OS.os `L.elem` ["darwin", "linux"]) $ do
-    H.onFailure . H.noteIO_ $ IO.readProcess "lsof" ["-iTCP:" <> portString, "-sTCP:LISTEN", "-n", "-P"] ""
+  H.evalIO (IO.doesDirectoryExist logDir) >>= \case
+    True -> pure ()
+    False -> do
+      H.note_ $ "Log directory does not exist: " <> logDir <> " - cannot start logging epoch states"
+      H.failure
 
-  return $ NodeRuntime node sprocket stdIn nodeStdoutFile nodeStderrFile hProcess
+  H.evalIO (IO.doesFileExist logFile) >>= \case
+    True -> do
+      H.note_ $ "Epoch states logging to " <> logFile <> " is already started."
+    False -> do
+      H.evalIO $ appendFile logFile ""
+      socketPath <- H.noteM $ H.sprocketSystemName <$> H.headM (testnetSprockets testnetRuntime)
+
+      _ <- H.asyncRegister_ . runExceptT $
+        foldEpochState
+          (configurationFile testnetRuntime)
+          (Api.File socketPath)
+          Api.QuickValidation
+          (EpochNo maxBound)
+          Nothing
+          (handler logFile diffFile)
+
+      H.note_ $ "Started logging epoch states to: " <> logFile <> "\nEpoch state diffs are logged to: " <> diffFile
+  where
+    handler :: FilePath -- ^ log file
+            -> FilePath -- ^ diff file
+            -> AnyNewEpochState
+            -> SlotNo
+            -> BlockNo
+            -> StateT (Maybe AnyNewEpochState) IO ConditionResult
+    handler outputFp diffFp anes@(AnyNewEpochState !sbe !nes) _ (BlockNo blockNo) = handleException $ do
+      let prettyNes = shelleyBasedEraConstraints sbe (encodePretty nes)
+          blockLabel = "#### BLOCK " <> show blockNo <> " ####"
+      liftIO . BSC.appendFile outputFp $ BSC.unlines [BSC.pack blockLabel, prettyNes, ""]
+
+      -- store epoch state for logging of differences
+      mPrevEpochState <- get
+      put (Just anes)
+      forM_ mPrevEpochState $ \(AnyNewEpochState sbe' pnes) -> do
+        let prettyPnes = shelleyBasedEraConstraints sbe' (encodePretty pnes)
+            difference = calculateEpochStateDiff prettyPnes prettyNes
+        liftIO . appendFile diffFp $ unlines [blockLabel, difference, ""]
+
+      pure ConditionNotMet
+      where
+        -- | Handle all sync exceptions and log them into the log file. We don't want to fail the test just
+        -- because logging has failed.
+        handleException = handle $ \(e :: SomeException) -> do
+          liftIO $ appendFile outputFp $ "Ledger new epoch logging failed - caught exception:\n"
+            <> displayException e <> "\n"
+          pure ConditionMet
+
+calculateEpochStateDiff
+  :: BSC.ByteString -- ^ Current epoch state
+  -> BSC.ByteString -- ^ Following epoch state
+  -> String
+calculateEpochStateDiff current next =
+  let diffResult = getGroupedDiff (BSC.unpack <$> BSC.lines current) (BSC.unpack <$> BSC.lines next)
+  in if null diffResult
+     then "No changes in epoch state"
+     else ppDiff diffResult
+
+instance (L.EraTxOut ledgerera, L.EraGov ledgerera) => ToJSON (L.NewEpochState ledgerera) where
+  toJSON (L.NewEpochState nesEL nesBprev nesBCur nesEs nesRu nesPd _stashedAvvm) =
+    object
+      [ "currentEpoch" .= nesEL
+      , "priorBlocks" .= nesBprev
+      , "currentEpochBlocks" .= nesBCur
+      , "currentEpochState" .= nesEs
+      , "rewardUpdate" .= nesRu
+      , "currentStakeDistribution" .= nesPd
+      ]
+
