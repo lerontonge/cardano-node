@@ -1,0 +1,519 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd"><html xmlns="http://www.w3.org/1999/xhtml"><head><link rel="stylesheet" type="text/css" href="style.css" /><script type="text/javascript" src="highlight.js"></script></head><body><pre><span class="hs-pragma">{-# LANGUAGE CPP #-}</span><span>
+</span><span id="line-2"></span><span class="hs-pragma">{-# LANGUAGE RecordWildCards #-}</span><span>
+</span><span id="line-3"></span><span>
+</span><span id="line-4"></span><span class="hs-comment">-- | Timeout manager. Since @v0.3.0@, timeout manager is a wrapper of</span><span>
+</span><span id="line-5"></span><span class="hs-comment">-- GHC System TimerManager.</span><span>
+</span><span id="line-6"></span><span class="hs-comment">--</span><span>
+</span><span id="line-7"></span><span class="hs-comment">-- Some caveats of using this package:</span><span>
+</span><span id="line-8"></span><span class="hs-comment">--</span><span>
+</span><span id="line-9"></span><span class="hs-comment">--   * Only works for GHC</span><span>
+</span><span id="line-10"></span><span class="hs-comment">--   * Only works with a threaded runtime</span><span>
+</span><span id="line-11"></span><span class="hs-comment">--   * Users of older versions should check the current semantics.</span><span>
+</span><span id="line-12"></span><span class="hs-comment">--   * Using 32-bit systems means the max timeout is @'maxBound' :: Int@</span><span>
+</span><span id="line-13"></span><span class="hs-comment">--     (2147483647) microseconds, which is less than 36 minutes.</span><span>
+</span><span id="line-14"></span><span class="hs-comment">--   * Using the same 'Handle' in different threads might cause issues in some</span><span>
+</span><span id="line-15"></span><span class="hs-comment">--     edge cases. (i.e. using cancel/pause in one thread, and resume in another)</span><span>
+</span><span id="line-16"></span><span class="hs-keyword">module</span><span> </span><span class="hs-identifier">System.TimeManager</span><span> </span><span class="hs-special">(</span><span>
+</span><span id="line-17"></span><span>    </span><span class="annot"><span class="hs-comment">-- ** Types</span></span><span>
+</span><span id="line-18"></span><span>    </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier">Manager</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-19"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#defaultManager"><span class="hs-identifier">defaultManager</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-20"></span><span>    </span><span class="annot"><a href="System.TimeManager.Internal.html#TimeoutAction"><span class="hs-identifier">TimeoutAction</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-21"></span><span>    </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier">Handle</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-22"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#emptyHandle"><span class="hs-identifier">emptyHandle</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-23"></span><span>
+</span><span id="line-24"></span><span>    </span><span class="annot"><span class="hs-comment">-- ** Manager</span></span><span>
+</span><span id="line-25"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#initialize"><span class="hs-identifier">initialize</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-26"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#stopManager"><span class="hs-identifier">stopManager</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-27"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#killManager"><span class="hs-identifier">killManager</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-28"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#withManager"><span class="hs-identifier">withManager</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-29"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#withManager%27"><span class="hs-identifier">withManager'</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-30"></span><span>
+</span><span id="line-31"></span><span>    </span><span class="annot"><span class="hs-comment">-- ** Registering a timeout action</span></span><span>
+</span><span id="line-32"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#withHandle"><span class="hs-identifier">withHandle</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-33"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#withHandleKillThread"><span class="hs-identifier">withHandleKillThread</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-34"></span><span>
+</span><span id="line-35"></span><span>    </span><span class="annot"><span class="hs-comment">-- ** Control timeout</span></span><span>
+</span><span id="line-36"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#tickle"><span class="hs-identifier">tickle</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-37"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#pause"><span class="hs-identifier">pause</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-38"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#resume"><span class="hs-identifier">resume</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-39"></span><span>
+</span><span id="line-40"></span><span>    </span><span class="annot"><span class="hs-comment">-- ** Low level</span></span><span>
+</span><span id="line-41"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#register"><span class="hs-identifier">register</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-42"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#registerKillThread"><span class="hs-identifier">registerKillThread</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-43"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#cancel"><span class="hs-identifier">cancel</span></a></span><span class="hs-special">,</span><span>
+</span><span id="line-44"></span><span>
+</span><span id="line-45"></span><span>    </span><span class="annot"><span class="hs-comment">-- ** Exceptions</span></span><span>
+</span><span id="line-46"></span><span>    </span><span class="annot"><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier">TimeoutThread</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-glyph">..</span><span class="hs-special">)</span><span class="hs-special">,</span><span>
+</span><span id="line-47"></span><span class="hs-special">)</span><span> </span><span class="hs-keyword">where</span><span>
+</span><span id="line-48"></span><span>
+</span><span id="line-49"></span><span class="hs-keyword">import</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Concurrent.html"><span class="hs-identifier">Control.Concurrent</span></a></span><span> </span><span class="hs-special">(</span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#forkIO"><span class="hs-identifier">forkIO</span></a></span><span class="hs-special">,</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#mkWeakThreadId"><span class="hs-identifier">mkWeakThreadId</span></a></span><span class="hs-special">,</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#myThreadId"><span class="hs-identifier">myThreadId</span></a></span><span class="hs-special">)</span><span>
+</span><span id="line-50"></span><span class="hs-keyword">import</span><span> </span><span class="hs-keyword">qualified</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Exception.html"><span class="hs-identifier">Control.Exception</span></a></span><span> </span><span class="hs-keyword">as</span><span> </span><span class="annot"><span class="hs-identifier">E</span></span><span>
+</span><span id="line-51"></span><span class="hs-keyword">import</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Monad.html"><span class="hs-identifier">Control.Monad</span></a></span><span> </span><span class="hs-special">(</span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Data.Functor.html#void"><span class="hs-identifier">void</span></a></span><span class="hs-special">)</span><span>
+</span><span id="line-52"></span><span class="hs-keyword">import</span><span> </span><span class="hs-keyword">qualified</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Data.IORef.html"><span class="hs-identifier">Data.IORef</span></a></span><span> </span><span class="hs-keyword">as</span><span> </span><span class="annot"><span class="hs-identifier">I</span></span><span>
+</span><span id="line-53"></span><span class="hs-keyword">import</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/System.Mem.Weak.html"><span class="hs-identifier">System.Mem.Weak</span></a></span><span> </span><span class="hs-special">(</span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Weak.html#deRefWeak"><span class="hs-identifier">deRefWeak</span></a></span><span class="hs-special">)</span><span>
+</span><span id="line-54"></span><span class="hs-keyword">import</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html"><span class="hs-identifier">System.TimeManager.Internal</span></a></span><span class="hs-cpp">
+
+#if defined(mingw32_HOST_OS)
+</span><span class="hs-keyword">import</span><span> </span><span class="hs-keyword">qualified</span><span> </span><span class="hs-identifier">GHC.Event.Windows</span><span> </span><span class="hs-keyword">as</span><span> </span><span class="hs-identifier">EV</span><span class="hs-cpp">
+#else
+</span><span class="hs-keyword">import</span><span> </span><span class="hs-keyword">qualified</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Event.html"><span class="hs-identifier">GHC.Event</span></a></span><span> </span><span class="hs-keyword">as</span><span> </span><span class="annot"><span class="hs-identifier">EV</span></span><span class="hs-cpp">
+#endif
+</span><span>
+</span><span id="line-62"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-63"></span><span>
+</span><span id="line-64"></span><span class="annot"><span class="hs-comment">-- | A manager whose timeout value is 0 (no callbacks are fired).</span></span><span>
+</span><span id="line-65"></span><span class="annot"><a href="System.TimeManager.html#defaultManager"><span class="hs-identifier hs-type">defaultManager</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span>
+</span><span id="line-66"></span><span id="defaultManager"><span class="annot"><span class="annottext">defaultManager :: Manager
+</span><a href="System.TimeManager.html#defaultManager"><span class="hs-identifier hs-var hs-var">defaultManager</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Int -&gt; Manager
+</span><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-var">Manager</span></a></span><span> </span><span class="annot"><span class="annottext">Int
+</span><span class="hs-number">0</span></span><span>
+</span><span id="line-67"></span><span>
+</span><span id="line-68"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-69"></span><span>
+</span><span id="line-70"></span><span class="annot"><span class="hs-comment">-- | Dummy 'Handle'.</span></span><span>
+</span><span id="line-71"></span><span class="annot"><a href="System.TimeManager.html#emptyHandle"><span class="hs-identifier hs-type">emptyHandle</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span>
+</span><span id="line-72"></span><span id="emptyHandle"><span class="annot"><span class="annottext">emptyHandle :: Handle
+</span><a href="System.TimeManager.html#emptyHandle"><span class="hs-identifier hs-var hs-var">emptyHandle</span></a></span></span><span> </span><span class="hs-glyph">=</span><span>
+</span><span id="line-73"></span><span>    </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span>
+</span><span id="line-74"></span><span>        </span><span class="hs-special">{</span><span> </span><span class="annot"><span class="annottext">handleTimeout :: Int
+</span><a href="System.TimeManager.Internal.html#handleTimeout"><span class="hs-identifier hs-var">handleTimeout</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Int
+</span><span class="hs-number">0</span></span><span>
+</span><span id="line-75"></span><span>        </span><span class="hs-special">,</span><span> </span><span class="annot"><span class="annottext">handleAction :: TimeoutAction
+</span><a href="System.TimeManager.Internal.html#handleAction"><span class="hs-identifier hs-var">handleAction</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">() -&gt; TimeoutAction
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-76"></span><span>        </span><span class="hs-special">,</span><span> </span><span class="annot"><span class="annottext">handleKeyRef :: IORef TimeoutKey
+</span><a href="System.TimeManager.Internal.html#handleKeyRef"><span class="hs-identifier hs-var">handleKeyRef</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">[Char] -&gt; IORef TimeoutKey
+forall a. HasCallStack =&gt; [Char] -&gt; a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Err.html#error"><span class="hs-identifier hs-var">error</span></a></span><span> </span><span class="annot"><span class="annottext">[Char]
+</span><span class="hs-string">&quot;time-manager: Handle.handleKeyRef not set&quot;</span></span><span>
+</span><span id="line-77"></span><span>        </span><span class="hs-special">,</span><span> </span><span class="annot"><span class="annottext">handleState :: IORef HandleState
+</span><a href="System.TimeManager.Internal.html#handleState"><span class="hs-identifier hs-var">handleState</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">[Char] -&gt; IORef HandleState
+forall a. HasCallStack =&gt; [Char] -&gt; a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Err.html#error"><span class="hs-identifier hs-var">error</span></a></span><span> </span><span class="annot"><span class="annottext">[Char]
+</span><span class="hs-string">&quot;time-manager: Handle.handleState not set&quot;</span></span><span>
+</span><span id="line-78"></span><span>        </span><span class="hs-special">}</span><span>
+</span><span id="line-79"></span><span>
+</span><span id="line-80"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-81"></span><span>
+</span><span id="line-82"></span><span class="hs-comment">-- | Creating timeout manager with a timeout value in microseconds.</span><span>
+</span><span id="line-83"></span><span class="hs-comment">--</span><span>
+</span><span id="line-84"></span><span class="hs-comment">--   Setting the timeout to zero or lower (&lt;= 0) will produce a</span><span>
+</span><span id="line-85"></span><span class="hs-comment">--   `defaultManager`.</span><span>
+</span><span id="line-86"></span><span class="annot"><a href="System.TimeManager.html#initialize"><span class="hs-identifier hs-type">initialize</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#Int"><span class="hs-identifier hs-type">Int</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span>
+</span><span id="line-87"></span><span id="initialize"><span class="annot"><span class="annottext">initialize :: Int -&gt; IO Manager
+</span><a href="System.TimeManager.html#initialize"><span class="hs-identifier hs-var hs-var">initialize</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Manager -&gt; IO Manager
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="annot"><span class="annottext">(Manager -&gt; IO Manager) -&gt; (Int -&gt; Manager) -&gt; Int -&gt; IO Manager
+forall b c a. (b -&gt; c) -&gt; (a -&gt; b) -&gt; a -&gt; c
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#."><span class="hs-operator hs-var">.</span></a></span><span> </span><span class="annot"><span class="annottext">Int -&gt; Manager
+</span><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-var">Manager</span></a></span><span> </span><span class="annot"><span class="annottext">(Int -&gt; Manager) -&gt; (Int -&gt; Int) -&gt; Int -&gt; Manager
+forall b c a. (b -&gt; c) -&gt; (a -&gt; b) -&gt; a -&gt; c
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#."><span class="hs-operator hs-var">.</span></a></span><span> </span><span class="annot"><span class="annottext">Int -&gt; Int -&gt; Int
+forall a. Ord a =&gt; a -&gt; a -&gt; a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Classes.html#max"><span class="hs-identifier hs-var">max</span></a></span><span> </span><span class="annot"><span class="annottext">Int
+</span><span class="hs-number">0</span></span><span>
+</span><span id="line-88"></span><span>
+</span><span id="line-89"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-90"></span><span>
+</span><span id="line-91"></span><span class="hs-comment">-- | Obsoleted since version 0.3.0</span><span>
+</span><span id="line-92"></span><span class="hs-comment">--   Is now equivalent to @pure ()@.</span><span>
+</span><span id="line-93"></span><span class="annot"><a href="System.TimeManager.html#stopManager"><span class="hs-identifier hs-type">stopManager</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-94"></span><span id="stopManager"><span class="annot"><span class="annottext">stopManager :: Manager -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#stopManager"><span class="hs-identifier hs-var hs-var">stopManager</span></a></span></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><span class="hs-identifier">_</span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">() -&gt; TimeoutAction
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-95"></span><span class="hs-pragma">{-# DEPRECATED</span><span> </span><span class="hs-pragma">stopManager</span><span> </span><span class="hs-pragma">&quot;This function does nothing since version 0.3.0&quot;</span><span> </span><span class="hs-pragma">#-}</span><span>
+</span><span id="line-96"></span><span>
+</span><span id="line-97"></span><span class="hs-comment">-- | Obsoleted since version 0.3.0</span><span>
+</span><span id="line-98"></span><span class="hs-comment">--   Is now equivalent to @pure ()@.</span><span>
+</span><span id="line-99"></span><span class="annot"><a href="System.TimeManager.html#killManager"><span class="hs-identifier hs-type">killManager</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-100"></span><span id="killManager"><span class="annot"><span class="annottext">killManager :: Manager -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#killManager"><span class="hs-identifier hs-var hs-var">killManager</span></a></span></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><span class="hs-identifier">_</span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">() -&gt; TimeoutAction
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-101"></span><span class="hs-pragma">{-# DEPRECATED</span><span> </span><span class="hs-pragma">killManager</span><span> </span><span class="hs-pragma">&quot;This function does nothing since version 0.3.0&quot;</span><span> </span><span class="hs-pragma">#-}</span><span>
+</span><span id="line-102"></span><span>
+</span><span id="line-103"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-104"></span><span>
+</span><span id="line-105"></span><span class="hs-comment">-- | Registering a timeout action and unregister its handle</span><span>
+</span><span id="line-106"></span><span class="hs-comment">--   when the body action is finished.</span><span>
+</span><span id="line-107"></span><span id="local-6989586621679040667"><span class="annot"><a href="System.TimeManager.html#withHandle"><span class="hs-identifier hs-type">withHandle</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#TimeoutAction"><span class="hs-identifier hs-type">TimeoutAction</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="hs-special">(</span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="#local-6989586621679040667"><span class="hs-identifier hs-type">a</span></a></span><span class="hs-special">)</span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="#local-6989586621679040667"><span class="hs-identifier hs-type">a</span></a></span></span><span>
+</span><span id="line-108"></span><span id="withHandle"><span class="annot"><span class="annottext">withHandle :: forall a. Manager -&gt; TimeoutAction -&gt; (Handle -&gt; IO a) -&gt; IO a
+</span><a href="System.TimeManager.html#withHandle"><span class="hs-identifier hs-var hs-var">withHandle</span></a></span></span><span> </span><span id="local-6989586621679040771"><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040771"><span class="hs-identifier hs-var">mgr</span></a></span></span><span> </span><span id="local-6989586621679040772"><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040772"><span class="hs-identifier hs-var">onTimeout</span></a></span></span><span> </span><span id="local-6989586621679040773"><span class="annot"><span class="annottext">Handle -&gt; IO a
+</span><a href="#local-6989586621679040773"><span class="hs-identifier hs-var">action</span></a></span></span><span>
+</span><span id="line-109"></span><span>    </span><span class="hs-glyph">|</span><span> </span><span class="annot"><span class="annottext">Manager -&gt; Bool
+</span><a href="System.TimeManager.Internal.html#isNoManager"><span class="hs-identifier hs-var">isNoManager</span></a></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040771"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; IO a
+</span><a href="#local-6989586621679040773"><span class="hs-identifier hs-var">action</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="System.TimeManager.html#emptyHandle"><span class="hs-identifier hs-var">emptyHandle</span></a></span><span>
+</span><span id="line-110"></span><span>    </span><span class="hs-glyph">|</span><span> </span><span class="annot"><span class="annottext">Bool
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#otherwise"><span class="hs-identifier hs-var">otherwise</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">IO Handle -&gt; (Handle -&gt; TimeoutAction) -&gt; (Handle -&gt; IO a) -&gt; IO a
+forall a b c. IO a -&gt; (a -&gt; IO b) -&gt; (a -&gt; IO c) -&gt; IO c
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Exception.Base.html#bracket"><span class="hs-identifier hs-var">E.bracket</span></a></span><span> </span><span class="hs-special">(</span><span class="annot"><span class="annottext">Manager -&gt; TimeoutAction -&gt; IO Handle
+</span><a href="System.TimeManager.html#register"><span class="hs-identifier hs-var">register</span></a></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040771"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040772"><span class="hs-identifier hs-var">onTimeout</span></a></span><span class="hs-special">)</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#cancel"><span class="hs-identifier hs-var">cancel</span></a></span><span> </span><span class="annot"><span class="annottext">Handle -&gt; IO a
+</span><a href="#local-6989586621679040773"><span class="hs-identifier hs-var">action</span></a></span><span>
+</span><span id="line-111"></span><span>
+</span><span id="line-112"></span><span class="hs-comment">-- | Registering a timeout action of killing this thread and</span><span>
+</span><span id="line-113"></span><span class="hs-comment">--   unregister its handle when the body action is killed or finished.</span><span>
+</span><span id="line-114"></span><span class="annot"><a href="System.TimeManager.html#withHandleKillThread"><span class="hs-identifier hs-type">withHandleKillThread</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#TimeoutAction"><span class="hs-identifier hs-type">TimeoutAction</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="hs-special">(</span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span class="hs-special">)</span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-115"></span><span id="withHandleKillThread"><span class="annot"><span class="annottext">withHandleKillThread :: Manager
+-&gt; TimeoutAction -&gt; (Handle -&gt; TimeoutAction) -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#withHandleKillThread"><span class="hs-identifier hs-var hs-var">withHandleKillThread</span></a></span></span><span> </span><span id="local-6989586621679040776"><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040776"><span class="hs-identifier hs-var">mgr</span></a></span></span><span> </span><span id="local-6989586621679040777"><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040777"><span class="hs-identifier hs-var">onTimeout</span></a></span></span><span> </span><span id="local-6989586621679040778"><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="#local-6989586621679040778"><span class="hs-identifier hs-var">action</span></a></span></span><span>
+</span><span id="line-116"></span><span>    </span><span class="hs-glyph">|</span><span> </span><span class="annot"><span class="annottext">Manager -&gt; Bool
+</span><a href="System.TimeManager.Internal.html#isNoManager"><span class="hs-identifier hs-var">isNoManager</span></a></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040776"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="#local-6989586621679040778"><span class="hs-identifier hs-var">action</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="System.TimeManager.html#emptyHandle"><span class="hs-identifier hs-var">emptyHandle</span></a></span><span>
+</span><span id="line-117"></span><span>    </span><span class="hs-glyph">|</span><span> </span><span class="annot"><span class="annottext">Bool
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#otherwise"><span class="hs-identifier hs-var">otherwise</span></a></span><span> </span><span class="hs-glyph">=</span><span>
+</span><span id="line-118"></span><span>        </span><span class="annot"><span class="annottext">(TimeoutThread -&gt; TimeoutAction) -&gt; TimeoutAction -&gt; TimeoutAction
+forall e a. Exception e =&gt; (e -&gt; IO a) -&gt; IO a -&gt; IO a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Exception.Base.html#handle"><span class="hs-identifier hs-var">E.handle</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutThread -&gt; TimeoutAction
+forall {f :: * -&gt; *}. Applicative f =&gt; TimeoutThread -&gt; f ()
+</span><a href="#local-6989586621679040780"><span class="hs-identifier hs-var">ignore</span></a></span><span> </span><span class="annot"><span class="annottext">(TimeoutAction -&gt; TimeoutAction) -&gt; TimeoutAction -&gt; TimeoutAction
+forall a b. (a -&gt; b) -&gt; a -&gt; b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%24"><span class="hs-operator hs-var">$</span></a></span><span> </span><span class="annot"><span class="annottext">IO Handle
+-&gt; (Handle -&gt; TimeoutAction)
+-&gt; (Handle -&gt; TimeoutAction)
+-&gt; TimeoutAction
+forall a b c. IO a -&gt; (a -&gt; IO b) -&gt; (a -&gt; IO c) -&gt; IO c
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Exception.Base.html#bracket"><span class="hs-identifier hs-var">E.bracket</span></a></span><span> </span><span class="hs-special">(</span><span class="annot"><span class="annottext">Manager -&gt; TimeoutAction -&gt; IO Handle
+</span><a href="System.TimeManager.html#registerKillThread"><span class="hs-identifier hs-var">registerKillThread</span></a></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040776"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040777"><span class="hs-identifier hs-var">onTimeout</span></a></span><span class="hs-special">)</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#cancel"><span class="hs-identifier hs-var">cancel</span></a></span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="#local-6989586621679040778"><span class="hs-identifier hs-var">action</span></a></span><span>
+</span><span id="line-119"></span><span>  </span><span class="hs-keyword">where</span><span>
+</span><span id="line-120"></span><span>    </span><span id="local-6989586621679040780"><span class="annot"><span class="annottext">ignore :: TimeoutThread -&gt; f ()
+</span><a href="#local-6989586621679040780"><span class="hs-identifier hs-var hs-var">ignore</span></a></span></span><span> </span><span class="annot"><span class="annottext">TimeoutThread
+</span><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-var">TimeoutThread</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">() -&gt; f ()
+forall a. a -&gt; f a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-121"></span><span>
+</span><span id="line-122"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-123"></span><span>
+</span><span id="line-124"></span><span class="annot"><span class="hs-comment">-- | Registering a timeout action.</span></span><span>
+</span><span id="line-125"></span><span class="annot"><a href="System.TimeManager.html#register"><span class="hs-identifier hs-type">register</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#TimeoutAction"><span class="hs-identifier hs-type">TimeoutAction</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span>
+</span><span id="line-126"></span><span id="register"><span class="annot"><span class="annottext">register :: Manager -&gt; TimeoutAction -&gt; IO Handle
+</span><a href="System.TimeManager.html#register"><span class="hs-identifier hs-var hs-var">register</span></a></span></span><span> </span><span id="local-6989586621679040787"><span class="annot"><span class="annottext">mgr :: Manager
+</span><a href="#local-6989586621679040787"><span class="hs-identifier hs-var">mgr</span></a></span></span><span class="hs-glyph">@</span><span class="hs-special">(</span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span id="local-6989586621679040788"><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040788"><span class="hs-identifier hs-var">timeout</span></a></span></span><span class="hs-special">)</span><span> </span><span id="local-6989586621679040789"><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040789"><span class="hs-identifier hs-var">onTimeout</span></a></span></span><span>
+</span><span id="line-127"></span><span>    </span><span class="hs-glyph">|</span><span> </span><span class="annot"><span class="annottext">Manager -&gt; Bool
+</span><a href="System.TimeManager.Internal.html#isNoManager"><span class="hs-identifier hs-var">isNoManager</span></a></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040787"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; IO Handle
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="System.TimeManager.html#emptyHandle"><span class="hs-identifier hs-var">emptyHandle</span></a></span><span>
+</span><span id="line-128"></span><span>    </span><span class="hs-glyph">|</span><span> </span><span class="annot"><span class="annottext">Bool
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#otherwise"><span class="hs-identifier hs-var">otherwise</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-129"></span><span>        </span><span id="local-6989586621679040790"><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040790"><span class="hs-identifier hs-var">sysmgr</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IO TimerManager
+</span><a href="System.TimeManager.Internal.html#getTimerManager"><span class="hs-identifier hs-var">getTimerManager</span></a></span><span>
+</span><span id="line-130"></span><span>        </span><span id="local-6989586621679040792"><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040792"><span class="hs-identifier hs-var">key</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">TimerManager -&gt; Int -&gt; TimeoutAction -&gt; IO TimeoutKey
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Event.TimerManager.html#registerTimeout"><span class="hs-identifier hs-var">EV.registerTimeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040790"><span class="hs-identifier hs-var">sysmgr</span></a></span><span> </span><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040788"><span class="hs-identifier hs-var">timeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040789"><span class="hs-identifier hs-var">onTimeout</span></a></span><span>
+</span><span id="line-131"></span><span>        </span><span id="local-6989586621679040794"><span class="annot"><span class="annottext">IORef TimeoutKey
+</span><a href="#local-6989586621679040794"><span class="hs-identifier hs-var">keyref</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">TimeoutKey -&gt; IO (IORef TimeoutKey)
+forall a. a -&gt; IO (IORef a)
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IORef.html#newIORef"><span class="hs-identifier hs-var">I.newIORef</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040792"><span class="hs-identifier hs-var">key</span></a></span><span>
+</span><span id="line-132"></span><span>        </span><span id="local-6989586621679040796"><span class="annot"><span class="annottext">IORef HandleState
+</span><a href="#local-6989586621679040796"><span class="hs-identifier hs-var">state</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">HandleState -&gt; IO (IORef HandleState)
+forall a. a -&gt; IO (IORef a)
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IORef.html#newIORef"><span class="hs-identifier hs-var">I.newIORef</span></a></span><span> </span><span class="annot"><span class="annottext">HandleState
+</span><a href="System.TimeManager.Internal.html#Active"><span class="hs-identifier hs-var">Active</span></a></span><span>
+</span><span id="line-133"></span><span>        </span><span class="hs-keyword">let</span><span> </span><span id="local-6989586621679040798"><span class="annot"><span class="annottext">h :: Handle
+</span><a href="#local-6989586621679040798"><span class="hs-identifier hs-var hs-var">h</span></a></span></span><span> </span><span class="hs-glyph">=</span><span>
+</span><span id="line-134"></span><span>                </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span>
+</span><span id="line-135"></span><span>                    </span><span class="hs-special">{</span><span> </span><span class="annot"><span class="annottext">handleTimeout :: Int
+</span><a href="System.TimeManager.Internal.html#handleTimeout"><span class="hs-identifier hs-var">handleTimeout</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040788"><span class="hs-identifier hs-var">timeout</span></a></span><span>
+</span><span id="line-136"></span><span>                    </span><span class="hs-special">,</span><span> </span><span class="annot"><span class="annottext">handleAction :: TimeoutAction
+</span><a href="System.TimeManager.Internal.html#handleAction"><span class="hs-identifier hs-var">handleAction</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040789"><span class="hs-identifier hs-var">onTimeout</span></a></span><span>
+</span><span id="line-137"></span><span>                    </span><span class="hs-special">,</span><span> </span><span class="annot"><span class="annottext">handleKeyRef :: IORef TimeoutKey
+</span><a href="System.TimeManager.Internal.html#handleKeyRef"><span class="hs-identifier hs-var">handleKeyRef</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">IORef TimeoutKey
+</span><a href="#local-6989586621679040794"><span class="hs-identifier hs-var">keyref</span></a></span><span>
+</span><span id="line-138"></span><span>                    </span><span class="hs-special">,</span><span> </span><span class="annot"><span class="annottext">handleState :: IORef HandleState
+</span><a href="System.TimeManager.Internal.html#handleState"><span class="hs-identifier hs-var">handleState</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">IORef HandleState
+</span><a href="#local-6989586621679040796"><span class="hs-identifier hs-var">state</span></a></span><span>
+</span><span id="line-139"></span><span>                    </span><span class="hs-special">}</span><span>
+</span><span id="line-140"></span><span>        </span><span class="annot"><span class="annottext">Handle -&gt; IO Handle
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="#local-6989586621679040798"><span class="hs-identifier hs-var">h</span></a></span><span>
+</span><span id="line-141"></span><span>
+</span><span id="line-142"></span><span class="annot"><span class="hs-comment">-- | Unregistering the timeout.</span></span><span>
+</span><span id="line-143"></span><span class="annot"><a href="System.TimeManager.html#cancel"><span class="hs-identifier hs-type">cancel</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-144"></span><span id="cancel"><span class="annot"><span class="annottext">cancel :: Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#cancel"><span class="hs-identifier hs-var hs-var">cancel</span></a></span></span><span> </span><span id="local-6989586621679040799"><span class="annot"><span class="annottext">h :: Handle
+</span><a href="#local-6989586621679040799"><span class="hs-identifier hs-var">h</span></a></span></span><span class="hs-glyph">@</span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span class="hs-special">{</span><span id="local-6989586621679040800"><span id="local-6989586621679040801"><span id="local-6989586621679040802"><span id="local-6989586621679040803"><span class="annot"><span class="annottext">Int
+TimeoutAction
+IORef TimeoutKey
+IORef HandleState
+handleTimeout :: Handle -&gt; Int
+handleAction :: Handle -&gt; TimeoutAction
+handleKeyRef :: Handle -&gt; IORef TimeoutKey
+handleState :: Handle -&gt; IORef HandleState
+handleTimeout :: Int
+handleAction :: TimeoutAction
+handleKeyRef :: IORef TimeoutKey
+handleState :: IORef HandleState
+</span><a href="System.TimeManager.Internal.html#handleTimeout"><span class="hs-glyph hs-var hs-var hs-var hs-var hs-var hs-var hs-var hs-var">..</span></a></span></span></span></span></span><span class="hs-special">}</span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction -&gt; TimeoutAction
+</span><a href="System.TimeManager.Internal.html#withNonEmptyHandle"><span class="hs-identifier hs-var">withNonEmptyHandle</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="#local-6989586621679040799"><span class="hs-identifier hs-var">h</span></a></span><span> </span><span class="annot"><span class="annottext">(TimeoutAction -&gt; TimeoutAction) -&gt; TimeoutAction -&gt; TimeoutAction
+forall a b. (a -&gt; b) -&gt; a -&gt; b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%24"><span class="hs-operator hs-var">$</span></a></span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-145"></span><span>    </span><span id="local-6989586621679040805"><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040805"><span class="hs-identifier hs-var">mgr</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IO TimerManager
+</span><a href="System.TimeManager.Internal.html#getTimerManager"><span class="hs-identifier hs-var">getTimerManager</span></a></span><span>
+</span><span id="line-146"></span><span>    </span><span id="local-6989586621679040806"><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040806"><span class="hs-identifier hs-var">key</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IORef TimeoutKey -&gt; IO TimeoutKey
+forall a. IORef a -&gt; IO a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IORef.html#readIORef"><span class="hs-identifier hs-var">I.readIORef</span></a></span><span> </span><span class="annot"><span class="annottext">IORef TimeoutKey
+</span><a href="#local-6989586621679040802"><span class="hs-identifier hs-var">handleKeyRef</span></a></span><span>
+</span><span id="line-147"></span><span>    </span><span class="annot"><span class="annottext">TimerManager -&gt; TimeoutKey -&gt; TimeoutAction
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Event.TimerManager.html#unregisterTimeout"><span class="hs-identifier hs-var">EV.unregisterTimeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040805"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040806"><span class="hs-identifier hs-var">key</span></a></span><span>
+</span><span id="line-148"></span><span>    </span><span class="annot"><span class="annottext">IORef HandleState -&gt; HandleState -&gt; TimeoutAction
+forall a. IORef a -&gt; a -&gt; TimeoutAction
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Data.IORef.html#atomicWriteIORef"><span class="hs-identifier hs-var">I.atomicWriteIORef</span></a></span><span> </span><span class="annot"><span class="annottext">IORef HandleState
+</span><a href="#local-6989586621679040803"><span class="hs-identifier hs-var">handleState</span></a></span><span> </span><span class="annot"><span class="annottext">HandleState
+</span><a href="System.TimeManager.Internal.html#Stopped"><span class="hs-identifier hs-var">Stopped</span></a></span><span>
+</span><span id="line-149"></span><span>
+</span><span id="line-150"></span><span class="hs-comment">-- | Extending the timeout.</span><span>
+</span><span id="line-151"></span><span class="hs-comment">--</span><span>
+</span><span id="line-152"></span><span class="hs-comment">-- Careful: this does NOT reactivate an already paused 'Handle'!</span><span>
+</span><span id="line-153"></span><span class="annot"><a href="System.TimeManager.html#tickle"><span class="hs-identifier hs-type">tickle</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-154"></span><span id="tickle"><span class="annot"><span class="annottext">tickle :: Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#tickle"><span class="hs-identifier hs-var hs-var">tickle</span></a></span></span><span> </span><span id="local-6989586621679040811"><span class="annot"><span class="annottext">h :: Handle
+</span><a href="#local-6989586621679040811"><span class="hs-identifier hs-var">h</span></a></span></span><span class="hs-glyph">@</span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span class="hs-special">{</span><span id="local-6989586621679040812"><span id="local-6989586621679040813"><span id="local-6989586621679040814"><span id="local-6989586621679040815"><span class="annot"><span class="annottext">Int
+TimeoutAction
+IORef TimeoutKey
+IORef HandleState
+handleTimeout :: Handle -&gt; Int
+handleAction :: Handle -&gt; TimeoutAction
+handleKeyRef :: Handle -&gt; IORef TimeoutKey
+handleState :: Handle -&gt; IORef HandleState
+handleTimeout :: Int
+handleAction :: TimeoutAction
+handleKeyRef :: IORef TimeoutKey
+handleState :: IORef HandleState
+</span><a href="System.TimeManager.Internal.html#handleTimeout"><span class="hs-glyph hs-var hs-var hs-var hs-var hs-var hs-var hs-var hs-var">..</span></a></span></span></span></span></span><span class="hs-special">}</span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction -&gt; TimeoutAction
+</span><a href="System.TimeManager.Internal.html#withNonEmptyHandle"><span class="hs-identifier hs-var">withNonEmptyHandle</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="#local-6989586621679040811"><span class="hs-identifier hs-var">h</span></a></span><span> </span><span class="annot"><span class="annottext">(TimeoutAction -&gt; TimeoutAction) -&gt; TimeoutAction -&gt; TimeoutAction
+forall a b. (a -&gt; b) -&gt; a -&gt; b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%24"><span class="hs-operator hs-var">$</span></a></span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-155"></span><span>    </span><span id="local-6989586621679040816"><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040816"><span class="hs-identifier hs-var">mgr</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IO TimerManager
+</span><a href="System.TimeManager.Internal.html#getTimerManager"><span class="hs-identifier hs-var">getTimerManager</span></a></span><span>
+</span><span id="line-156"></span><span>    </span><span id="local-6989586621679040817"><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040817"><span class="hs-identifier hs-var">key</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IORef TimeoutKey -&gt; IO TimeoutKey
+forall a. IORef a -&gt; IO a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IORef.html#readIORef"><span class="hs-identifier hs-var">I.readIORef</span></a></span><span> </span><span class="annot"><span class="annottext">IORef TimeoutKey
+</span><a href="#local-6989586621679040814"><span class="hs-identifier hs-var">handleKeyRef</span></a></span><span class="hs-cpp">
+#if defined(mingw32_HOST_OS)
+</span><span>    </span><span class="hs-identifier">EV.updateTimeout</span><span> </span><span class="hs-identifier">mgr</span><span> </span><span class="hs-identifier">key</span><span> </span><span class="hs-operator">$</span><span> </span><span class="hs-identifier">fromIntegral</span><span> </span><span class="hs-special">(</span><span class="hs-identifier">handleTimeout</span><span> </span><span class="hs-special">`</span><span class="hs-identifier">div</span><span class="hs-special">`</span><span> </span><span class="hs-number">1000000</span><span class="hs-special">)</span><span class="hs-cpp">
+#else
+</span><span>    </span><span class="annot"><span class="annottext">TimerManager -&gt; TimeoutKey -&gt; Int -&gt; TimeoutAction
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Event.TimerManager.html#updateTimeout"><span class="hs-identifier hs-var">EV.updateTimeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040816"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040817"><span class="hs-identifier hs-var">key</span></a></span><span> </span><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040812"><span class="hs-identifier hs-var">handleTimeout</span></a></span><span class="hs-cpp">
+#endif
+</span><span>
+</span><span id="line-163"></span><span class="hs-comment">-- | This is identical to 'cancel'.</span><span>
+</span><span id="line-164"></span><span class="hs-comment">--   To resume timeout with the same 'Handle', 'resume' MUST be called.</span><span>
+</span><span id="line-165"></span><span class="hs-comment">--   Don't call 'tickle' for resumption.</span><span>
+</span><span id="line-166"></span><span class="annot"><a href="System.TimeManager.html#pause"><span class="hs-identifier hs-type">pause</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-167"></span><span id="pause"><span class="annot"><span class="annottext">pause :: Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#pause"><span class="hs-identifier hs-var hs-var">pause</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#cancel"><span class="hs-identifier hs-var">cancel</span></a></span><span>
+</span><span id="line-168"></span><span>
+</span><span id="line-169"></span><span class="hs-comment">-- | Resuming the timeout.</span><span>
+</span><span id="line-170"></span><span class="hs-comment">--</span><span>
+</span><span id="line-171"></span><span class="hs-comment">-- Works like 'tickle' if the 'Handle' wasn't 'pause'd or 'cancel'ed.</span><span>
+</span><span id="line-172"></span><span class="annot"><a href="System.TimeManager.html#resume"><span class="hs-identifier hs-type">resume</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-173"></span><span id="resume"><span class="annot"><span class="annottext">resume :: Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#resume"><span class="hs-identifier hs-var hs-var">resume</span></a></span></span><span> </span><span id="local-6989586621679040819"><span class="annot"><span class="annottext">h :: Handle
+</span><a href="#local-6989586621679040819"><span class="hs-identifier hs-var">h</span></a></span></span><span class="hs-glyph">@</span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span class="hs-special">{</span><span id="local-6989586621679040820"><span id="local-6989586621679040821"><span id="local-6989586621679040822"><span id="local-6989586621679040823"><span class="annot"><span class="annottext">Int
+TimeoutAction
+IORef TimeoutKey
+IORef HandleState
+handleTimeout :: Handle -&gt; Int
+handleAction :: Handle -&gt; TimeoutAction
+handleKeyRef :: Handle -&gt; IORef TimeoutKey
+handleState :: Handle -&gt; IORef HandleState
+handleTimeout :: Int
+handleAction :: TimeoutAction
+handleKeyRef :: IORef TimeoutKey
+handleState :: IORef HandleState
+</span><a href="System.TimeManager.Internal.html#handleTimeout"><span class="hs-glyph hs-var hs-var hs-var hs-var hs-var hs-var hs-var hs-var">..</span></a></span></span></span></span></span><span class="hs-special">}</span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction -&gt; TimeoutAction
+</span><a href="System.TimeManager.Internal.html#withNonEmptyHandle"><span class="hs-identifier hs-var">withNonEmptyHandle</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="#local-6989586621679040819"><span class="hs-identifier hs-var">h</span></a></span><span> </span><span class="annot"><span class="annottext">(TimeoutAction -&gt; TimeoutAction) -&gt; TimeoutAction -&gt; TimeoutAction
+forall a b. (a -&gt; b) -&gt; a -&gt; b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%24"><span class="hs-operator hs-var">$</span></a></span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-174"></span><span>    </span><span id="local-6989586621679040824"><span class="annot"><span class="annottext">HandleState
+</span><a href="#local-6989586621679040824"><span class="hs-identifier hs-var">state</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IORef HandleState -&gt; IO HandleState
+forall a. IORef a -&gt; IO a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IORef.html#readIORef"><span class="hs-identifier hs-var">I.readIORef</span></a></span><span> </span><span class="annot"><span class="annottext">IORef HandleState
+</span><a href="#local-6989586621679040823"><span class="hs-identifier hs-var">handleState</span></a></span><span>
+</span><span id="line-175"></span><span>    </span><span class="hs-keyword">case</span><span> </span><span class="annot"><span class="annottext">HandleState
+</span><a href="#local-6989586621679040824"><span class="hs-identifier hs-var">state</span></a></span><span> </span><span class="hs-keyword">of</span><span>
+</span><span id="line-176"></span><span>        </span><span class="annot"><span class="annottext">HandleState
+</span><a href="System.TimeManager.Internal.html#Active"><span class="hs-identifier hs-var">Active</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><span class="annottext">Handle -&gt; TimeoutAction
+</span><a href="System.TimeManager.html#tickle"><span class="hs-identifier hs-var">tickle</span></a></span><span> </span><span class="annot"><span class="annottext">Handle
+</span><a href="#local-6989586621679040819"><span class="hs-identifier hs-var">h</span></a></span><span>
+</span><span id="line-177"></span><span>        </span><span class="annot"><span class="annottext">HandleState
+</span><a href="System.TimeManager.Internal.html#Stopped"><span class="hs-identifier hs-var">Stopped</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-178"></span><span>            </span><span id="local-6989586621679040825"><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040825"><span class="hs-identifier hs-var">mgr</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IO TimerManager
+</span><a href="System.TimeManager.Internal.html#getTimerManager"><span class="hs-identifier hs-var">getTimerManager</span></a></span><span>
+</span><span id="line-179"></span><span>            </span><span id="local-6989586621679040826"><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040826"><span class="hs-identifier hs-var">key</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">TimerManager -&gt; Int -&gt; TimeoutAction -&gt; IO TimeoutKey
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Event.TimerManager.html#registerTimeout"><span class="hs-identifier hs-var">EV.registerTimeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimerManager
+</span><a href="#local-6989586621679040825"><span class="hs-identifier hs-var">mgr</span></a></span><span> </span><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040820"><span class="hs-identifier hs-var">handleTimeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040821"><span class="hs-identifier hs-var">handleAction</span></a></span><span>
+</span><span id="line-180"></span><span>            </span><span class="annot"><span class="annottext">IORef TimeoutKey -&gt; TimeoutKey -&gt; TimeoutAction
+forall a. IORef a -&gt; a -&gt; TimeoutAction
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Data.IORef.html#atomicWriteIORef"><span class="hs-identifier hs-var">I.atomicWriteIORef</span></a></span><span> </span><span class="annot"><span class="annottext">IORef TimeoutKey
+</span><a href="#local-6989586621679040822"><span class="hs-identifier hs-var">handleKeyRef</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutKey
+</span><a href="#local-6989586621679040826"><span class="hs-identifier hs-var">key</span></a></span><span>
+</span><span id="line-181"></span><span>            </span><span class="annot"><span class="annottext">IORef HandleState -&gt; HandleState -&gt; TimeoutAction
+forall a. IORef a -&gt; a -&gt; TimeoutAction
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Data.IORef.html#atomicWriteIORef"><span class="hs-identifier hs-var">I.atomicWriteIORef</span></a></span><span> </span><span class="annot"><span class="annottext">IORef HandleState
+</span><a href="#local-6989586621679040823"><span class="hs-identifier hs-var">handleState</span></a></span><span> </span><span class="annot"><span class="annottext">HandleState
+</span><a href="System.TimeManager.Internal.html#Active"><span class="hs-identifier hs-var">Active</span></a></span><span>
+</span><span id="line-182"></span><span>
+</span><span id="line-183"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-184"></span><span>
+</span><span id="line-185"></span><span class="hs-comment">-- | The asynchronous exception thrown if a thread is registered via</span><span>
+</span><span id="line-186"></span><span class="hs-comment">-- 'registerKillThread'.</span><span>
+</span><span id="line-187"></span><span class="hs-keyword">data</span><span> </span><span id="TimeoutThread"><span class="annot"><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-var">TimeoutThread</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span id="TimeoutThread"><span class="annot"><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-var">TimeoutThread</span></a></span></span><span>
+</span><span id="line-188"></span><span>
+</span><span id="line-189"></span><span class="hs-keyword">instance</span><span> </span><span id="local-6989586621679040835"><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Exception.Type.html#Exception"><span class="hs-identifier hs-type">E.Exception</span></a></span><span> </span><span class="annot"><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-type">TimeoutThread</span></a></span></span><span> </span><span class="hs-keyword">where</span><span>
+</span><span id="line-190"></span><span>    </span><span id="local-6989586621679040839"><span class="annot"><span class="annottext">toException :: TimeoutThread -&gt; SomeException
+</span><a href="#local-6989586621679040839"><span class="hs-identifier hs-var hs-var hs-var hs-var">toException</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">TimeoutThread -&gt; SomeException
+forall e. Exception e =&gt; e -&gt; SomeException
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IO.Exception.html#asyncExceptionToException"><span class="hs-identifier hs-var">E.asyncExceptionToException</span></a></span><span>
+</span><span id="line-191"></span><span>    </span><span id="local-6989586621679040843"><span class="annot"><span class="annottext">fromException :: SomeException -&gt; Maybe TimeoutThread
+</span><a href="#local-6989586621679040843"><span class="hs-identifier hs-var hs-var hs-var hs-var">fromException</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">SomeException -&gt; Maybe TimeoutThread
+forall e. Exception e =&gt; SomeException -&gt; Maybe e
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.IO.Exception.html#asyncExceptionFromException"><span class="hs-identifier hs-var">E.asyncExceptionFromException</span></a></span><span>
+</span><span id="line-192"></span><span>
+</span><span id="line-193"></span><span class="hs-keyword">instance</span><span> </span><span id="local-6989586621679040847"><span id="local-6989586621679040851"><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Show.html#Show"><span class="hs-identifier hs-type">Show</span></a></span><span> </span><span class="annot"><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-type">TimeoutThread</span></a></span></span></span><span> </span><span class="hs-keyword">where</span><span>
+</span><span id="line-194"></span><span>    </span><span id="local-6989586621679040854"><span class="annot"><span class="annottext">show :: TimeoutThread -&gt; [Char]
+</span><a href="#local-6989586621679040854"><span class="hs-identifier hs-var hs-var hs-var hs-var">show</span></a></span></span><span> </span><span class="annot"><span class="annottext">TimeoutThread
+</span><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-var">TimeoutThread</span></a></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">[Char]
+</span><span class="hs-string">&quot;Thread killed by timeout manager&quot;</span></span><span>
+</span><span id="line-195"></span><span>
+</span><span id="line-196"></span><span class="hs-comment">-- | Registering a timeout action of killing this thread.</span><span>
+</span><span id="line-197"></span><span class="hs-comment">--   'TimeoutThread' is thrown to the thread which called this</span><span>
+</span><span id="line-198"></span><span class="hs-comment">--   function on timeout. Catch 'TimeoutThread' if you don't</span><span>
+</span><span id="line-199"></span><span class="hs-comment">--   want to leak the asynchronous exception to GHC RTS.</span><span>
+</span><span id="line-200"></span><span class="annot"><a href="System.TimeManager.html#registerKillThread"><span class="hs-identifier hs-type">registerKillThread</span></a></span><span> </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#TimeoutAction"><span class="hs-identifier hs-type">TimeoutAction</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="System.TimeManager.Internal.html#Handle"><span class="hs-identifier hs-type">Handle</span></a></span><span>
+</span><span id="line-201"></span><span id="registerKillThread"><span class="annot"><span class="annottext">registerKillThread :: Manager -&gt; TimeoutAction -&gt; IO Handle
+</span><a href="System.TimeManager.html#registerKillThread"><span class="hs-identifier hs-var hs-var">registerKillThread</span></a></span></span><span> </span><span id="local-6989586621679040856"><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040856"><span class="hs-identifier hs-var">m</span></a></span></span><span> </span><span id="local-6989586621679040857"><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040857"><span class="hs-identifier hs-var">onTimeout</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-202"></span><span>    </span><span id="local-6989586621679040858"><span class="annot"><span class="annottext">Weak ThreadId
+</span><a href="#local-6989586621679040858"><span class="hs-identifier hs-var">wtid</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">IO ThreadId
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#myThreadId"><span class="hs-identifier hs-var">myThreadId</span></a></span><span> </span><span class="annot"><span class="annottext">IO ThreadId
+-&gt; (ThreadId -&gt; IO (Weak ThreadId)) -&gt; IO (Weak ThreadId)
+forall a b. IO a -&gt; (a -&gt; IO b) -&gt; IO b
+forall (m :: * -&gt; *) a b. Monad m =&gt; m a -&gt; (a -&gt; m b) -&gt; m b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%3E%3E%3D"><span class="hs-operator hs-var">&gt;&gt;=</span></a></span><span> </span><span class="annot"><span class="annottext">ThreadId -&gt; IO (Weak ThreadId)
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#mkWeakThreadId"><span class="hs-identifier hs-var">mkWeakThreadId</span></a></span><span>
+</span><span id="line-203"></span><span>    </span><span class="hs-comment">-- First run the timeout action in case the child thread is masked.</span><span>
+</span><span id="line-204"></span><span>    </span><span class="annot"><span class="annottext">Manager -&gt; TimeoutAction -&gt; IO Handle
+</span><a href="System.TimeManager.html#register"><span class="hs-identifier hs-var">register</span></a></span><span> </span><span class="annot"><span class="annottext">Manager
+</span><a href="#local-6989586621679040856"><span class="hs-identifier hs-var">m</span></a></span><span> </span><span class="annot"><span class="annottext">(TimeoutAction -&gt; IO Handle) -&gt; TimeoutAction -&gt; IO Handle
+forall a b. (a -&gt; b) -&gt; a -&gt; b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%24"><span class="hs-operator hs-var">$</span></a></span><span>
+</span><span id="line-205"></span><span>        </span><span class="annot"><span class="annottext">TimeoutAction
+</span><a href="#local-6989586621679040857"><span class="hs-identifier hs-var">onTimeout</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutAction -&gt; TimeoutAction -&gt; TimeoutAction
+forall a b. IO a -&gt; IO b -&gt; IO a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Control.Exception.Base.html#finally"><span class="hs-operator hs-var">`E.finally`</span></a></span><span> </span><span class="hs-keyword">do</span><span>
+</span><span id="line-206"></span><span>            </span><span id="local-6989586621679040860"><span class="annot"><span class="annottext">Maybe ThreadId
+</span><a href="#local-6989586621679040860"><span class="hs-identifier hs-var">mtid</span></a></span></span><span> </span><span class="hs-glyph">&lt;-</span><span> </span><span class="annot"><span class="annottext">Weak ThreadId -&gt; IO (Maybe ThreadId)
+forall v. Weak v -&gt; IO (Maybe v)
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Weak.html#deRefWeak"><span class="hs-identifier hs-var">deRefWeak</span></a></span><span> </span><span class="annot"><span class="annottext">Weak ThreadId
+</span><a href="#local-6989586621679040858"><span class="hs-identifier hs-var">wtid</span></a></span><span>
+</span><span id="line-207"></span><span>            </span><span class="hs-keyword">case</span><span> </span><span class="annot"><span class="annottext">Maybe ThreadId
+</span><a href="#local-6989586621679040860"><span class="hs-identifier hs-var">mtid</span></a></span><span> </span><span class="hs-keyword">of</span><span>
+</span><span id="line-208"></span><span>                </span><span class="annot"><span class="annottext">Maybe ThreadId
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Maybe.html#Nothing"><span class="hs-identifier hs-var">Nothing</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><span class="annottext">() -&gt; TimeoutAction
+forall a. a -&gt; IO a
+forall (f :: * -&gt; *) a. Applicative f =&gt; a -&gt; f a
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#pure"><span class="hs-identifier hs-var">pure</span></a></span><span> </span><span class="hs-special">(</span><span class="hs-special">)</span><span>
+</span><span id="line-209"></span><span>                </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Maybe.html#Just"><span class="hs-identifier hs-type">Just</span></a></span><span> </span><span id="local-6989586621679040861"><span class="annot"><span class="annottext">ThreadId
+</span><a href="#local-6989586621679040861"><span class="hs-identifier hs-var">tid'</span></a></span></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><span class="annottext">IO ThreadId -&gt; TimeoutAction
+forall (f :: * -&gt; *) a. Functor f =&gt; f a -&gt; f ()
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/Data.Functor.html#void"><span class="hs-identifier hs-var">void</span></a></span><span> </span><span class="annot"><span class="annottext">(IO ThreadId -&gt; TimeoutAction)
+-&gt; (TimeoutAction -&gt; IO ThreadId) -&gt; TimeoutAction -&gt; TimeoutAction
+forall b c a. (b -&gt; c) -&gt; (a -&gt; b) -&gt; a -&gt; c
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#."><span class="hs-operator hs-var">.</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutAction -&gt; IO ThreadId
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#forkIO"><span class="hs-identifier hs-var">forkIO</span></a></span><span> </span><span class="annot"><span class="annottext">(TimeoutAction -&gt; TimeoutAction) -&gt; TimeoutAction -&gt; TimeoutAction
+forall a b. (a -&gt; b) -&gt; a -&gt; b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%24"><span class="hs-operator hs-var">$</span></a></span><span> </span><span class="annot"><span class="annottext">ThreadId -&gt; TimeoutThread -&gt; TimeoutAction
+forall e. Exception e =&gt; ThreadId -&gt; e -&gt; TimeoutAction
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Conc.Sync.html#throwTo"><span class="hs-identifier hs-var">E.throwTo</span></a></span><span> </span><span class="annot"><span class="annottext">ThreadId
+</span><a href="#local-6989586621679040861"><span class="hs-identifier hs-var">tid'</span></a></span><span> </span><span class="annot"><span class="annottext">TimeoutThread
+</span><a href="System.TimeManager.html#TimeoutThread"><span class="hs-identifier hs-var">TimeoutThread</span></a></span><span>
+</span><span id="line-210"></span><span>
+</span><span id="line-211"></span><span class="hs-comment">----------------------------------------------------------------</span><span>
+</span><span id="line-212"></span><span>
+</span><span id="line-213"></span><span class="annot"><span class="hs-comment">-- | Call the inner function with a timeout manager.</span></span><span>
+</span><span id="line-214"></span><span id="local-6989586621679040699"><span class="annot"><a href="System.TimeManager.html#withManager"><span class="hs-identifier hs-type">withManager</span></a></span><span>
+</span><span id="line-215"></span><span>    </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#Int"><span class="hs-identifier hs-type">Int</span></a></span><span>
+</span><span id="line-216"></span><span>    </span><span class="annot"><span class="hs-comment">-- ^ timeout in microseconds</span></span><span>
+</span><span id="line-217"></span><span>    </span><span class="hs-glyph">-&gt;</span><span> </span><span class="hs-special">(</span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="#local-6989586621679040699"><span class="hs-identifier hs-type">a</span></a></span><span class="hs-special">)</span><span>
+</span><span id="line-218"></span><span>    </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="#local-6989586621679040699"><span class="hs-identifier hs-type">a</span></a></span></span><span>
+</span><span id="line-219"></span><span id="withManager"><span class="annot"><span class="annottext">withManager :: forall a. Int -&gt; (Manager -&gt; IO a) -&gt; IO a
+</span><a href="System.TimeManager.html#withManager"><span class="hs-identifier hs-var hs-var">withManager</span></a></span></span><span> </span><span id="local-6989586621679040864"><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040864"><span class="hs-identifier hs-var">timeout</span></a></span></span><span> </span><span id="local-6989586621679040865"><span class="annot"><span class="annottext">Manager -&gt; IO a
+</span><a href="#local-6989586621679040865"><span class="hs-identifier hs-var">f</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Int -&gt; IO Manager
+</span><a href="System.TimeManager.html#initialize"><span class="hs-identifier hs-var">initialize</span></a></span><span> </span><span class="annot"><span class="annottext">Int
+</span><a href="#local-6989586621679040864"><span class="hs-identifier hs-var">timeout</span></a></span><span> </span><span class="annot"><span class="annottext">IO Manager -&gt; (Manager -&gt; IO a) -&gt; IO a
+forall a b. IO a -&gt; (a -&gt; IO b) -&gt; IO b
+forall (m :: * -&gt; *) a b. Monad m =&gt; m a -&gt; (a -&gt; m b) -&gt; m b
+</span><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/base-4.18.3.0/src/GHC.Base.html#%3E%3E%3D"><span class="hs-operator hs-var">&gt;&gt;=</span></a></span><span> </span><span class="annot"><span class="annottext">Manager -&gt; IO a
+</span><a href="#local-6989586621679040865"><span class="hs-identifier hs-var">f</span></a></span><span>
+</span><span id="line-220"></span><span>
+</span><span id="line-221"></span><span class="hs-comment">-- | Call the inner function with a timeout manager.</span><span>
+</span><span id="line-222"></span><span class="hs-comment">--   This is identical to 'withManager'.</span><span>
+</span><span id="line-223"></span><span id="local-6989586621679040866"><span class="annot"><a href="System.TimeManager.html#withManager%27"><span class="hs-identifier hs-type">withManager'</span></a></span><span>
+</span><span id="line-224"></span><span>    </span><span class="hs-glyph">::</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#Int"><span class="hs-identifier hs-type">Int</span></a></span><span>
+</span><span id="line-225"></span><span>    </span><span class="annot"><span class="hs-comment">-- ^ timeout in microseconds</span></span><span>
+</span><span id="line-226"></span><span>    </span><span class="hs-glyph">-&gt;</span><span> </span><span class="hs-special">(</span><span class="annot"><a href="System.TimeManager.Internal.html#Manager"><span class="hs-identifier hs-type">Manager</span></a></span><span> </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="#local-6989586621679040866"><span class="hs-identifier hs-type">a</span></a></span><span class="hs-special">)</span><span>
+</span><span id="line-227"></span><span>    </span><span class="hs-glyph">-&gt;</span><span> </span><span class="annot"><a href="file:///nix/store/q5s037f3dqgwfpccw3qcagm27malqb1y-ghc-9.6.7-doc/share/doc/ghc-9.6.7/html/libraries/ghc-prim-0.10.0/src/GHC.Types.html#IO"><span class="hs-identifier hs-type">IO</span></a></span><span> </span><span class="annot"><a href="#local-6989586621679040866"><span class="hs-identifier hs-type">a</span></a></span></span><span>
+</span><span id="line-228"></span><span id="withManager%27"><span class="annot"><span class="annottext">withManager' :: forall a. Int -&gt; (Manager -&gt; IO a) -&gt; IO a
+</span><a href="System.TimeManager.html#withManager%27"><span class="hs-identifier hs-var hs-var">withManager'</span></a></span></span><span> </span><span class="hs-glyph">=</span><span> </span><span class="annot"><span class="annottext">Int -&gt; (Manager -&gt; IO a) -&gt; IO a
+forall a. Int -&gt; (Manager -&gt; IO a) -&gt; IO a
+</span><a href="System.TimeManager.html#withManager"><span class="hs-identifier hs-var">withManager</span></a></span><span>
+</span><span id="line-229"></span><span class="hs-pragma">{-# DEPRECATED</span><span> </span><span class="hs-pragma">withManager'</span><span> </span><span class="hs-pragma">&quot;This function is the same as 'withManager' since version 0.3.0&quot;</span><span> </span><span class="hs-pragma">#-}</span><span>
+</span><span id="line-230"></span></pre></body></html>
