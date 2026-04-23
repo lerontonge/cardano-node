@@ -16,9 +16,11 @@ dist/
 .dir-locals.el
 .Rhistory
 result*
+/*freeze
 /launch-*
 stack.yaml.lock
 .ghcid
+.claude/settings.local.json
 
 /.cache
 /db
