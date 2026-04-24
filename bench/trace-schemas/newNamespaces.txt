@@ -582,6 +582,9 @@ Startup.NetworkConfigUpdateUnsupported
 Startup.NetworkMagic
 Startup.NonP2PWarning
 Startup.P2PInfo
+Startup.RpcConfigUpdate
+Startup.RpcConfigUpdateError
+Startup.RpcForceDisabled
 Startup.ShelleyBased
 Startup.SocketConfigError
 Startup.Time

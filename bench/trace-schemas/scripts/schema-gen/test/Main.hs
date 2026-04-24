@@ -38,6 +38,10 @@ applySchemaOverridesTests =
         let patch = A.object ["keep" A..= (2 :: Int), "nested" A..= A.object ["gone" A..= A.Null]]
         Apply.findDestructiveOps target patch
           @?= ["keep: field replacement", "nested.gone: field deletion"]
+    , testCase "findDestructiveOps allows identical values" $ do
+        let target = A.object ["keep" A..= ("x" :: String), "nested" A..= A.object ["same" A..= (1 :: Int)]]
+        let patch = A.object ["keep" A..= ("x" :: String), "nested" A..= A.object ["same" A..= (1 :: Int)]]
+        Apply.findDestructiveOps target patch @?= []
     , testCase "processOverride applies additive patch in temp tree" $
         withSystemTempDirectory "trace-schema-gen" $ \root -> do
           let target = root </> "messages" </> "Example.schema.json"

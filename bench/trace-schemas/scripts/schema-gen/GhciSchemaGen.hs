@@ -12,8 +12,9 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import qualified Data.Vector as V
 import Data.Char (isAlphaNum, isLower, isUpper, isSpace, toLower)
-import Data.List (elemIndex, foldl', isInfixOf, isPrefixOf, isSuffixOf, sortOn, stripPrefix)
-import Data.Maybe (catMaybes, fromMaybe, listToMaybe, mapMaybe)
+import qualified Data.Foldable as Foldable
+import Data.List (elemIndex, isInfixOf, isPrefixOf, isSuffixOf, sortOn, stripPrefix)
+import Data.Maybe (fromMaybe, listToMaybe, mapMaybe)
 import Data.Ord (Down (..))
 import System.Directory
 import System.Environment (getArgs)
@@ -39,6 +40,7 @@ rootDirs =
   , "cardano-submit-api/src"
   , "cardano-tracer/src"
   , "../ouroboros-network/ouroboros-network/lib"
+  , "../ouroboros-network/ouroboros-network/framework/tracing"
   , "../ouroboros-network/ouroboros-network/tracing"
   , "../ouroboros-network/ouroboros-network/protocols/lib"
   , "../ouroboros-network/ouroboros-network/api/lib"
@@ -110,7 +112,7 @@ main = do
   sources <- forM hsFiles $ \fp -> do
     src <- readFileSafe fp
     pure (fp, src)
-  let nsMap = foldl' mergeNs Map.empty [ normalizeNamespaceMap fp (parseNamespaceMap src) | (fp, src) <- sources ]
+  let nsMap = Foldable.foldl' mergeNs Map.empty [ normalizeNamespaceMap fp (parseNamespaceMap src) | (fp, src) <- sources ]
   -- Parse forMachine clauses and map their field bindings to variables
   putStrLn "Parsing forMachine clauses..."
   let helperFieldMaps = map (parseObjectHelperMap . snd) sources
@@ -120,7 +122,7 @@ main = do
         ]
 
   let fieldVarMap =
-        foldl'
+        Foldable.foldl'
           (Map.unionWith (Map.unionWith Map.union))
           Map.empty
           [ normalizeFieldVarMap fp (parseFieldVarMap helpers clauses)
@@ -134,7 +136,7 @@ main = do
       "[ghci " <> show idx <> "/" <> show (length clausesByFile) <> "] "
         <> fp
     normalizeVarTypesMap fp <$> ghciTypesForFile fp clauses
-  let varTypes = foldl' (Map.unionWith Map.union) Map.empty varTypesMaps
+  let varTypes = Foldable.foldl' (Map.unionWith Map.union) Map.empty varTypesMaps
 
   let msgOutDir = "bench/trace-schemas/messages"
   let typeOutDir = "bench/trace-schemas/types"
@@ -253,11 +255,11 @@ parseNamespaceMap src = go Nothing (lines src) Map.empty
               bodyAfterLambda = dropLeadingLambdaCase bodyLines
               acc'
                 | "\\case" `isInfixOf` header || isLambdaCaseBody bodyLines =
-                    foldl' insertNamespaceClause acc (parseNamespaceLambdaClauses bodyAfterLambda)
+                    Foldable.foldl' insertNamespaceClause acc (parseNamespaceLambdaClauses bodyAfterLambda)
                 | hasBranchArrows bodyLines =
                     case ctorsAfter "namespaceFor" (takeWhile (/= '=') (unwords headerLines)) of
                       [] -> acc
-                      ctors -> foldl' insertNamespaceClause acc (parseNamespaceCaseBranches ctors bodyLines)
+                      ctors -> Foldable.foldl' insertNamespaceClause acc (parseNamespaceCaseBranches ctors bodyLines)
                 | otherwise =
                     case extractNamespaceClause currentType typeConstructors (unwords clauseLines) of
                       Just clauseInfo -> insertNamespaceClause acc clauseInfo
@@ -454,7 +456,7 @@ insertNamespaceClause :: Map.Map ConstructorName [NamespaceParts]
                       -> ([ConstructorName], NamespaceParts)
                       -> Map.Map ConstructorName [NamespaceParts]
 insertNamespaceClause acc (ctors, parts) =
-  foldl' (\m ctor -> Map.insertWith (++) ctor [parts] m) acc ctors
+  Foldable.foldl' (\m ctor -> Map.insertWith (++) ctor [parts] m) acc ctors
 
 isLambdaCaseBody :: [String] -> Bool
 isLambdaCaseBody (l:_) = "\\case" `isInfixOf` trim l
@@ -599,7 +601,7 @@ parseObjectHelperMap src =
       && not ("--" `isPrefixOf` trim l)
 
   parseHelperFields body =
-    foldl' (Map.unionWith preferSpecific) Map.empty (mapMaybe parseBranch (helperBranches body))
+    Foldable.foldl' (Map.unionWith preferSpecific) Map.empty (mapMaybe parseBranch (helperBranches body))
 
   helperBranches [] = []
   helperBranches (l:ls)
@@ -871,7 +873,7 @@ isVariableOnlyPattern pat =
 
 -- Map JSON field keys to the pattern variable they come from.
 parseFieldVarMap :: HelperFieldMap -> [Clause] -> Map.Map ConstructorName (Map.Map DetailLevel (Map.Map String String))
-parseFieldVarMap helperMap = foldl' step Map.empty
+parseFieldVarMap helperMap = Foldable.foldl' step Map.empty
   where
     step acc cl =
       case clauseCtor cl of
@@ -888,8 +890,8 @@ parseFieldVarMap helperMap = foldl' step Map.empty
               directPairs = mapMaybe (parseFieldLine vars) (collectFieldEntries sanitizedBody)
               helperPairs = concatMap helperPairsForLine sanitizedBody
               pairs = Map.toList (Map.fromListWith preferSpecific (directPairs ++ helperPairs))
-              addOne m (k,v) = foldl' (\mm lvl -> Map.insertWith Map.union lvl (Map.singleton k v) mm) m lvls
-          in Map.insertWith (Map.unionWith Map.union) ctor (foldl' addOne Map.empty pairs) acc
+              addOne m (k,v) = Foldable.foldl' (\mm lvl -> Map.insertWith Map.union lvl (Map.singleton k v) mm) m lvls
+          in Map.insertWith (Map.unionWith Map.union) ctor (Foldable.foldl' addOne Map.empty pairs) acc
 
     helperPairsForLine line =
       concatMap helperPairsForName (tokenize line)
@@ -903,7 +905,7 @@ parseFieldVarMap helperMap = foldl' step Map.empty
       | otherwise = old
 
 collectFieldEntries :: [String] -> [String]
-collectFieldEntries = finalize . foldl' step []
+collectFieldEntries = finalize . Foldable.foldl' step []
  where
   step :: [String] -> String -> [String]
   step [] line
@@ -969,7 +971,7 @@ fieldEntryNeedsContinuation = hasOpenBalance . trim
       | otherwise = go paren bracketDepth brace cs
 
 stripCommentBlocks :: [String] -> [String]
-stripCommentBlocks = snd . foldl' step (0 :: Int, [])
+stripCommentBlocks = snd . Foldable.foldl' step (0 :: Int, [])
   where
     step (depth, acc) line =
       let (depth', cleaned) = stripLine depth line
@@ -1165,7 +1167,7 @@ ghciTypesForFile fp clauses = do
     out <- runGhci moduleName imports (map (fst . snd) queries)
     let outputs = splitOutputs out (length queries)
     let pairs = zip queries outputs
-    pure $ foldl' mergeVarTypes Map.empty (map parseQueryResult pairs)
+    pure $ Foldable.foldl' mergeVarTypes Map.empty (map parseQueryResult pairs)
   where
     mergeVarTypes = Map.unionWith Map.union
 
@@ -1337,7 +1339,7 @@ parseBindings :: String -> Maybe (Map.Map String String)
 parseBindings out =
   let constraints = parseConstraints out
       bindings = mapMaybe parseBindingLine (lines out)
-      applyConstraints ty = foldl' (\t (v, rep) -> replaceToken v rep t) ty constraints
+      applyConstraints ty = Foldable.foldl' (\t (v, rep) -> replaceToken v rep t) ty constraints
       fixed = [ (name, applyConstraints ty) | (name, ty) <- bindings ]
   in if null fixed then Nothing else Just (Map.fromList fixed)
 
@@ -1936,7 +1938,7 @@ mergedPropsForType
   -> IO A.Object
 mergedPropsForType fieldVarMap varTypes seen ctor byLevel = do
   let fieldVars =
-        foldl' (Map.unionWith (++)) Map.empty
+        Foldable.foldl' (Map.unionWith (++)) Map.empty
           [ Map.map (:[]) lvlMap
           | lvlMap <- Map.elems byLevel
           ]
@@ -2010,7 +2012,7 @@ mergeSchemas xs =
   in fromMaybe (A.object ["anyOf" A..= unique]) (singleElement unique)
 
 dedupeValues :: [A.Value] -> [A.Value]
-dedupeValues = reverse . foldl' step []
+dedupeValues = reverse . Foldable.foldl' step []
  where
   step acc v =
     let key = BL8.unpack (A.encode v)

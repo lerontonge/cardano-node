@@ -73,3 +73,5 @@ cardano-tracer/cardano-tracer-test
 
 # IntellIJ project folder
 .idea/
+
+.codex

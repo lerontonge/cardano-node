@@ -212,6 +212,7 @@ findDestructiveOps target patch = goObj "" targetObj patchObj
           keyPath = if null path then kStr else path <> "." <> kStr
        in case (KM.lookup k tObj, pv) of
             (Nothing, _) -> []
+            (Just tv, _) | tv == pv -> []
             (Just _, A.Null) -> [keyPath <> ": field deletion"]
             (Just (A.Object tv), A.Object pv') -> goObj keyPath tv pv'
             (Just _, _) -> [keyPath <> ": field replacement"]
