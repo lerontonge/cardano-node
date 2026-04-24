@@ -52,7 +52,8 @@ hprop_rpc_transaction = integrationRetryWorkspace 2 "rpc-tx" $ \tempAbsBasePath'
   let (ceo, eraProxy) =
         (conwayBasedEra, asType) :: era ~ ConwayEra => (ConwayEraOnwards era, AsType era)
       sbe = convert ceo
-      options = def{cardanoNodeEra = AnyShelleyBasedEra sbe, cardanoEnableRpc = RpcEnabled}
+      creationOptions = def{creationEra = AnyShelleyBasedEra sbe}
+      runtimeOptions = def{runtimeEnableRpc = RpcEnabled}
       addrInEra = AsAddressInEra eraProxy
 
   TestnetRuntime
@@ -60,7 +61,7 @@ hprop_rpc_transaction = integrationRetryWorkspace 2 "rpc-tx" $ \tempAbsBasePath'
     , testnetNodes = node0 : _
     , wallets = wallet0@(PaymentKeyInfo _ addrTxt0) : (PaymentKeyInfo _ addrTxt1) : _
     } <-
-    createAndRunTestnet options def conf
+    createAndRunTestnet creationOptions runtimeOptions conf
 
   epochStateView <- getEpochStateView configurationFile $ nodeSocketPath node0
   rpcSocket <- H.note . unFile $ nodeRpcSocketPath node0
