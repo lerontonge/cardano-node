@@ -42,7 +42,7 @@ newtype TestnetConfig = TestnetConfig
 discoverTestnetConfig :: TestnetConfig -> Aeson.Value -> IO NixServiceOptions
 discoverTestnetConfig TestnetConfig{tcDir} userConfig = do
   dirExists <- doesDirectoryExist tcDir
-  unless dirExists $ die $ "Testnet directory does not exist: " ++ tcDir
+  unless dirExists $ die $ "discoverTestnetConfig: testnet directory does not exist: " ++ tcDir
 
   targetNodes <- discoverNodes tcDir
   let socketPath = tcDir </> defaultSocketPath 1
@@ -64,7 +64,7 @@ discoverTestnetConfig TestnetConfig{tcDir} userConfig = do
 
   case Aeson.fromJSON merged of
     Aeson.Success opts -> pure opts
-    Aeson.Error err    -> die $ "Failed to parse merged config: " ++ err
+    Aeson.Error err    -> die $ "discoverTestnetConfig: failed to parse merged config: " ++ err
 
 
 -- | Discover nodes by scanning for port files in the testnet directory.
@@ -76,13 +76,13 @@ discoverNodes dir = do
   let nodeDataDir = dir </> takeDirectory (defaultNodeDataDir 1)
   exists <- doesDirectoryExist nodeDataDir
   if not exists
-    then die $ "Node data directory does not exist: " ++ nodeDataDir
+    then die $ "discoverNodes: node data directory does not exist: " ++ nodeDataDir
     else do
       entries <- listDirectory nodeDataDir
       let nodeIndices = sort $ mapMaybe parseNodeIndex entries
       nodes <- mapM (readNodeDescription dir) nodeIndices
       case nodes of
-        []     -> die $ "No nodes found in: " ++ nodeDataDir
+        []     -> die $ "discoverNodes: no nodes found in: " ++ nodeDataDir
         (n:ns) -> pure (n :| ns)
 
 
@@ -100,7 +100,7 @@ readNodeDescription dir idx = do
   validateFileExists portPath ("port file for " ++ defaultNodeName idx)
   portStr <- readFile portPath
   case readMaybe portStr :: Maybe PortNumber of
-    Nothing -> die $ "Invalid port number in: " ++ portPath
+    Nothing -> die $ "readNodeDescription: invalid port number in: " ++ portPath
     Just port -> pure NodeDescription
       { ndAddr = mkLocalhostAddr port
       , ndName = defaultNodeName idx
@@ -127,4 +127,4 @@ mergeValues _ override = override
 validateFileExists :: FilePath -> String -> IO ()
 validateFileExists path description = do
   exists <- doesFileExist path
-  unless exists $ die $ "Required " ++ description ++ " file not found: " ++ path
+  unless exists $ die $ "validateFileExists: required " ++ description ++ " file not found: " ++ path
