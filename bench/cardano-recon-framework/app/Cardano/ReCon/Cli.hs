@@ -1,6 +1,8 @@
 module Cardano.ReCon.Cli(Timeunit(..), timeunitToMicrosecond, Mode(..), CliOptions(..), opts) where
 
 
+import           Cardano.ReCon.LTL.Formula (OnMissingKey (..))
+
 import           Control.Arrow ((>>>))
 import           Data.Char (toLower)
 import           Options.Applicative
@@ -118,6 +120,20 @@ parseSeekToEnd = option readBool $
   <> value True
   <> help "seek to the end of the trace file before ingesting it"
 
+readOnMissingKey :: ReadM OnMissingKey
+readOnMissingKey = eitherReader $ fmap toLower >>> \case
+  "crash"  -> Right CrashOnMissingKey
+  "bottom" -> Right BottomOnMissingKey
+  _        -> Left "Expected either of: 'crash' or 'bottom'"
+
+parseOnMissingKey :: Parser OnMissingKey
+parseOnMissingKey = option readOnMissingKey $
+     long "on-missing-key"
+  <> metavar "<crash|bottom>"
+  <> showDefaultWith (\case BottomOnMissingKey -> "bottom"; CrashOnMissingKey -> "crash")
+  <> value BottomOnMissingKey
+  <> help "behaviour when a formula atom references a missing event property key"
+
 data CliOptions = CliOptions
   { formulas            :: FilePath
   , mode                :: Mode
@@ -129,6 +145,7 @@ data CliOptions = CliOptions
   , enableProgressDumps :: Bool
   , enableSeekToEnd     :: Bool
   , timeunit            :: Timeunit
+  , onMissingKey        :: OnMissingKey
   }
 
 parseCliOptions :: Parser CliOptions
@@ -143,6 +160,7 @@ parseCliOptions = CliOptions
               <*> parseDumpMetrics
               <*> parseSeekToEnd
               <*> parseTimeunit
+              <*> parseOnMissingKey
 
 opts :: ParserInfo CliOptions
 opts = info (parseCliOptions <**> helper)

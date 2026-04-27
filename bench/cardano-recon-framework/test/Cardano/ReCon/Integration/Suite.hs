@@ -1,7 +1,7 @@
 {- HLINT ignore "Redundant map" -}
 module Cardano.ReCon.Integration.Suite (integrationTests) where
 
-import           Cardano.ReCon.LTL.Formula (Formula, interpTimeunit)
+import           Cardano.ReCon.LTL.Formula (Formula, OnMissingKey (..), interpTimeunit)
 import           Cardano.ReCon.LTL.Formula.Parser (Context (..))
 import qualified Cardano.ReCon.LTL.Formula.Parser as Parser
 import           Cardano.ReCon.LTL.Formula.Yaml (readFormulas, readPropValues)
@@ -60,13 +60,13 @@ mkPositive :: [Formula TemporalEvent Text] -> FilePath -> String -> TestTree
 mkPositive fs tracesDir name = testCase name $ do
   events <- Feed.read (tracesDir </> name) eventDuration
   forM_ fs $ \phi ->
-    satisfies phi events @?= Satisfied
+    satisfies CrashOnMissingKey phi events @?= Satisfied
 
 mkNegative :: [Formula TemporalEvent Text] -> FilePath -> String -> TestTree
 mkNegative fs tracesDir name = testCase name $ do
   events <- Feed.read (tracesDir </> name) eventDuration
   assertBool "expected at least one Unsatisfied" $
-    any isUnsatisfied (map (`satisfies` events) fs)
+    any isUnsatisfied (map (\f -> satisfies CrashOnMissingKey f events) fs)
 
 isUnsatisfied :: SatisfactionResult event ty -> Bool
 isUnsatisfied (Unsatisfied _) = True

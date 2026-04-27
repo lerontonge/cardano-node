@@ -45,17 +45,17 @@ import qualified System.Metrics as EKG
 import           Streaming
 
 
-check :: Word -> Trace IO App.TraceMessage -> Formula TemporalEvent Text -> [TemporalEvent] -> IO ()
-check idx {- Formula index -} tr phi events =
-  let result = satisfies phi events in
+check :: OnMissingKey -> Word -> Trace IO App.TraceMessage -> Formula TemporalEvent Text -> [TemporalEvent] -> IO ()
+check omk idx {- Formula index -} tr phi events =
+  let result = satisfies omk phi events in
   traceWith tr $ formulaOutcome phi result idx
 
-checkS' :: Bool -> Word -> Trace IO App.TraceMessage -> Formula TemporalEvent Text -> Stream (Of TemporalEvent) IO () -> IO ()
-checkS' enableProgressDumps idx {- Formula index -} tr phi events = do
+checkS' :: OnMissingKey -> Bool -> Word -> Trace IO App.TraceMessage -> Formula TemporalEvent Text -> Stream (Of TemporalEvent) IO () -> IO ()
+checkS' omk enableProgressDumps idx {- Formula index -} tr phi events = do
   let initial = SatisfyMetrics 0 phi 0
   metrics <- newIORef initial
   withAsync (when enableProgressDumps $ runDisplayProgressDump initial metrics) $ \counterDisplayThread -> do
-    r <- satisfiesS phi events metrics
+    r <- satisfiesS omk phi events metrics
     traceWith tr $ formulaOutcome phi r idx
     cancel counterDisplayThread
   where
@@ -68,7 +68,8 @@ checkS' enableProgressDumps idx {- Formula index -} tr phi events = do
       threadDelay 1_000_000 -- 1s
       runDisplayProgressDump next counter
 
-checkOnline :: Bool
+checkOnline :: OnMissingKey
+            -> Bool
             -> Trace IO App.TraceMessage
             -> TemporalEventDurationMicrosec
             -> Word
@@ -77,22 +78,23 @@ checkOnline :: Bool
             -> [FilePath]
             -> [Formula TemporalEvent Text]
             -> IO ()
-checkOnline enableProgressDumps tr eventDuration retentionMs failureMode ingestMode files phis = do
+checkOnline omk enableProgressDumps tr eventDuration retentionMs failureMode ingestMode files phis = do
   ing <- mkIngestor (fromIntegral retentionMs)
   for_ files (ingestFileThreaded ing failureMode ingestMode)
   forConcurrently_ (zip [0..] phis) $ \(idx, phi) -> mkIngestorReader ing >>= \reader -> forever $ do
     traceWith tr $ FormulaStartCheck phi idx
-    checkS' enableProgressDumps idx tr phi (readS reader eventDuration)
+    checkS' omk enableProgressDumps idx tr phi (readS reader eventDuration)
 
-checkOffline :: Trace IO App.TraceMessage
+checkOffline :: OnMissingKey
+             -> Trace IO App.TraceMessage
              -> TemporalEventDurationMicrosec
              -> FilePath
              -> [Formula TemporalEvent Text]
              -> IO ()
-checkOffline tr eventDuration file phis = do
+checkOffline omk tr eventDuration file phis = do
   events <- read file eventDuration
   forConcurrently_ (zip [0..] phis) $ \(idx, phi) ->
-    check idx tr phi events
+    check omk idx tr phi events
   threadDelay 200_000 -- Give the tracer a grace period to output the logs to whatever backend
 
 setupTraceDispatcher :: Maybe FilePath -> IO (Trace IO App.TraceMessage)
@@ -155,9 +157,10 @@ main = do
       file <- case options.traces of
         [x] -> pure x
         _   -> die "Only exactly one trace file is supported in 'offline' mode"
-      checkOffline tr options.duration file formulas'
+      checkOffline options.onMissingKey tr options.duration file formulas'
     Online -> do
       checkOnline
+        options.onMissingKey
         options.enableProgressDumps
         tr
         options.duration

@@ -232,21 +232,21 @@ semanticsTests = testGroup "Semantics"
 prop1SatisfiabilityTests :: TestTree
 prop1SatisfiabilityTests = testGroup ("Satisfiability of: " <> unpack (prettyFormula prop1 Prec.Universe))
   [ testCase (show log1 <> " satisfies the formula") $
-      satisfies prop1 log1 @?= Satisfied
+      satisfies CrashOnMissingKey prop1 log1 @?= Satisfied
   , testCase (show log2 <> " satisfies the formula") $
-      satisfies prop1 log2 @?= Satisfied
+      satisfies CrashOnMissingKey prop1 log2 @?= Satisfied
   , testCase (show log3 <> " satisfies the formula") $
-      satisfies prop1 log3 @?= Satisfied
+      satisfies CrashOnMissingKey prop1 log3 @?= Satisfied
   , testCase (show log4 <> " does not satisfy the formula") $
-      satisfies prop1 log4 @?= Unsatisfied
+      satisfies CrashOnMissingKey prop1 log4 @?= Unsatisfied
         (fromList [(Msg Start 2, Start)])
   , testCase (show log5 <> " satisfies the formula") $
-      satisfies prop1 log5 @?= Satisfied
+      satisfies CrashOnMissingKey prop1 log5 @?= Satisfied
   , testCase (show log6 <> " satisfies the formula") $
-      satisfies prop1 log6 @?= Unsatisfied
+      satisfies CrashOnMissingKey prop1 log6 @?= Unsatisfied
         (fromList [(Msg Start 1,Start),(Msg Start 4,Start),(Msg Success 7,Success),(Msg Failure 1,Failure)])
   , testCase (show log7 <> " does not satisfy the formula") $
-      satisfies prop1 log7 @?= Unsatisfied
+      satisfies CrashOnMissingKey prop1 log7 @?= Unsatisfied
         (fromList [(Msg Start 2, Start)])
   ]
 
@@ -254,21 +254,21 @@ prop2SatisfiabilityTests :: TestTree
 prop2SatisfiabilityTests = testGroup ("Satisfiability of: " <> unpack (prettyFormula prop2 Prec.Universe))
   [
     testCase (show log1 <> " satisfies the formula") $
-      satisfies prop2 log1 @?= Satisfied
+      satisfies CrashOnMissingKey prop2 log1 @?= Satisfied
   , testCase (show log5 <> " satisfies the formula") $
-      satisfies prop2 log5 @?= Satisfied
+      satisfies CrashOnMissingKey prop2 log5 @?= Satisfied
   , testCase (show logEmpty <> " satisfies the formula") $
-      satisfies prop2 logEmpty @?= Satisfied
+      satisfies CrashOnMissingKey prop2 logEmpty @?= Satisfied
   , testCase (show log8 <> "does not satisfy the formula") $
-      satisfies prop2 log8 @?= Unsatisfied
+      satisfies CrashOnMissingKey prop2 log8 @?= Unsatisfied
         (fromList [(Msg Start 1,Start),(Msg Success 1,Success)])
   , testCase (show log9 <> " does not satisfy the formula") $
-      satisfies prop2 log9 @?= Unsatisfied
+      satisfies CrashOnMissingKey prop2 log9 @?= Unsatisfied
         (fromList [(Msg Success 1,Success)])
   , testCase (show log10 <> " satisfies the formula") $
-      satisfies prop2 log10 @?= Satisfied
+      satisfies CrashOnMissingKey prop2 log10 @?= Satisfied
   , testCase (show log11 <> " does not satisfy the formula") $
-      satisfies prop2 log11 @?=
+      satisfies CrashOnMissingKey prop2 log11 @?=
       Unsatisfied
         (fromList [(Msg Start 1,Start),(Msg Success 1,Success),(Msg Success 2,Success)])
 
@@ -278,39 +278,39 @@ prop3SatisfiabilityTests :: TestTree
 prop3SatisfiabilityTests = testGroup ("Satisfiability of: " <> unpack (prettyFormula prop3 Prec.Universe))
   [
     testCase (show log12 <> " satisfies the formula") $
-      satisfies prop3 log12 @?= Satisfied
+      satisfies CrashOnMissingKey prop3 log12 @?= Satisfied
   , testCase (show log13 <> " does not satisfy the formula") $
-      satisfies prop3 log13 @?= Unsatisfied (fromList [(Msg Start 1,Start),(Msg Success 0,Success)])
+      satisfies CrashOnMissingKey prop3 log13 @?= Unsatisfied (fromList [(Msg Start 1,Start),(Msg Success 0,Success)])
   ]
 
 prop4SatisfiabilityTests :: TestTree
 prop4SatisfiabilityTests = testGroup ("Satisfiability of: " <> unpack (prettyFormula prop4 Prec.Universe))
   [ testCase "[] satisfies the formula" $
-      satisfies prop4 ([] :: [Evt]) @?= Satisfied
+      satisfies CrashOnMissingKey prop4 ([] :: [Evt]) @?= Satisfied
   , testCase (show log14 <> " satisfies the formula") $
-      satisfies prop4 log14 @?= Satisfied
+      satisfies CrashOnMissingKey prop4 log14 @?= Satisfied
   , testCase (show log16 <> " satisfies the formula") $
-      satisfies prop4 log16 @?= Satisfied
+      satisfies CrashOnMissingKey prop4 log16 @?= Satisfied
   , testCase (show log15 <> " does not satisfy the formula") $
-      satisfies prop4 log15 @?=
+      satisfies CrashOnMissingKey prop4 log15 @?=
         Unsatisfied (fromList [(Evt P 1, P), (Evt Q 1, Q)])
   ]
 
 prop5SatisfiabilityTests :: TestTree
 prop5SatisfiabilityTests = testGroup ("Satisfiability of: " <> unpack (prettyFormula prop5 Prec.Universe))
   [ testCase "[] satisfies the formula" $
-      satisfies prop5 ([] :: [Evt]) @?= Satisfied
+      satisfies CrashOnMissingKey prop5 ([] :: [Evt]) @?= Satisfied
   , testCase (show log17 <> " satisfies the formula") $
-      satisfies prop5 log17 @?= Satisfied
+      satisfies CrashOnMissingKey prop5 log17 @?= Satisfied
   , testCase (show log18 <> " does not satisfy the formula") $
-      satisfies prop5 log18 @?=
+      satisfies CrashOnMissingKey prop5 log18 @?=
         Unsatisfied (fromList [(Evt P 2, P), (Evt Q 2, Q)])
   ]
 
 prop6SatisfiabilityTests :: TestTree
 prop6SatisfiabilityTests = testGroup ("Satisfiability of: " <> unpack (prettyFormula prop6 Prec.Universe))
   [ testCase "[] satisfies the formula" $
-      satisfies prop6 ([] :: [Evt]) @?= Satisfied
+      satisfies CrashOnMissingKey prop6 ([] :: [Evt]) @?= Satisfied
   , testCase (show [Noop] <> " satisfies the formula") $
-      satisfies prop6 [Noop] @?= Satisfied
+      satisfies CrashOnMissingKey prop6 [Noop] @?= Satisfied
   ]

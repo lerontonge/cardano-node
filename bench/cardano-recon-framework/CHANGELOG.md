@@ -2,7 +2,7 @@
 
 ## 1.1.1 -- April 2026
 * Support atoms that refer to property keys at arbitrary depth
-* Set build flag `crash-on-missing-key` to true by default
+* Replace the `crash-on-missing-key` build flag with a runtime CLI option `--on-missing-key <crash|bottom>` (default: `bottom`)
 
 ## 1.1.0 -- April 2026
 
