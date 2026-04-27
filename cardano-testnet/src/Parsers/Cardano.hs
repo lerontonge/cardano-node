@@ -26,14 +26,18 @@ import           Testnet.Defaults (defaultEra)
 import           Testnet.Start.Cardano
 import           Testnet.Start.Types
 
+data ModeOptions
+  = ModeFromEnv TestnetEnvOptions
+  | ModeNewEnv TestnetCreationOptions (Maybe FilePath)
+
 optsTestnet :: Parser CardanoTestnetCliOptions
 optsTestnet = mkCliOptions <$> pModeOptions <*> pRuntimeOptions
   where
     pModeOptions =
-          Left <$> pFromEnv
-      <|> Right <$> ((,) <$> pCreationOptions <*> pScratchOutputDir)
-    mkCliOptions (Left envOpts) rt = StartFromEnv (StartFromEnvOptions envOpts rt)
-    mkCliOptions (Right (creation, outDir)) rt = NoUserProvidedEnv (NoUserProvidedEnvOptions creation outDir rt)
+          ModeFromEnv <$> pFromEnv
+      <|> ModeNewEnv <$> pCreationOptions <*> pScratchOutputDir
+    mkCliOptions (ModeFromEnv envOpts) rt = StartFromEnv (StartFromEnvOptions envOpts rt)
+    mkCliOptions (ModeNewEnv creation outDir) rt = NoUserProvidedEnv (NoUserProvidedEnvOptions creation outDir rt)
 
 optsCreateTestnet :: Parser CardanoTestnetCreateEnvOptions
 optsCreateTestnet = CardanoTestnetCreateEnvOptions
