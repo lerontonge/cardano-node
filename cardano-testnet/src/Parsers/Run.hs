@@ -17,6 +17,7 @@ import           Control.Monad (void)
 import           Data.Maybe (fromMaybe)
 import           Options.Applicative
 import qualified Options.Applicative as Opt
+import           System.Directory (doesDirectoryExist)
 
 import           Testnet.Filepath (unTmpAbsPath)
 import           Testnet.Start.Cardano
@@ -27,6 +28,7 @@ import           Parsers.Help
 import           Parsers.Version
 import           RIO (display, forever, logInfo, runSimpleApp, threadDelay)
 import           UnliftIO.Resource (runResourceT)
+import           Cardano.Prelude (unlessM)
 
 pref :: ParserPrefs
 pref = Opt.prefs $ showHelpOnEmpty <> showHelpOnError
@@ -86,7 +88,9 @@ runCardanoOptions = \case
       waitForShutdown
   StartFromEnv StartFromEnvOptions{fromEnvOptions, fromEnvRuntimeOptions} -> do
     -- Run cardano-testnet in the sandbox provided by the user
-    conf <- mkConfigAbs (envPath fromEnvOptions)
+    let dirName = envPath fromEnvOptions
+    unlessM (doesDirectoryExist dirName) $ error $ "The provided path does not exist or is not a directory: " <> dirName
+    conf <- mkConfigAbs dirName
     nodes <- readNodeOptionsFromEnv (unTmpAbsPath (tempAbsPath conf))
     runSimpleApp . runResourceT $ do
       logInfo $ "Starting testnet in environment: " <> display (tempAbsPath conf)
