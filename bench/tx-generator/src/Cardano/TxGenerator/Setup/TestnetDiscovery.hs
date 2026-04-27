@@ -32,10 +32,10 @@ newtype TestnetConfig = TestnetConfig
   } deriving (Show, Eq)
 
 
--- | Discover testnet infrastructure from a @cardano-testnet@ output directory
--- and merge it with user-provided JSON config.
+-- | Discover testnet connection settings from a @cardano-testnet@ output
+-- directory and merge them with user-provided JSON config.
 --
--- The 4 infrastructure fields (@localNodeSocketPath@, @sigKey@,
+-- The 4 connection settings (@localNodeSocketPath@, @sigKey@,
 -- @nodeConfigFile@, @targetNodes@) are always populated from the testnet
 -- directory and override any values in the user config.  All other fields
 -- must be supplied by the user.
@@ -53,14 +53,14 @@ discoverTestnetConfig TestnetConfig{tcDir} userConfig = do
   validateFileExists sigKeyPath "signing key"
   validateFileExists configPath "configuration"
 
-  let infraJson = object
+  let connectionSettings = object
         [ "localNodeSocketPath" .= socketPath
         , "sigKey"              .= sigKeyPath
         , "nodeConfigFile"      .= configPath
         , "targetNodes"         .= targetNodes
         ]
 
-  let merged = mergeValues userConfig infraJson
+  let merged = mergeValues userConfig connectionSettings
 
   case Aeson.fromJSON merged of
     Aeson.Success opts -> pure opts

@@ -243,7 +243,7 @@ commandParser
   testnetConfigOpt :: Parser TestnetConfig
   testnetConfigOpt = TestnetConfig
     <$> strOption (long "testnet-config-dir" <> metavar "DIR"
-          <> help "cardano-testnet output directory; discovered infrastructure overrides config file")
+          <> help "cardano-testnet output directory; discovered connection settings override config file")
 
   compileCmd :: Parser Command
   compileCmd = Compile <$> filePath "benchmarking options"

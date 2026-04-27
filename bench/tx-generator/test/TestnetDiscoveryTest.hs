@@ -42,11 +42,11 @@ import           Data.Maybe (fromMaybe)
 testnetDiscoveryTests :: TestTree
 testnetDiscoveryTests = testGroup "TestnetDiscovery"
   [ testCase "round-trip: JSON serialization" roundTripTest
-  , testProperty "infra fields always override user config" prop_infraOverride
+  , testProperty "connection settings always override user config" prop_connectionSettingsOverride
   ]
 
 
--- | A complete user config that provides all required non-infra fields.
+-- | A complete user config that provides all required fields besides connection settings.
 completeUserConfig :: Value
 completeUserConfig = object
   [ "debugMode"      .= False
@@ -74,26 +74,26 @@ roundTripTest = withMockTestnet $ \tmpDir -> do
 
 -- Property test --
 
--- | Non-infra required field names.
+-- | Required field names (excluding connection settings).
 requiredFieldNames :: [String]
 requiredFieldNames = [ "debugMode", "era", "inputs_per_tx", "outputs_per_tx"
                      , "tx_fee", "min_utxo_value", "add_tx_size", "init_cooldown"
                      , "tps", "tx_count" ]
 
--- | Required keys for NixServiceOptions parsing to succeed (non-infra only).
+-- | Required keys for NixServiceOptions parsing to succeed (excluding connection settings).
 requiredKeys :: [Key]
 requiredKeys = map fromString requiredFieldNames
 
 
 -- | Generate a user config JSON with a biased random subset of required fields,
--- and optionally with user-provided infra fields that should be overridden.
+-- and optionally with user-provided connection settings that should be overridden.
 genUserConfig :: Gen Value
 genUserConfig = do
   tpsVal       <- choose (1 :: Int, 1000)
   txCountVal   <- choose (1 :: Int, 10000)
   socketVal    <- ("/test/socket/" ++) . show <$> choose (1 :: Int, 100)
   keepaliveVal <- oneof [pure Nothing, Just <$> choose (1 :: Integer, 120)]
-  includeInfra <- arbitrary
+  includeConnectionSettings <- arbitrary
 
   included <- frequency
     [ (70, pure requiredFieldNames)
@@ -120,7 +120,7 @@ genUserConfig = do
   pure $ object
     $  [ fromString k .= v | (k, v) <- allFields, has k ]
     ++ [ "keepalive" .= v | Just v <- [keepaliveVal] ]
-    ++ [ "localNodeSocketPath" .= socketVal | includeInfra ]
+    ++ [ "localNodeSocketPath" .= socketVal | includeConnectionSettings ]
 
 
 -- | Pick a uniformly random number of elements from a list.
@@ -131,7 +131,7 @@ randomSubset xs = do
 
 
 -- | Predict whether 'discoverTestnetConfig' will fail: all required
--- non-infra fields must be present in the user config.
+-- all required fields besides connection settings must be present in the user config.
 expectFailure :: Value -> Bool
 expectFailure (Object obj) = not $ all (`KM.member` obj) requiredKeys
 expectFailure _            = True
@@ -142,11 +142,11 @@ jsonField :: FromJSON a => Key -> Value -> Maybe a
 jsonField k = parseMaybe (withObject "config" (.: k))
 
 
--- | Property: infrastructure fields always come from the testnet directory
--- regardless of what the user supplies; non-infra fields come from the user
--- config; missing required non-infra fields cause failure.
-prop_infraOverride :: Property
-prop_infraOverride =
+-- | Property: connection settings always come from the testnet directory
+-- regardless of what the user supplies; remaining fields come from the user
+-- config; missing required fields cause failure.
+prop_connectionSettingsOverride :: Property
+prop_connectionSettingsOverride =
   forAll genUserConfig $ \userConfig ->
   let fails = expectFailure userConfig
       hasUserSocket = case jsonField "localNodeSocketPath" userConfig :: Maybe String of
@@ -155,7 +155,7 @@ prop_infraOverride =
   in
   cover 30 (not fails)                        "success" $
   cover 5  fails                              "failure (missing required)" $
-  cover 5  (hasUserSocket && not fails)       "user provides infra (should be overridden)" $
+  cover 5  (hasUserSocket && not fails)       "user provides connection settings (should be overridden)" $
   ioProperty $ withMockTestnet $ \tmpDir -> do
     let tryDiscover :: IO (Either SomeException NixServiceOptions)
         tryDiscover = try (evaluate =<< discover tmpDir userConfig)
