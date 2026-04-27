@@ -247,6 +247,7 @@ cardanoTestnet
     { tempAbsPath=TmpAbsolutePath tmpAbsPath
     , updateTimestamps
     } = do
+  testMinimumConfigurationRequirements cardanoNodes
   let nPools = NumPools $ length $ NEL.filter isSpoNodeOptions cardanoNodes
       nodeConfigFile = tmpAbsPath </> defaultConfigFile
       byronGenesisFile = tmpAbsPath </> "byron-genesis.json"
