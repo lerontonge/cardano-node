@@ -33,7 +33,7 @@ optsTestnet = mkCliOptions <$> pModeOptions <*> pRuntimeOptions
           Left <$> pFromEnv
       <|> Right <$> ((,) <$> pCreationOptions <*> pScratchOutputDir)
     mkCliOptions (Left envOpts) rt = StartFromEnv (StartFromEnvOptions envOpts rt)
-    mkCliOptions (Right (creation, outDir)) rt = StartFromScratch (StartFromScratchOptions creation outDir rt)
+    mkCliOptions (Right (creation, outDir)) rt = NoUserProvidedEnv (NoUserProvidedEnvOptions creation outDir rt)
 
 optsCreateTestnet :: Parser CardanoTestnetCreateEnvOptions
 optsCreateTestnet = CardanoTestnetCreateEnvOptions

@@ -8,7 +8,7 @@
 
 module Testnet.Start.Types
   ( CardanoTestnetCliOptions(..)
-  , StartFromScratchOptions(..)
+  , NoUserProvidedEnvOptions(..)
   , StartFromEnvOptions(..)
   , CardanoTestnetCreateEnvOptions (..)
   , TestnetCreationOptions(..)
@@ -37,7 +37,6 @@ module Testnet.Start.Types
   , cardanoDefaultTestnetNodeOptions
   , GenesisOptions(..)
   , UserProvidedData(..)
-  , UserProvidedEnv(..)
   , UserProvidedGeneses(..)
   , PraosCredentialsSource(..)
 
@@ -82,19 +81,19 @@ defaultTestnetMagic :: Int
 defaultTestnetMagic = 42
 
 -- | Command line options for the @cardano-testnet cardano@ command.
--- Either start from scratch (creating a new testnet environment) or
--- start from a pre-existing environment (created by @create-env@).
+-- Either create a new testnet environment or use a pre-existing one
+-- (created by @create-env@).
 data CardanoTestnetCliOptions
-  = StartFromScratch StartFromScratchOptions
+  = NoUserProvidedEnv NoUserProvidedEnvOptions
   | StartFromEnv StartFromEnvOptions
   deriving (Eq, Show)
 
--- | Options for @cardano-testnet cardano@ when creating a new environment
--- and then starting the testnet.
-data StartFromScratchOptions = StartFromScratchOptions
-  { scratchCreationOptions :: TestnetCreationOptions
-  , scratchOutputDir :: Maybe FilePath -- ^ @--output-dir@, uses a temporary directory if absent
-  , scratchRuntimeOptions :: TestnetRuntimeOptions
+-- | Options for @cardano-testnet cardano@ when no user-provided environment
+-- is given: create a new environment and then start the testnet.
+data NoUserProvidedEnvOptions = NoUserProvidedEnvOptions
+  { noEnvCreationOptions :: TestnetCreationOptions
+  , noEnvOutputDir :: Maybe FilePath -- ^ @--output-dir@, uses a temporary directory if absent
+  , noEnvRuntimeOptions :: TestnetRuntimeOptions
   } deriving (Eq, Show)
 
 -- | Options for @cardano-testnet cardano --node-env@ when starting a testnet
@@ -103,11 +102,6 @@ data StartFromEnvOptions = StartFromEnvOptions
   { fromEnvOptions :: TestnetEnvOptions
   , fromEnvRuntimeOptions :: TestnetRuntimeOptions
   } deriving (Eq, Show)
-
-data UserProvidedEnv
-  = NoUserProvidedEnv
-  | UserProvidedEnv FilePath
-  deriving (Eq, Show)
 
 data UpdateTimestamps = UpdateTimestamps | DontUpdateTimestamps
   deriving (Eq, Show)

@@ -7,7 +7,7 @@
 ### Changed
 
 - Split `CardanoTestnetOptions` into `TestnetCreationOptions` and `TestnetRuntimeOptions` so each function receives only the fields it uses.
-- `CardanoTestnetCliOptions` is now a sum type (`StartFromScratch | StartFromEnv`), making `--node-env` and `--num-pool-nodes` structurally mutually exclusive in the CLI parser.
+- `CardanoTestnetCliOptions` is now a sum type (`NoUserProvidedEnv | StartFromEnv`), making `--node-env` and `--num-pool-nodes` structurally mutually exclusive in the CLI parser.
 - Simplified `CardanoTestnetCreateEnvOptions` and `createTestnetEnv` signatures (fewer arguments, genesis options and on-chain params folded into `TestnetCreationOptions`).
 
 ### Added

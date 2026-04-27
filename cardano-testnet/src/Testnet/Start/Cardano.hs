@@ -12,7 +12,7 @@
 
 module Testnet.Start.Cardano
   ( CardanoTestnetCliOptions(..)
-  , StartFromScratchOptions(..)
+  , NoUserProvidedEnvOptions(..)
   , StartFromEnvOptions(..)
   , TestnetCreationOptions(..)
   , TestnetRuntimeOptions(..)

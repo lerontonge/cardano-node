@@ -73,17 +73,17 @@ createEnvOptions CardanoTestnetCreateEnvOptions
 
 runCardanoOptions :: CardanoTestnetCliOptions -> IO ()
 runCardanoOptions = \case
-  StartFromScratch StartFromScratchOptions{scratchCreationOptions, scratchOutputDir, scratchRuntimeOptions} -> do
+  NoUserProvidedEnv NoUserProvidedEnvOptions{noEnvCreationOptions, noEnvOutputDir, noEnvRuntimeOptions} -> do
     -- Create the sandbox, then run cardano-testnet.
     -- It is not necessary to update timestamps here, because
     -- the genesis files will be created with up-to-date stamps already.
-    let dirName = fromMaybe "testnet" scratchOutputDir
+    let dirName = fromMaybe "testnet" noEnvOutputDir
     conf <- mkConfigAbs dirName
     runSimpleApp . runResourceT $ do
       logInfo $ "Creating environment: " <> display (tempAbsPath conf)
-      createTestnetEnv scratchCreationOptions conf
+      createTestnetEnv noEnvCreationOptions conf
       logInfo $ "Starting testnet in environment: " <> display (tempAbsPath conf)
-      void $ cardanoTestnet (creationNodes scratchCreationOptions) scratchRuntimeOptions conf
+      void $ cardanoTestnet (creationNodes noEnvCreationOptions) noEnvRuntimeOptions conf
       logInfo "Testnet started"
       waitForShutdown
   StartFromEnv StartFromEnvOptions{fromEnvOptions, fromEnvRuntimeOptions} -> do

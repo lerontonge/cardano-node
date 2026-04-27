@@ -2,7 +2,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 
 module Testnet.Property.Run
-  ( runTestnet
+  ( UserProvidedEnv(..)
+  , runTestnet
   -- Ignore tests on various OSs
   , ignoreOn
   , ignoreOnWindows
@@ -32,7 +33,8 @@ import           Text.Printf (printf)
 
 import           Testnet.Process.RunIO
 import           Testnet.Property.Util (integration, integrationWorkspace)
-import           Testnet.Start.Types (Conf, UserProvidedEnv (..), mkConf)
+import           Testnet.Start.Types (Conf, mkConf)
+
 import           Testnet.Types (TestnetNode (..), TestnetRuntime (..), spoNodes)
 
 import           Hedgehog (Property)
@@ -44,6 +46,10 @@ import           Test.Tasty.ExpectedFailure (wrapTest)
 import qualified Test.Tasty.Hedgehog as H
 import           Test.Tasty.Providers (testPassed)
 import           Test.Tasty.Runners (Result (resultShortDescription), TestTree)
+
+data UserProvidedEnv
+  = NoUserProvidedEnv
+  | UserProvidedEnv FilePath
 
 runTestnet :: UserProvidedEnv -> (Conf -> H.Integration TestnetRuntime) -> IO ()
 runTestnet env tn = do
