@@ -4,7 +4,7 @@ description:        Cardano Re(altime) Con(formance) Framework based on Linear T
 category:           Cardano
                     Testing
 copyright:          2026 Intersect.
-version:            1.1.0
+version:            1.1.1
 license:            Apache-2.0
 license-files:      LICENSE
                     NOTICE
@@ -36,12 +36,6 @@ flag debug
   default:              False
   manual:               True
 
-flag crash-on-missing-key
-  description:          If enabled throw an exception when a formula atom expects a missing key, otherwise evaluate the atom to ⊥.
-  default:              False
-  manual:               True
-
-
 common common
     ghc-options:      -Wall
 
@@ -53,6 +47,7 @@ common common
 
     default-extensions:
       BangPatterns
+      FlexibleContexts
       FunctionalDependencies
       LambdaCase
       MultiParamTypeClasses
@@ -69,9 +64,6 @@ common common
 
     if flag(debug)
       CPP-Options:        -DTRACE
-
-    if flag(crash-on-missing-key)
-      CPP-Options:        -DCRASH_ON_MISSING_KEY
 
 library
     import:           common
@@ -119,6 +111,7 @@ library
 
     build-depends:    base
                     , containers
+                    , mtl
                     , text
                     , directory
                     , trace-dispatcher ^>= 2.12

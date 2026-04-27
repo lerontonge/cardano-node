@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 module Cardano.ReCon.LTL.Internal.Progress(next, terminate) where
 
 import           Cardano.ReCon.LTL.Formula
@@ -8,12 +7,10 @@ import qualified Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula as H
 
 import           Prelude hiding (lookup)
 
+import           Control.Monad.Reader (Reader, asks)
 import           Data.Map.Strict (lookup)
 import qualified Data.Set as Set
-
-#ifdef CRASH_ON_MISSING_KEY
-import qualified Data.Text                           as Text
-#endif
+import qualified Data.Text as Text
 
 -- This file concerns algorithmically checking formula satisfiability.
 --  There are two parts:
@@ -23,50 +20,44 @@ import qualified Data.Text                           as Text
 
 -- | This is an algorithm for representing
 --   (t t̄ ⊧ φ) in terms of ∃φ'. (t̄ ⊧ φ')
-next :: (Event event ty, Eq ty) => Formula event ty -> event -> Formula event ty
+next :: (Event event ty, Eq ty) => Formula event ty -> event -> Reader OnMissingKey (Formula event ty)
 next (Forall k phi) s = next (unfoldForall k phi) s
 next (ForallN k phi) s = next (unfoldForallN k phi) s
 next (ExistsN k phi) s = next (unfoldExistsN k phi) s
 next (NextN k phi) s = next (unfoldNextN k phi) s
 next (UntilN k phi psi) s = next (unfoldUntilN k phi psi) s
-next (Next phi) _ = phi
-next (And phi psi) s = And (next phi s) (next psi s)
-next (Or phi psi) s = Or (next phi s) (next psi s)
-next (Implies phi psi) s = Implies (next phi s) (next psi s)
-next (Not phi) s = Not (next phi s)
-next Bottom _ = Bottom
-next Top _ = Top
+next (Next phi) _ = pure phi
+next (And phi psi) s = And <$> next phi s <*> next psi s
+next (Or phi psi) s = Or <$> next phi s <*> next psi s
+next (Implies phi psi) s = Implies <$> next phi s <*> next psi s
+next (Not phi) s = Not <$> next phi s
+next Bottom _ = pure Bottom
+next Top _ = pure Top
 next (Atom c is) s | ofTy s c =
-  F.and $ flip fmap (Set.toList is) $ \case
-    IntPropConstraint key t ->
+  F.and <$> traverse missingKey' (Set.toList is)
+  where
+    missingKey' (IntPropConstraint key t) =
       case lookup key (intProps s c) of
-        Just v  -> PropIntBinRel Eq (Set.singleton (s, c)) t (IntConst v)
-        Nothing ->
-#ifdef CRASH_ON_MISSING_KEY
-          error $ "Missing key: " <> Text.unpack key
-#else
-          Bottom
-#endif
-    TextPropConstraint key t ->
+        Just v  -> pure $ PropIntBinRel Eq (Set.singleton (s, c)) t (IntConst v)
+        Nothing -> missingKey key
+    missingKey' (TextPropConstraint key t) =
       case lookup key (textProps s c) of
-        Just v  -> PropTextEq (Set.singleton (s, c)) t v
-        Nothing ->
-#ifdef CRASH_ON_MISSING_KEY
-          error $ "Missing key: " <> Text.unpack key
-#else
-          Bottom
-#endif
-next (Atom {}) _ = Bottom
-next (PropIntForall  x phi) s = PropIntForall  x (next phi s)
-next (PropTextForall x phi) s = PropTextForall x (next phi s)
-next (PropIntForallN  x dom phi) s = PropIntForallN  x dom (next phi s)
-next (PropTextForallN x dom phi) s = PropTextForallN x dom (next phi s)
-next (PropIntExists  x phi) s = PropIntExists  x (next phi s)
-next (PropTextExists x phi) s = PropTextExists x (next phi s)
-next (PropIntExistsN  x dom phi) s = PropIntExistsN  x dom (next phi s)
-next (PropTextExistsN x dom phi) s = PropTextExistsN x dom (next phi s)
-next (PropIntBinRel rel r a b) _ = PropIntBinRel rel r a b
-next (PropTextEq rel a b)      _ = PropTextEq rel a b
+        Just v  -> pure $ PropTextEq (Set.singleton (s, c)) t v
+        Nothing -> missingKey key
+    missingKey key = asks $ \case
+      BottomOnMissingKey -> Bottom
+      CrashOnMissingKey  -> error $ "Missing key: " <> Text.unpack key
+next (Atom {}) _ = pure Bottom
+next (PropIntForall  x phi) s = PropIntForall  x <$> next phi s
+next (PropTextForall x phi) s = PropTextForall x <$> next phi s
+next (PropIntForallN  x dom phi) s = PropIntForallN  x dom <$> next phi s
+next (PropTextForallN x dom phi) s = PropTextForallN x dom <$> next phi s
+next (PropIntExists  x phi) s = PropIntExists  x <$> next phi s
+next (PropTextExists x phi) s = PropTextExists x <$> next phi s
+next (PropIntExistsN  x dom phi) s = PropIntExistsN  x dom <$> next phi s
+next (PropTextExistsN x dom phi) s = PropTextExistsN x dom <$> next phi s
+next (PropIntBinRel rel r a b) _ = pure $ PropIntBinRel rel r a b
+next (PropTextEq rel a b)      _ = pure $ PropTextEq rel a b
 
 -- | This is an algorithm for (∅ ⊧ ◯ φ)
 terminateNext :: Formula event a -> HomogeneousFormula

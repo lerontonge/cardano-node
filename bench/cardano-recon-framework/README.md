@@ -17,9 +17,11 @@ If negative, reports as such and lists the events that have been relevant to the
 ## CLI Syntax
 
 ```
-Usage: cardano-recon FILE --mode <offline|online> --duration INT FILES 
-                     [--retention INT] [--trace-dispatcher-cfg FILE] 
+Usage: cardano-recon FILE --mode <offline|online> --duration INT FILES
+                     [--retention INT] [--trace-dispatcher-cfg FILE]
                      [--context FILE] [--dump-metrics BOOL] [--seek-to-end BOOL]
+                     [--timeunit <hour|minute|second|millisecond|microsecond>]
+                     [--on-missing-key <crash|bottom>]
 
   Check formula satisfiability against a log of trace messages
 
@@ -34,10 +36,13 @@ Available options:
                            (default: False)
   --seek-to-end BOOL       seek to the end of the trace file before ingesting it
                            (default: True)
+  --timeunit <hour|minute|second|millisecond|microsecond>
+                           timeunit (default: second)
+  --on-missing-key <crash|bottom>
+                           behaviour when a formula atom references a missing
+                           event property key (default: bottom)
   -h,--help                Show this help text
 ```
 
 ## Build flags
   - _debug_ for enabling verbose tracing of formulas as they evolve (multiple traces per each temporal event).
-  - _crash_on_missing_key_ for making the application crash if a formula atom is evaluated on an event which is missing
-    a key the atom is referencing.

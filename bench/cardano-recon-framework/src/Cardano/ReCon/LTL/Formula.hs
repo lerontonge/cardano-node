@@ -17,6 +17,7 @@ module Cardano.ReCon.LTL.Formula (
   , Relevance
   , and
   , interpTimeunit
+  , OnMissingKey(..)
   , Event(..)) where
 
 import           Prelude hiding (and)
@@ -243,6 +244,15 @@ interpTimeunit f (PropIntExists x phi)    = PropIntExists x (interpTimeunit f ph
 interpTimeunit f (PropTextExists x phi)   = PropTextExists x (interpTimeunit f phi)
 interpTimeunit f (PropIntExistsN x dom phi)  = PropIntExistsN x dom (interpTimeunit f phi)
 interpTimeunit f (PropTextExistsN x dom phi) = PropTextExistsN x dom (interpTimeunit f phi)
+
+-- | Controls evaluator behaviour when a formula atom references a property
+--   key that is absent from the event being evaluated.
+--
+--   * 'BottomOnMissingKey' — treat the atom as unsatisfied (@⊥@); evaluation
+--     continues silently.  Useful when events may legally omit optional fields.
+--   * 'CrashOnMissingKey' — throw an exception.  Useful during development to
+--     catch formula/event-schema mismatches early.
+data OnMissingKey = BottomOnMissingKey | CrashOnMissingKey
 
 -- | Default name: e.
 --
