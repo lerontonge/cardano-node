@@ -21,7 +21,7 @@ import           Data.List (isPrefixOf)
 import           Data.List.NonEmpty (NonEmpty (..))
 import           Data.Maybe (mapMaybe)
 import           Network.Socket (PortNumber)
-import           System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
+import           System.Directory (doesDirectoryExist, doesPathExist, listDirectory)
 import           System.Exit (die)
 import           System.FilePath ((</>), takeDirectory)
 import           Text.Read (readMaybe)
@@ -123,8 +123,8 @@ mergeValues (Aeson.Object base) (Aeson.Object override) =
 mergeValues _ override = override
 
 
--- | Validate that a file exists, dying with a clear message if not.
+-- | Validate that a path exists (file, socket, etc.), dying with a clear message if not.
 validateFileExists :: FilePath -> String -> IO ()
 validateFileExists path description = do
-  exists <- doesFileExist path
+  exists <- doesPathExist path
   unless exists $ die $ "validateFileExists: required " ++ description ++ " file not found: " ++ path
