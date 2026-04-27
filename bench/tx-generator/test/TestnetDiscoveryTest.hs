@@ -215,17 +215,19 @@ prop_connectionSettingsOverride =
 
 -- | Run an IO action with stderr silenced.
 withSilentStderr :: IO a -> IO a
-withSilentStderr action = bracket acquire release (const action)
+withSilentStderr action =
+  withSystemTempDirectory "silent-stderr" $ \dir ->
+    bracket (acquire (dir </> "stderr")) release (const action)
   where
-    acquire = do
+    acquire path = do
       saved <- hDuplicate stderr
-      devNull <- openFile "/dev/null" WriteMode
-      hDuplicateTo devNull stderr
-      pure (saved, devNull)
-    release (saved, devNull) = do
+      sink <- openFile path WriteMode
+      hDuplicateTo sink stderr
+      pure (saved, sink)
+    release (saved, sink) = do
       hDuplicateTo saved stderr
       hClose saved
-      hClose devNull
+      hClose sink
 
 withMockTestnet :: (FilePath -> IO a) -> IO a
 withMockTestnet action = withSystemTempDirectory "mock-testnet" $ \dir -> do
