@@ -6,7 +6,6 @@ module Parsers.Cardano
   ) where
 
 import           Cardano.Api (AnyShelleyBasedEra (..))
-import           Cardano.Api.Pretty
 
 import           Cardano.CLI.EraBased.Common.Option hiding (pNetworkId)
 import           Cardano.Prelude (readMaybe)
@@ -26,68 +25,85 @@ import           Options.Applicative.Types (readerAsk)
 import           Testnet.Defaults (defaultEra)
 import           Testnet.Start.Cardano
 import           Testnet.Start.Types
-import           Testnet.Types (readNodeLoggingFormat)
+
+data ModeOptions
+  = ModeFromEnv TestnetEnvOptions
+  | ModeNewEnv TestnetCreationOptions (Maybe FilePath)
 
 optsTestnet :: Parser CardanoTestnetCliOptions
-optsTestnet = CardanoTestnetCliOptions
-  <$> pCardanoTestnetCliOptions
-  <*> pGenesisOptions
-  <*> pNodeEnvironment
-  <*> pUpdateTimestamps
-  <*> pOnChainParams
+optsTestnet = mkCliOptions <$> pModeOptions <*> pRuntimeOptions
+  where
+    pModeOptions =
+          ModeFromEnv <$> pFromEnv
+      <|> ModeNewEnv <$> pCreationOptions <*> pScratchOutputDir
+    mkCliOptions (ModeFromEnv envOpts) rt = StartFromEnv (StartFromEnvOptions envOpts rt)
+    mkCliOptions (ModeNewEnv creation outDir) rt = NoUserProvidedEnv (NoUserProvidedEnvOptions creation outDir rt)
 
 optsCreateTestnet :: Parser CardanoTestnetCreateEnvOptions
 optsCreateTestnet = CardanoTestnetCreateEnvOptions
-  <$> pCardanoTestnetCliOptions
-  <*> pGenesisOptions
+  <$> pCreationOptions
   <*> pEnvOutputDir
-  <*> pCreateEnvOptions
 
--- We can't fill in the optional Genesis files at parse time, because we want to be in a monad
--- to properly parse JSON. We delegate this task to the caller.
-pCreateEnvOptions :: Parser CreateEnvOptions
-pCreateEnvOptions = CreateEnvOptions
-  <$> pOnChainParams
+pFromEnv :: Parser TestnetEnvOptions
+pFromEnv = TestnetEnvOptions
+  <$> OA.strOption
+      (  OA.long "node-env"
+      <> OA.metavar "FILEPATH"
+      <> OA.help "Path to the node's environment (which is generated otherwise). You can generate a default environment with the 'create-env' command, then modify it and pass it with this argument."
+      )
+  <*> pUpdateTimestamps
 
-pCardanoTestnetCliOptions :: Parser CardanoTestnetOptions
-pCardanoTestnetCliOptions = CardanoTestnetOptions
+pCreationOptions :: Parser TestnetCreationOptions
+pCreationOptions = TestnetCreationOptions
   <$> pTestnetNodeOptions
   <*> pure (AnyShelleyBasedEra defaultEra)
   <*> pMaxLovelaceSupply
-  <*> OA.option (OA.eitherReader readNodeLoggingFormat)
-      (   OA.long "node-logging-format"
-      <>  OA.help "Node logging format (json|text)"
-      <>  OA.metavar "LOGGING_FORMAT"
-      <>  OA.showDefaultWith prettyShow
-      <>  OA.value (cardanoNodeLoggingFormat def)
-      )
-  <*> OA.option OA.auto
-      (   OA.long "num-dreps"
-      <>  OA.help "Number of delegate representatives (DReps) to generate. Ignored if a node environment is passed."
-      <>  OA.metavar "NUMBER"
-      <>  OA.showDefault
-      <>  OA.value 3
-      )
-  <*> OA.switch
-      (   OA.long "enable-new-epoch-state-logging"
-      <>  OA.help "Enable new epoch state logging to logs/ledger-epoch-state.log"
-      <>  OA.showDefault
-      )
-  <*> (maybe NoUserProvidedEnv UserProvidedEnv <$> optional (OA.strOption
-      (   OA.long "output-dir"
-      <>  OA.help "Directory where to store files, sockets, and so on. It is created if it doesn't exist. If unset, a temporary directory is used."
-      <>  OA.metavar "DIRECTORY"
-      )))
-  <*> OA.flag RpcDisabled RpcEnabled
-      (   OA.long "enable-grpc"
-      <>  OA.help "[EXPERIMENTAL] Enable gRPC endpoint on all of testnet nodes. The listening socket file will be the same directory as node's N2C socket."
-      <>  OA.showDefault
-      )
-  <*> OA.flag UseKesKeyFile UseKesSocket
-      (   OA.long "use-kes-agent"
-      <>  OA.help "Get Praos block forging credentials from kes-agent via the default socket path"
-      <>  OA.showDefault
-      )
+  <*> pNumDReps
+  <*> pGenesisOptions
+  <*> pOnChainParams
+
+pRuntimeOptions :: Parser TestnetRuntimeOptions
+pRuntimeOptions = TestnetRuntimeOptions
+  <$> pEnableNewEpochStateLogging
+  <*> pEnableRpc
+  <*> pKesSource
+
+pScratchOutputDir :: Parser (Maybe FilePath)
+pScratchOutputDir = optional $ OA.strOption
+  (   OA.long "output-dir"
+  <>  OA.help "Directory where to store files, sockets, and so on. It is created if it doesn't exist. If unset, a temporary directory is used."
+  <>  OA.metavar "DIRECTORY"
+  )
+
+pNumDReps :: Parser NumDReps
+pNumDReps = OA.option OA.auto
+  (   OA.long "num-dreps"
+  <>  OA.help "Number of delegate representatives (DReps) to generate."
+  <>  OA.metavar "NUMBER"
+  <>  OA.showDefault
+  <>  OA.value 3
+  )
+
+pEnableNewEpochStateLogging :: Parser Bool
+pEnableNewEpochStateLogging = OA.switch
+  (   OA.long "enable-new-epoch-state-logging"
+  <>  OA.help "Enable new epoch state logging to logs/ledger-epoch-state.log"
+  <>  OA.showDefault
+  )
+
+pEnableRpc :: Parser RpcSupport
+pEnableRpc = OA.flag RpcDisabled RpcEnabled
+  (   OA.long "enable-grpc"
+  <>  OA.help "[EXPERIMENTAL] Enable gRPC endpoint on all of testnet nodes. The listening socket file will be the same directory as node's N2C socket."
+  <>  OA.showDefault
+  )
+
+pKesSource :: Parser PraosCredentialsSource
+pKesSource = OA.flag UseKesKeyFile UseKesSocket
+  (   OA.long "use-kes-agent"
+  <>  OA.help "Get Praos block forging credentials from kes-agent via the default socket path"
+  <>  OA.showDefault
+  )
 
 pTestnetNodeOptions :: Parser (NonEmpty NodeOption)
 pTestnetNodeOptions =
@@ -107,14 +123,6 @@ pTestnetNodeOptions =
       case readMaybe arg of
         Just n | n >= 1 -> pure n
         _ -> fail "Need at least one SPO node to produce blocks, but got none."
-
-pNodeEnvironment :: Parser UserProvidedEnv
-pNodeEnvironment = fmap (maybe NoUserProvidedEnv UserProvidedEnv) <$>
-  optional $ OA.strOption
-    (  OA.long "node-env"
-    <> OA.metavar "FILEPATH"
-    <> OA.help "Path to the node's environment (which is generated otherwise). You can generate a default environment with the 'create-env' command, then modify it and pass it with this argument."
-    )
 
 pOnChainParams :: Parser TestnetOnChainParams
 pOnChainParams = fmap (fromMaybe DefaultParams) <$> optional $
@@ -161,7 +169,7 @@ pGenesisOptions =
     pEpochLength =
       OA.option OA.auto
         (   OA.long "epoch-length"
-        <>  OA.help "Epoch length, in number of slots. Ignored if a node environment is passed."
+        <>  OA.help "Epoch length, in number of slots."
         <>  OA.metavar "SLOTS"
         <>  OA.showDefault
         <>  OA.value (genesisEpochLength def)
@@ -169,7 +177,7 @@ pGenesisOptions =
     pSlotLength =
       OA.option OA.auto
         (   OA.long "slot-length"
-        <>  OA.help "Slot length. Ignored if a node environment is passed."
+        <>  OA.help "Slot length."
         <>  OA.metavar "SECONDS"
         <>  OA.showDefault
         <>  OA.value (genesisSlotLength def)
@@ -177,7 +185,7 @@ pGenesisOptions =
     pActiveSlotCoeffs =
       OA.option OA.auto
         (   OA.long "active-slots-coeff"
-        <>  OA.help "Active slots coefficient. Ignored if a node environment is passed."
+        <>  OA.help "Active slots coefficient."
         <>  OA.metavar "DOUBLE"
         <>  OA.showDefault
         <>  OA.value (genesisActiveSlotsCoeff def)
@@ -203,8 +211,8 @@ pMaxLovelaceSupply :: Parser Word64
 pMaxLovelaceSupply =
   OA.option OA.auto
       (   OA.long "max-lovelace-supply"
-      <>  OA.help "Max lovelace supply that your testnet starts with. Ignored if a node environment is passed."
+      <>  OA.help "Max lovelace supply that your testnet starts with."
       <>  OA.metavar "WORD64"
       <>  OA.showDefault
-      <>  OA.value (cardanoMaxSupply def)
+      <>  OA.value (creationMaxSupply def)
       )
