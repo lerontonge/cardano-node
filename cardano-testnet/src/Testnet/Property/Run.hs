@@ -47,9 +47,14 @@ import qualified Test.Tasty.Hedgehog as H
 import           Test.Tasty.Providers (testPassed)
 import           Test.Tasty.Runners (Result (resultShortDescription), TestTree)
 
+-- | Whether the user has provided the path to an existing testnet environment
+-- through the @--node-env@ flag, or not. This determines whether the testnet
+-- will reuse an existing environment or whether a new one should be created.
 data UserProvidedEnv
   = NoUserProvidedEnv
+    -- ^ No user-provided environment, a new environment will be created for the user.
   | UserProvidedEnv FilePath
+    -- ^ The user provided the path to an existing testnet environment through the @--node-env@ flag.
 
 runTestnet :: UserProvidedEnv -> (Conf -> H.Integration TestnetRuntime) -> IO ()
 runTestnet env tn = do
