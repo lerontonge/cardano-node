@@ -72,6 +72,7 @@ library
                     , Cardano.ReCon.Common.Parser
 
                     , Cardano.ReCon.LTL.Check
+                    , Cardano.ReCon.LTL.ContinuousFormula
                     , Cardano.ReCon.LTL.Formula
                     , Cardano.ReCon.LTL.Formula.Parser
                     , Cardano.ReCon.LTL.Formula.Prec
