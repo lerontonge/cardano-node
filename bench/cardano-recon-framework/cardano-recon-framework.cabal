@@ -98,7 +98,6 @@ library
                     , Cardano.ReCon.LTL.Internal.Subst
                     , Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula
                     , Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.FinFree
-                    , Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.TextFree
                     , Cardano.ReCon.Presburger.Internal.CooperQE
                     , Cardano.ReCon.Presburger.Internal.IR.AffineDNF
                     , Cardano.ReCon.Presburger.Internal.IR.CompNF

@@ -9,14 +9,17 @@ module Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.FinFree (
 
 import           Cardano.ReCon.Common.Types (BinRel (..))
 import           Cardano.ReCon.LTL.Formula (IntTerm (..), IntValue, TextTerm (..), VariableIdentifier)
-import           Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.TextFree (Extended (..))
 import           Cardano.ReCon.LTL.Internal.Subst (substIntTerm)
-import qualified Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.TextFree as TextFree
+import qualified Cardano.ReCon.Presburger.Decide as PD
+import qualified Cardano.ReCon.Presburger.Formula as P
 
 import           Data.Functor ((<&>))
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Text (Text)
+
+-- | An extended value: either a concrete value or a placeholder distinct from all concrete values.
+data Extended a = Val a | Placeholder deriving (Show, Ord, Eq)
 
 -- | `HomogeneousFormula` with all finite-domain quantifiers already eliminated.
 --   Only infinite-domain (unbounded) quantifiers remain.
@@ -114,42 +117,42 @@ substText v x (PropTextExists x' phi) | x /= x' = PropTextExists x' (substText v
 substText _ _ (PropTextExists x' phi)            = PropTextExists x' phi
 
 -- ---------------------------------------------------------------------------
--- Lowering to TextFree
+-- Lowering to Presburger.Formula
 -- ---------------------------------------------------------------------------
 
--- | Lower a `FinFree` to `TextFree` by eliminating all text quantifiers and
+-- | Lower a `FinFree` to 'P.Formula' by eliminating all text quantifiers and
 --   evaluating ground `PropTextEq` atoms.
 --
 --   Text universals unfold to a conjunction (⊤ for empty domain);
 --   text existentials unfold to a disjunction (⊥ for empty domain).
 --
---   @'eval' = 'TextFree.eval' . 'lower'@
-lower :: FinFree -> TextFree.TextFree
-lower (Or phi psi)      = TextFree.Or (lower phi) (lower psi)
-lower (And phi psi)     = TextFree.And (lower phi) (lower psi)
-lower (Not phi)         = TextFree.Not (lower phi)
-lower (Implies phi psi) = TextFree.Implies (lower phi) (lower psi)
-lower Top               = TextFree.Top
-lower Bottom            = TextFree.Bottom
-lower (PropIntForall x phi) = TextFree.PropIntForall x (lower phi)
-lower (PropIntExists x phi) = TextFree.PropIntExists x (lower phi)
-lower (PropIntBinRel rel lhs rhs) = TextFree.PropIntBinRel rel lhs rhs
+--   @'eval' = 'PD.eval' . 'lower'@
+lower :: FinFree -> P.Formula
+lower (Or phi psi)      = P.Or (lower phi) (lower psi)
+lower (And phi psi)     = P.And (lower phi) (lower psi)
+lower (Not phi)         = P.Not (lower phi)
+lower (Implies phi psi) = P.Implies (lower phi) (lower psi)
+lower Top               = P.Top
+lower Bottom            = P.Bottom
+lower (PropIntForall x phi) = P.IntForall x (lower phi)
+lower (PropIntExists x phi) = P.IntExists x (lower phi)
+lower (PropIntBinRel rel lhs rhs) = P.IntBinRel rel lhs rhs
 -- Ground text equations are folded directly to ⊤/⊥:
 lower (PropTextEq (TextConst lhs) rhs)
-  | lhs == rhs = TextFree.Top
-  | otherwise  = TextFree.Bottom
+  | lhs == rhs = P.Top
+  | otherwise  = P.Bottom
 lower (PropTextEq (TextVar x) _) = error $ "lower: free text variable " <> show x
 -- ⟦∀x ∈ Text. φ⟧ ≡ φ[☐/x] ∧ φ[v₁/x] ∧ ...  (⊤ when dom is empty)
 lower (PropTextForall x phi) =
   let vals = Set.toList (textValues x phi)
-  in foldr TextFree.And TextFree.Top
+  in foldr P.And P.Top
        (lower (substText Placeholder x phi) : (vals <&> \v -> lower (substText (Val v) x phi)))
 -- ⟦∃x ∈ Text. φ⟧ ≡ φ[☐/x] ∨ φ[v₁/x] ∨ ...  (⊥ when dom is empty)
 lower (PropTextExists x phi) =
   let vals = Set.toList (textValues x phi)
-  in foldr TextFree.Or TextFree.Bottom
+  in foldr P.Or P.Bottom
        (lower (substText Placeholder x phi) : (vals <&> \v -> lower (substText (Val v) x phi)))
 
 -- | Evaluate the `FinFree` onto `Bool`.
 eval :: FinFree -> Bool
-eval = TextFree.eval . lower
+eval = PD.eval . lower
