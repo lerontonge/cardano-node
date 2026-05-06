@@ -38,17 +38,18 @@ data TraceMessage = FormulaStartCheck {
                   -- | Formula outcomes are split into (+) and (-) as we'd like to print them at distinct severity levels,
                   --   but severity level is indexed by namespace (= constructor name), hence
                   --   we can't store both outcomes in one constructor.
-                  | FormulaPositiveOutcome { formula :: Formula TemporalEvent Text, index :: Word }
+                  | FormulaPositiveOutcome { formula :: Formula TemporalEvent Text, index :: Word, greppable :: Bool }
                   | FormulaNegativeOutcome {
                       formula   :: Formula TemporalEvent Text,
                       relevance :: Relevance TemporalEvent Text,
-                      index :: Word
+                      index     :: Word,
+                      greppable :: Bool
                   }
 
 -- | Smart constructor.
-formulaOutcome :: Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Word -> TraceMessage
-formulaOutcome formula Satisfied         idx = FormulaPositiveOutcome formula idx
-formulaOutcome formula (Unsatisfied rel) idx = FormulaNegativeOutcome formula rel idx
+formulaOutcome :: Bool -> Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Word -> TraceMessage
+formulaOutcome greppable formula Satisfied         idx = FormulaPositiveOutcome { formula, index = idx, greppable }
+formulaOutcome greppable formula (Unsatisfied rel) idx = FormulaNegativeOutcome { formula, relevance = rel, index = idx, greppable }
 
 green :: Text -> Text
 green text = "\x001b[32m" <> text <> "\x001b[0m"
@@ -63,13 +64,17 @@ prettyTemporalEvent :: TemporalEvent -> Text -> Text
 prettyTemporalEvent (TemporalEvent _ msgs) ns =
   maybe ("<<Unexpected namespace " <> ns <> ">>") prettyTraceMessage (find (\ x -> x.tmsgNS == ns) msgs)
 
+prettyRelevanceArray :: Relevance TemporalEvent Text -> Text
+prettyRelevanceArray rel =
+  "[\n"
+  <> Text.intercalate "\n,\n" (fmap (uncurry prettyTemporalEvent) (Set.toList rel))
+  <> "\n]"
+
 prettySatisfactionResult :: Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Text
 prettySatisfactionResult initial Satisfied = prettyFormula initial Prec.Universe <> " " <> green "(✔)"
 prettySatisfactionResult initial (Unsatisfied rel) =
   prettyFormula initial Prec.Universe <> red " (✗)" <> "\n"
-    <> "[\n"
-    <> Text.intercalate "\n,\n" (fmap (uncurry prettyTemporalEvent) (Set.toList rel))
-    <> "\n]"
+  <> prettyRelevanceArray rel
 
 instance LogFormatting TraceMessage where
   forMachine _ FormulaStartCheck{..} = mconcat
@@ -108,9 +113,9 @@ instance LogFormatting TraceMessage where
       <> "formula: " <> prettyFormula formula Prec.Universe <> "\n"
       <> "index: " <> showT index
   forHuman FormulaPositiveOutcome{..} =
-    prettySatisfactionResult formula Satisfied
+    if greppable then "" else prettySatisfactionResult formula Satisfied
   forHuman FormulaNegativeOutcome{..} =
-    prettySatisfactionResult formula (Unsatisfied relevance)
+    if greppable then prettyRelevanceArray relevance else prettySatisfactionResult formula (Unsatisfied relevance)
 
   asMetrics FormulaStartCheck{} = []
   asMetrics (FormulaProgressDump {catchupRatio, index}) = [DoubleM ("catchup_ratio_" <> showT index) catchupRatio]

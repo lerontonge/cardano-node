@@ -134,6 +134,11 @@ parseOnMissingKey = option readOnMissingKey $
   <> value BottomOnMissingKey
   <> help "behaviour when a formula atom references a missing event property key"
 
+parseGreppable :: Parser Bool
+parseGreppable = switch $
+     long "grep"
+  <> help "on formula violation print only the JSON array of relevant events; print nothing on satisfaction"
+
 data CliOptions = CliOptions
   { formulas            :: FilePath
   , mode                :: Mode
@@ -146,6 +151,7 @@ data CliOptions = CliOptions
   , enableSeekToEnd     :: Bool
   , timeunit            :: Timeunit
   , onMissingKey        :: OnMissingKey
+  , greppable           :: Bool
   }
 
 parseCliOptions :: Parser CliOptions
@@ -161,6 +167,7 @@ parseCliOptions = CliOptions
               <*> parseSeekToEnd
               <*> parseTimeunit
               <*> parseOnMissingKey
+              <*> parseGreppable
 
 opts :: ParserInfo CliOptions
 opts = info (parseCliOptions <**> helper)
