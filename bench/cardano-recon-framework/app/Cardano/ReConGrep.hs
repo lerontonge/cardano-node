@@ -14,6 +14,7 @@ import           Control.Monad (forM_, (>=>))
 import           Control.Monad.Reader (runReader)
 import           Data.Aeson (decodeStrict')
 import           Data.Aeson.Encode.Pretty (encodePrettyToTextBuilder)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BChar8
 import qualified Data.Text.IO as TIO
 import           Data.Text.Lazy (toStrict)
@@ -31,7 +32,7 @@ import           System.Exit (die)
 
 data CliOptions = CliOptions
   { formulas     :: FilePath
-  , traces       :: FilePath
+  , traces       :: Maybe FilePath
   , context      :: Maybe FilePath
   , onMissingKey :: OnMissingKey
   }
@@ -48,10 +49,11 @@ parseCliOptions = CliOptions
         (  long "formulas"
         <> metavar "FILE"
         <> help "YAML file with a list of ContinuousFormulas")
-  <*> option str
+  <*> option (optional str)
         (  long "traces"
+        <> value Nothing
         <> metavar "FILE"
-        <> help "JSON array of TraceMessages to filter")
+        <> help "JSON array of TraceMessages to filter (default: stdin)")
   <*> option (optional str)
         (  long "context"
         <> value Nothing
@@ -95,7 +97,7 @@ main = do
                    Parser.name
                  >>= dieOnYamlError
   cformulas <- mapM retractOrDie rawFormulas
-  content <- BChar8.readFile options.traces
+  content <- maybe BS.getContents BChar8.readFile options.traces
   msgs <- maybe (die "Failed to parse input as a JSON array of TraceMessages") pure
             (decodeStrict' content :: Maybe [TraceMessage])
   let matching = [ msg | msg <- msgs

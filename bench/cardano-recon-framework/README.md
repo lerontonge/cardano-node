@@ -57,8 +57,8 @@ Inputs:
   - A YAML list of continuous formula strings (same syntax as `cardano-recon`, but temporal
     operators such as `□`, `◇`, `○`, and `|` are not permitted).
     For further details about the formula language, consult the [language overview](docs/formula-languages.txt).
-  - A JSON file containing an array of `TraceMessage` objects (e.g. the relevant-events output
-    produced by `cardano-recon` on a negative formula outcome).
+  - A JSON array of `TraceMessage` objects, read from a file (`--traces FILE`) or from stdin
+    if `--traces` is omitted (e.g. piped from `cardano-recon` on a negative formula outcome).
   - An optional context variables YAML file for variable substitution in formulas.
   - An `--on-missing-key` policy (default: `bottom`) controlling behaviour when a formula
     references a property absent from a message.
@@ -66,15 +66,15 @@ Inputs:
 #### CLI Syntax
 
 ```
-Usage: cardano-recon-grep --formulas FILE --traces FILE
+Usage: cardano-recon-grep --formulas FILE [--traces FILE]
                             [--context FILE]
                             [--on-missing-key <crash|bottom>]
 
-  Filter log events that satisfy all given continuous formulas
+  Print log events that realise all given continuous formulas (Global Realisation Print)
 
 Available options:
   --formulas FILE          YAML file with a list of ContinuousFormulas
-  --traces FILE            JSON array of TraceMessages to filter
+  --traces FILE            JSON array of TraceMessages to filter (default: stdin)
   --context FILE           context variables YAML file
   --on-missing-key <crash|bottom>
                            behaviour when a formula atom references a missing
