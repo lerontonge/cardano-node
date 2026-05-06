@@ -17,9 +17,9 @@ module Testnet.Start.Cardano
   , TestnetCreationOptions(..)
   , TestnetRuntimeOptions(..)
   , TestnetEnvOptions(..)
-  , TestnetNodeOptions(..)
-  , NodeOptions(..)
-  , cardanoDefaultTestnetNodeOptions
+  , TestnetNodesWithOptions(..)
+  , NodeWithOptions(..)
+  , cardanoDefaultTestnetNodesWithOptions
 
   , TestnetRuntime (..)
 
@@ -28,7 +28,7 @@ module Testnet.Start.Cardano
   , createTestnetEnv
   , getDefaultAlonzoGenesis
   , getDefaultShelleyGenesis
-  , readNodeOptionsFromEnv
+  , readNodesWithOptionsFromEnv
   , retryOnAddressInUseError
 
   , liftToIntegration
@@ -47,11 +47,14 @@ import           Ouroboros.Network.PeerSelection.RelayAccessPoint (RelayAccessPo
 import           Prelude hiding (lines)
 
 import           Control.Concurrent (threadDelay)
-import           Control.Monad (forM, forM_, unless, when)
+import           Control.Monad (forM, forM_, guard, unless, when)
+import           Control.Monad.Trans.Maybe (runMaybeT)
+import           Control.Exception (IOException)
 import           Control.Monad.Catch
 import           Control.Monad.Trans.Resource (MonadResource, getInternalState)
 import           Data.Aeson
 import qualified Data.Aeson.Encode.Pretty as A
+import qualified Data.Yaml as Yaml
 import qualified Data.ByteString.Lazy as LBS
 import           Data.Default.Class ()
 import           Data.Either
@@ -67,12 +70,13 @@ import           Data.Time.Clock (NominalDiffTime)
 import qualified Data.Time.Clock as DTC
 import           GHC.Stack
 import qualified System.Directory as IO
+import qualified System.Process as Process
 import           System.FilePath ((</>))
 
 import           Testnet.Components.Configuration
 import qualified Testnet.Defaults as Defaults
-import           Cardano.Node.Testnet.Paths (defaultConfigFile, defaultPortFile,
-                   defaultUtxoAddrPath)
+import           Cardano.Node.Testnet.Paths (defaultConfigFile, defaultNodeEnvFile,
+                   defaultPortFile, defaultUtxoAddrPath)
 import           Testnet.Filepath
 import           Testnet.Handlers (interruptNodesOnSigINT)
 import           Testnet.Orphans ()
@@ -93,6 +97,7 @@ import           RIO.State (put)
 import           UnliftIO.Async
 import           UnliftIO.Exception (stringException)
 
+
 liftToIntegration :: HasCallStack => RIO ResourceMap a -> H.Integration a
 liftToIntegration r =  do
    rMap <- lift $ lift getInternalState
@@ -109,7 +114,7 @@ createTestnetEnv :: ()
 createTestnetEnv
   creationOptions@TestnetCreationOptions
     { creationEra=asbe
-    , creationNodes=TestnetNodeOptions{optSpoNodes, optRelayNodes}
+    , creationNodes=TestnetNodesWithOptions{optSpoNodes, optRelayNodes}
     }
   Conf
     { genesisHashesPolicy
@@ -139,8 +144,8 @@ createTestnetEnv
 
   let portNumbersMap = Map.fromList portNumbers
 
-  -- Create network topology and write port files
-  forM_ nodeIds $ \i -> do
+  -- Create network topology, write port files, and write env files for custom binaries
+  forM_ numberedNodes $ \(i, nodeOption) -> do
     let nodeDataDir = tmpAbsPath </> Defaults.defaultNodeDataDir i
     liftIOAnnotated $ IO.createDirectoryIfMissing True nodeDataDir
 
@@ -152,6 +157,14 @@ createTestnetEnv
     producers <- mapM (idToRemoteAddressP2P portNumbersMap) $ NodeId <$> filter (/= i) nodeIds
     let topology = Defaults.defaultP2PTopology producers
     liftIOAnnotated . LBS.writeFile (nodeDataDir </> "topology.json") $ A.encodePretty topology
+
+    -- Write env file for nodes with custom binaries
+    forM_ (nodeBin nodeOption) $ \bin -> do
+        absBin <- liftIOAnnotated $ IO.makeAbsolute bin
+        version <- getNodeVersion absBin
+        let envFile = tmpAbsPath </> defaultNodeEnvFile i
+            nodeEnv = NodeEnv { nodeBinary = absBin, nodeVersion = version }
+        liftIOAnnotated $ Yaml.encodeFile envFile nodeEnv
 
 -- | Starts a number of nodes, as given by the first argument. You can either:
 --
@@ -224,12 +237,12 @@ cardanoTestnet
   => MonadResource m
   => MonadCatch m
   => MonadFail m
-  => TestnetNodeOptions -- ^ The nodes to start
+  => TestnetNodesWithOptions -- ^ The nodes to start
   -> TestnetRuntimeOptions -- ^ Runtime options
   -> Conf -- ^ Path to the test sandbox
   -> m TestnetRuntime
 cardanoTestnet
-  TestnetNodeOptions{optSpoNodes=cardanoSpoNodes, optRelayNodes=cardanoRelayNodes}
+  TestnetNodesWithOptions{optSpoNodes=cardanoSpoNodes, optRelayNodes=cardanoRelayNodes}
   TestnetRuntimeOptions
     { runtimeEnableNewEpochStateLogging=enableNewEpochStateLogging
     , runtimeEnableRpc=cardanoEnableRpc
@@ -310,7 +323,7 @@ cardanoTestnet
 
   let portNumbersMap = Map.fromList portNumbers
 
-  eTestnetNodes <- forConcurrently (zip [1..] allNodes) $ \(i, (isSpo, nodeOptions)) -> do
+  eTestnetNodes <- forConcurrently (zip [1..] allNodes) $ \(i, (isSpo, nodeWithOptions)) -> do
     port <- case Map.lookup i portNumbersMap of
       Just p -> pure p
       Nothing -> throwString $ "Port not found for node " <> show i
@@ -318,48 +331,48 @@ cardanoTestnet
         nodeDataDir = tmpAbsPath </> Defaults.defaultNodeDataDir i
         nodePoolKeysDir = tmpAbsPath </> Defaults.defaultSpoKeysDir i
     (mKeys, spoNodeCliArgs) <- if not isSpo then pure (Nothing, []) else do
-          -- depending on testnet configuration, either start a 'kes-agent' or use a key from disk
-          kesSourceCliArg <-
-            case cardanoKESSource of
-              UseKesKeyFile -> pure ["--shelley-kes-key", nodePoolKeysDir </> "kes.skey"]
-              UseKesSocket -> do
-                -- wait startTimeOffsetSeconds so that the startTime from shelly-genesis.json is not in the future,
-                -- as otherwise we will trigger an underflow in kes-agent with a negative time difference.
-                liftIOAnnotated $ threadDelay (startTimeOffsetSeconds * 1_000_000)
-                kesAgent <- runExceptT $
-                  initAndStartKesAgent (TmpAbsolutePath tmpAbsPath) nodeName
-                    TestnetKesAgentArgs{ tkaaShelleyGenesisFile = shelleyGenesisFile
-                                       , tkaaColdVKeyFile = nodePoolKeysDir </> "cold.vkey"
-                                       , tkaaColdSKeyFile = nodePoolKeysDir </> "cold.skey"
-                                       , tkaaKesVKeyFile = nodePoolKeysDir </> "kes.vkey"
-                                       , tkaaOpcertCounterFile = nodePoolKeysDir </> "opcert.counter"
-                                       , tkaaOpcertFile = nodePoolKeysDir </> "opcert.cert"
-                                       }
-                case kesAgent of
-                  Left e -> do
-                    -- TODO: fail if could not start KES agent
-                    liftIOAnnotated . putStrLn $ "Could not start KES agent: " <> show e
-                    pure ["--shelley-kes-key", nodePoolKeysDir </> "kes.skey"]
-                  Right (TestnetKesAgent{kesAgentServiceSprocket}) ->
-                    pure ["--shelley-kes-agent-socket", sprocketSystemName kesAgentServiceSprocket]
-          let shelleyCliArgs = [ "--shelley-vrf-key", unFile $ signingKey poolNodeKeysVrf
-                               , "--shelley-operational-certificate", nodePoolKeysDir </> "opcert.cert"
-                               ]
-              byronCliArgs = [ "--byron-delegation-certificate", nodePoolKeysDir </> "byron-delegation.cert"
-                             , "--byron-signing-key", nodePoolKeysDir </> "byron-delegate.key"
-                             ]
-              keys@SpoNodeKeys{poolNodeKeysVrf} = mkTestnetNodeKeyPaths i
-          pure (Just keys, kesSourceCliArg <> shelleyCliArgs <> byronCliArgs)
+      -- depending on testnet configuration, either start a 'kes-agent' or use a key from disk
+      kesSourceCliArg <-
+        case cardanoKESSource of
+          UseKesKeyFile -> pure ["--shelley-kes-key", nodePoolKeysDir </> "kes.skey"]
+          UseKesSocket -> do
+            -- wait startTimeOffsetSeconds so that the startTime from shelly-genesis.json is not in the future,
+            -- as otherwise we will trigger an underflow in kes-agent with a negative time difference.
+            liftIOAnnotated $ threadDelay (startTimeOffsetSeconds * 1_000_000)
+            kesAgent <- runExceptT $
+              initAndStartKesAgent (TmpAbsolutePath tmpAbsPath) nodeName
+                TestnetKesAgentArgs{ tkaaShelleyGenesisFile = shelleyGenesisFile
+                                   , tkaaColdVKeyFile = nodePoolKeysDir </> "cold.vkey"
+                                   , tkaaColdSKeyFile = nodePoolKeysDir </> "cold.skey"
+                                   , tkaaKesVKeyFile = nodePoolKeysDir </> "kes.vkey"
+                                   , tkaaOpcertCounterFile = nodePoolKeysDir </> "opcert.counter"
+                                   , tkaaOpcertFile = nodePoolKeysDir </> "opcert.cert"
+                                   }
+            case kesAgent of
+              Left e -> do
+                -- TODO: fail if could not start KES agent
+                liftIOAnnotated . putStrLn $ "Could not start KES agent: " <> show e
+                pure ["--shelley-kes-key", nodePoolKeysDir </> "kes.skey"]
+              Right (TestnetKesAgent{kesAgentServiceSprocket}) ->
+                pure ["--shelley-kes-agent-socket", sprocketSystemName kesAgentServiceSprocket]
+      let shelleyCliArgs = [ "--shelley-vrf-key", unFile $ signingKey poolNodeKeysVrf
+                           , "--shelley-operational-certificate", nodePoolKeysDir </> "opcert.cert"
+                           ]
+          byronCliArgs = [ "--byron-delegation-certificate", nodePoolKeysDir </> "byron-delegation.cert"
+                         , "--byron-signing-key", nodePoolKeysDir </> "byron-delegate.key"
+                         ]
+          keys@SpoNodeKeys{poolNodeKeysVrf} = mkTestnetNodeKeyPaths i
+      pure (Just keys, kesSourceCliArg <> shelleyCliArgs <> byronCliArgs)
 
     eRuntime <- runExceptT . retryOnAddressInUseError $
-      startNode (TmpAbsolutePath tmpAbsPath) nodeName testnetDefaultIpv4Address port testnetMagic $
+      startNode (TmpAbsolutePath tmpAbsPath) nodeName testnetDefaultIpv4Address port testnetMagic (nodeBin nodeWithOptions) $
         [ "run"
         , "--config", nodeConfigFile
         , "--topology", nodeDataDir </> "topology.json"
         , "--database-path", nodeDataDir </> "db"
         ]
         <> spoNodeCliArgs
-        <> nodeExtraCliArgs nodeOptions
+        <> nodeExtraCliArgs nodeWithOptions
         <> ["--grpc-enable" | RpcEnabled <- [cardanoEnableRpc]]
     pure $ eRuntime <&> \rt -> rt{poolKeys=mKeys}
 
@@ -501,8 +514,8 @@ retryOnAddressInUseError act = withFrozenCallStack $ go maximumTimeout retryTime
 -- and checks @pools-keys/@ to classify each as SPO or relay.
 -- Validates that nodes are consecutively numbered starting from 1,
 -- and that all SPO nodes come before relay nodes.
-readNodeOptionsFromEnv :: HasCallStack => MonadIO m => FilePath -> m TestnetNodeOptions
-readNodeOptionsFromEnv envDir = do
+readNodesWithOptionsFromEnv :: HasCallStack => MonadIO m => FilePath -> m TestnetNodesWithOptions
+readNodesWithOptionsFromEnv envDir = do
   entries <- liftIO $ IO.listDirectory (envDir </> "node-data")
   let nodeNums = sort $ mapMaybe parseNodeNum entries
   when (null nodeNums) $
@@ -517,12 +530,50 @@ readNodeOptionsFromEnv envDir = do
   when (null spoFlags) $
     throwString "No SPO node directories found in environment"
   let nSpos = length spoFlags
-  let spoOpts = map (const (NodeOptions [])) [1 .. nSpos]
-      relayOpts = map (const (NodeOptions [])) [nSpos + 1 .. length nodeNums]
+  spoOpts <- mapM readNodeOpt [1 .. nSpos]
+  relayOpts <- mapM readNodeOpt [nSpos + 1 .. length nodeNums]
   case spoOpts of
-    (s:ss) -> pure $ TestnetNodeOptions { optSpoNodes = s :| ss, optRelayNodes = relayOpts }
+    (s:ss) -> pure $ TestnetNodesWithOptions { optSpoNodes = s :| ss, optRelayNodes = relayOpts }
     [] -> throwString "No SPO node directories found in environment"
   where
     parseNodeNum s = do
       rest <- stripPrefix "node" s
       readMaybe rest :: Maybe Int
+    readNodeOpt i = do
+      bin <- readNodeBinFromEnvFile (envDir </> defaultNodeEnvFile i)
+      pure $ NodeWithOptions bin []
+
+-- | Environment file contents for a node, serialized as YAML.
+-- Written during testnet creation and read back when starting from an existing environment.
+data NodeEnv = NodeEnv
+  { nodeBinary :: FilePath -- ^ Absolute path to the @cardano-node@ binary
+  , nodeVersion :: String -- ^ Version string (e.g. @"10.4.1"@), extracted from @cardano-node --version@ output
+  } deriving (Eq, Show)
+
+instance FromJSON NodeEnv where
+  parseJSON = withObject "NodeEnv" $ \o ->
+    NodeEnv <$> o .: "node_binary"
+            <*> o .: "node_version"
+
+instance ToJSON NodeEnv where
+  toJSON NodeEnv{nodeBinary, nodeVersion} =
+    object [ "node_binary" .= nodeBinary
+           , "node_version" .= nodeVersion
+           ]
+
+readNodeBinFromEnvFile :: (HasCallStack, MonadIO m) => FilePath -> m (Maybe FilePath)
+readNodeBinFromEnvFile envFile = runMaybeT $ do
+  guard =<< liftIOAnnotated (IO.doesFileExist envFile)
+  NodeEnv{nodeBinary} <- either failParse pure =<< liftIOAnnotated (Yaml.decodeFileEither envFile)
+  pure nodeBinary
+  where
+    failParse err = throwString $ "Failed to parse node env file " <> envFile <> ": " <> show err
+
+getNodeVersion :: HasCallStack => MonadIO m => FilePath -> m String
+getNodeVersion bin = liftIOAnnotated $ do
+  output <- Process.readProcess bin ["--version"] ""
+    `catch` \(e :: IOException) ->
+      throwString $ "Failed to run " <> bin <> " --version: " <> displayException e
+  case words output of
+    ("cardano-node":version:_) -> pure version
+    _ -> throwString $ "Unexpected output from " <> bin <> " --version (expected 'cardano-node <version> ...'): " <> output
