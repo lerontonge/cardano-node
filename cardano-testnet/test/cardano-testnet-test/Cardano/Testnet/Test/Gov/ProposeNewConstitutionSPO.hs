@@ -59,10 +59,13 @@ hprop_ledger_events_propose_new_constitution_spo = integrationRetryWorkspace 2 "
       creationOptions = def
         { creationEra = AnyShelleyBasedEra sbe
         , creationNodes =
-            SpoNodeOptions [] :|
-          [ SpoNodeOptions []
-          , SpoNodeOptions []
-          ]
+            TestnetNodeOptions
+              { optSpoNodes = NodeOption [] :|
+                [ NodeOption []
+                , NodeOption []
+                ]
+              , optRelayNodes = []
+              }
         , creationGenesisOptions = def { genesisEpochLength = 100 }
         }
 

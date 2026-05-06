@@ -71,10 +71,13 @@ hprop_leadershipSchedule = integrationRetryWorkspace 2 "leadership-schedule" $ \
       cTestnetOptions = def
         { creationEra = asbe
         , creationNodes =
-            SpoNodeOptions [] :|
-          [ SpoNodeOptions []
-          , SpoNodeOptions []
-          ]
+            TestnetNodeOptions
+              { optSpoNodes = NodeOption [] :|
+                [ NodeOption []
+                , NodeOption []
+                ]
+              , optRelayNodes = []
+              }
         }
       eraString = eraToString sbe
 

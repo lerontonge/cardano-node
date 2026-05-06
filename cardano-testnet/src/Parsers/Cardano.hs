@@ -105,18 +105,21 @@ pKesSource = OA.flag UseKesKeyFile UseKesSocket
   <>  OA.showDefault
   )
 
-pTestnetNodeOptions :: Parser (NonEmpty NodeOption)
+pTestnetNodeOptions :: Parser TestnetNodeOptions
 pTestnetNodeOptions =
-  -- If `--num-pool-nodes N` is present, return N nodes with option `SpoNodeOptions []`.
-  -- Otherwise, return `cardanoDefaultTestnetNodeOptions`
-  fmap (maybe cardanoDefaultTestnetNodeOptions (\num -> defaultSpoOptions :| L.replicate (num - 1) defaultSpoOptions)) <$>
+  fmap (maybe cardanoDefaultTestnetNodeOptions mkPoolNodes) <$>
     optional $ OA.option ensureAtLeastOne
       (   OA.long "num-pool-nodes"
       <>  OA.help "Number of pool nodes. Note this uses a default node configuration for all nodes."
       <>  OA.metavar "COUNT"
       )
   where
-    defaultSpoOptions = SpoNodeOptions []
+    defaultSpoOption = NodeOption []
+
+    mkPoolNodes num = TestnetNodeOptions
+      { optSpoNodes = defaultSpoOption :| L.replicate (num - 1) defaultSpoOption
+      , optRelayNodes = []
+      }
 
     ensureAtLeastOne :: OA.ReadM Int
     ensureAtLeastOne = readerAsk >>= \arg ->

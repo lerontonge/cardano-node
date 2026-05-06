@@ -17,6 +17,7 @@ module Testnet.Start.Cardano
   , TestnetCreationOptions(..)
   , TestnetRuntimeOptions(..)
   , TestnetEnvOptions(..)
+  , TestnetNodeOptions(..)
   , NodeOption(..)
   , cardanoDefaultTestnetNodeOptions
 
@@ -92,16 +93,6 @@ import           RIO.State (put)
 import           UnliftIO.Async
 import           UnliftIO.Exception (stringException)
 
--- | There are certain conditions that need to be met in order to run
--- a valid node cluster.
-testMinimumConfigurationRequirements :: ()
-  => HasCallStack
-  => MonadIO m
-  => NonEmpty NodeOption -> m ()
-testMinimumConfigurationRequirements nodes = withFrozenCallStack $ do
-  unless (any isSpoNodeOptions nodes) $ do
-    throwString "Need at least one SPO node to produce blocks, but got none."
-
 liftToIntegration :: HasCallStack => RIO ResourceMap a -> H.Integration a
 liftToIntegration r =  do
    rMap <- lift $ lift getInternalState
@@ -118,14 +109,12 @@ createTestnetEnv :: ()
 createTestnetEnv
   creationOptions@TestnetCreationOptions
     { creationEra=asbe
-    , creationNodes
+    , creationNodes=TestnetNodeOptions{optSpoNodes, optRelayNodes}
     }
   Conf
     { genesisHashesPolicy
     , tempAbsPath=TmpAbsolutePath tmpAbsPath
     } = do
-
-  testMinimumConfigurationRequirements creationNodes
 
   AnyShelleyBasedEra sbe <- pure asbe
 
@@ -141,13 +130,16 @@ createTestnetEnv
 
   liftIOAnnotated . LBS.writeFile configurationFile $ A.encodePretty $ Object config
 
-  portNumbers <- forM (NEL.zip (1 :| [2..]) creationNodes)
+  let allNodes = NEL.toList optSpoNodes ++ optRelayNodes
+      numberedNodes = zip [1..] allNodes
+      nodeIds = map fst numberedNodes
+
+  portNumbers <- forM numberedNodes
     (\(i, _nodeOption) -> (i,) <$> H.randomPort testnetDefaultIpv4Address)
 
-  let portNumbersMap = Map.fromList (NEL.toList portNumbers)
+  let portNumbersMap = Map.fromList portNumbers
 
   -- Create network topology and write port files
-  let nodeIds = fst <$> NEL.zip (1 :| [2..]) creationNodes
   forM_ nodeIds $ \i -> do
     let nodeDataDir = tmpAbsPath </> Defaults.defaultNodeDataDir i
     liftIOAnnotated $ IO.createDirectoryIfMissing True nodeDataDir
@@ -157,7 +149,7 @@ createTestnetEnv
       Just port -> liftIOAnnotated $ writeFile (tmpAbsPath </> defaultPortFile i) (show port)
       Nothing -> throwString $ "Port not found for node " <> show i
 
-    producers <- mapM (idToRemoteAddressP2P portNumbersMap) $ NodeId <$> NEL.filter (/= i) nodeIds
+    producers <- mapM (idToRemoteAddressP2P portNumbersMap) $ NodeId <$> filter (/= i) nodeIds
     let topology = Defaults.defaultP2PTopology producers
     liftIOAnnotated . LBS.writeFile (nodeDataDir </> "topology.json") $ A.encodePretty topology
 
@@ -232,12 +224,12 @@ cardanoTestnet
   => MonadResource m
   => MonadCatch m
   => MonadFail m
-  => NonEmpty NodeOption -- ^ The nodes to start
+  => TestnetNodeOptions -- ^ The nodes to start
   -> TestnetRuntimeOptions -- ^ Runtime options
   -> Conf -- ^ Path to the test sandbox
   -> m TestnetRuntime
 cardanoTestnet
-  cardanoNodes
+  TestnetNodeOptions{optSpoNodes=cardanoSpoNodes, optRelayNodes=cardanoRelayNodes}
   TestnetRuntimeOptions
     { runtimeEnableNewEpochStateLogging=enableNewEpochStateLogging
     , runtimeEnableRpc=cardanoEnableRpc
@@ -247,8 +239,8 @@ cardanoTestnet
     { tempAbsPath=TmpAbsolutePath tmpAbsPath
     , updateTimestamps
     } = do
-  testMinimumConfigurationRequirements cardanoNodes
-  let nPools = NumPools $ length $ NEL.filter isSpoNodeOptions cardanoNodes
+  let nPools = NumPools $ NEL.length cardanoSpoNodes
+      allNodes = map (True,) (NEL.toList cardanoSpoNodes) ++ map (False,) cardanoRelayNodes
       nodeConfigFile = tmpAbsPath </> defaultConfigFile
       byronGenesisFile = tmpAbsPath </> "byron-genesis.json"
       shelleyGenesisFile = tmpAbsPath </> "shelley-genesis.json"
@@ -279,7 +271,7 @@ cardanoTestnet
       }
 
   -- Read port numbers from disk (written by createTestnetEnv)
-  portNumbers <- forM (NEL.zip (1 :| [2..]) cardanoNodes) $ \(i, _nodeOption) -> do
+  portNumbers <- forM (zip [1..] allNodes) $ \(i, _) -> do
     let nodeDataDir = tmpAbsPath </> Defaults.defaultNodeDataDir i
         portPath = tmpAbsPath </> defaultPortFile i
     portStr <- liftIOAnnotated $ readFile portPath
@@ -316,19 +308,16 @@ cardanoTestnet
     let shelleyGenesis' = shelleyGenesis{sgSystemStart = startTime}
     liftIOAnnotated . LBS.writeFile shelleyGenesisFile $ A.encodePretty shelleyGenesis'
 
-  let portNumbersMap = Map.fromList (NEL.toList portNumbers)
+  let portNumbersMap = Map.fromList portNumbers
 
-  eTestnetNodes <- forConcurrently (NEL.zip (1 :| [2..]) cardanoNodes) $ \(i, nodeOptions) -> do
+  eTestnetNodes <- forConcurrently (zip [1..] allNodes) $ \(i, (isSpo, nodeOptions)) -> do
     port <- case Map.lookup i portNumbersMap of
       Just p -> pure p
       Nothing -> throwString $ "Port not found for node " <> show i
     let nodeName = Defaults.defaultNodeName i
         nodeDataDir = tmpAbsPath </> Defaults.defaultNodeDataDir i
         nodePoolKeysDir = tmpAbsPath </> Defaults.defaultSpoKeysDir i
-    (mKeys, spoNodeCliArgs) <-
-      case nodeOptions of
-        RelayNodeOptions{} -> pure (Nothing, [])
-        SpoNodeOptions{} -> do
+    (mKeys, spoNodeCliArgs) <- if not isSpo then pure (Nothing, []) else do
           -- depending on testnet configuration, either start a 'kes-agent' or use a key from disk
           kesSourceCliArg <-
             case cardanoKESSource of
@@ -370,11 +359,11 @@ cardanoTestnet
         , "--database-path", nodeDataDir </> "db"
         ]
         <> spoNodeCliArgs
-        <> extraCliArgs nodeOptions
+        <> nodeExtraCliArgs nodeOptions
         <> ["--grpc-enable" | RpcEnabled <- [cardanoEnableRpc]]
     pure $ eRuntime <&> \rt -> rt{poolKeys=mKeys}
 
-  let (failedNodes, testnetNodes') = partitionEithers (NEL.toList eTestnetNodes)
+  let (failedNodes, testnetNodes') = partitionEithers eTestnetNodes
   unless (null failedNodes) $ do
     throwString $ "Some nodes failed to start:\n" ++ show (vsep $ prettyError <$> failedNodes)
 
@@ -417,9 +406,6 @@ cardanoTestnet
 
   pure runtime
   where
-    extraCliArgs = \case
-      SpoNodeOptions args -> args
-      RelayNodeOptions args -> args
     -- TODO: This should come from the configuration!
     makePathsAbsolute :: (Element a ~ FilePath, MonoFunctor a) => a -> a
     makePathsAbsolute = omap (tmpAbsPath </>)
@@ -511,19 +497,32 @@ retryOnAddressInUseError act = withFrozenCallStack $ go maximumTimeout retryTime
     retryTimeout = 5
 
 -- | Read node options from an existing testnet environment directory.
--- Scans @node-data/@ for node directories and checks @pools-keys/@ to
--- classify each node as SPO or relay.
-readNodeOptionsFromEnv :: MonadIO m => FilePath -> m (NonEmpty NodeOption)
+-- Scans @node-data/@ for node directories numbered @node1, node2, ...@
+-- and checks @pools-keys/@ to classify each as SPO or relay.
+-- Validates that nodes are consecutively numbered starting from 1,
+-- and that all SPO nodes come before relay nodes.
+readNodeOptionsFromEnv :: MonadIO m => FilePath -> m TestnetNodeOptions
 readNodeOptionsFromEnv envDir = do
   entries <- liftIO $ IO.listDirectory (envDir </> "node-data")
   let nodeNums = sort $ mapMaybe parseNodeNum entries
-  case nodeNums of
-    [] -> throwString "No node directories found in environment"
-    (n:ns) -> mapM classifyNode (n :| ns)
+  when (null nodeNums) $
+    throwString "No node directories found in environment"
+  when (nodeNums /= [1 .. length nodeNums]) $
+    throwString $ "Node directories are not consecutively numbered from 1: " <> show nodeNums
+  isSpoFlags <- forM nodeNums $ \i ->
+    liftIO $ IO.doesDirectoryExist (envDir </> Defaults.defaultSpoKeysDir i)
+  let (spoFlags, relayFlags) = span id isSpoFlags
+  unless (all not relayFlags) $
+    throwString "SPO nodes must come before relay nodes in the environment"
+  when (null spoFlags) $
+    throwString "No SPO node directories found in environment"
+  let nSpos = length spoFlags
+  let spoOpts = map (const (NodeOption [])) [1 .. nSpos]
+      relayOpts = map (const (NodeOption [])) [nSpos + 1 .. length nodeNums]
+  case spoOpts of
+    (s:ss) -> pure $ TestnetNodeOptions { optSpoNodes = s :| ss, optRelayNodes = relayOpts }
+    [] -> throwString "No SPO node directories found in environment"
   where
     parseNodeNum s = do
       rest <- stripPrefix "node" s
       readMaybe rest :: Maybe Int
-    classifyNode i = do
-      hasPools <- liftIO $ IO.doesDirectoryExist (envDir </> Defaults.defaultSpoKeysDir i)
-      pure $ if hasPools then SpoNodeOptions [] else RelayNodeOptions []
