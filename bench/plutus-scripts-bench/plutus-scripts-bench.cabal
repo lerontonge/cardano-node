@@ -53,7 +53,7 @@ common common-definitions
     -fobject-code -fno-full-laziness
 
   if flag(defer-plugin-errors)
-    ghc-options: -fplugin-opt PlutusTx.Plugin:defer-errors
+    ghc-options: -fplugin-opt=PlutusTx.Plugin:defer-errors
 
 library
   import:          common-definitions
