@@ -34,6 +34,7 @@ import qualified Data.Map as Map
 import           Data.Maybe (fromMaybe, listToMaybe)
 import           Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as TIO
 import           Data.Traversable (for)
 import           GHC.IO.Encoding (setLocaleEncoding, utf8)
 import           Network.HostName (HostName)
@@ -48,7 +49,11 @@ import           Streaming
 check :: OnMissingKey -> Bool -> Word -> Trace IO App.TraceMessage -> Formula TemporalEvent Text -> [TemporalEvent] -> IO ()
 check omk greppable idx {- Formula index -} tr phi events =
   let result = satisfies omk phi events in
-  traceWith tr $ formulaOutcome greppable phi result idx
+  if greppable
+    then case result of
+      Satisfied       -> pure ()
+      Unsatisfied rel -> TIO.putStrLn (App.prettyRelevanceArray rel)
+    else traceWith tr $ formulaOutcome phi result idx
 
 checkS' :: OnMissingKey -> Bool -> Bool -> Word -> Trace IO App.TraceMessage -> Formula TemporalEvent Text -> Stream (Of TemporalEvent) IO () -> IO ()
 checkS' omk greppable enableProgressDumps idx {- Formula index -} tr phi events = do
@@ -56,7 +61,11 @@ checkS' omk greppable enableProgressDumps idx {- Formula index -} tr phi events 
   metrics <- newIORef initial
   withAsync (when enableProgressDumps $ runDisplayProgressDump initial metrics) $ \counterDisplayThread -> do
     r <- satisfiesS omk phi events metrics
-    traceWith tr $ formulaOutcome greppable phi r idx
+    if greppable
+      then case r of
+        Satisfied       -> pure ()
+        Unsatisfied rel -> TIO.putStrLn (App.prettyRelevanceArray rel)
+      else traceWith tr $ formulaOutcome phi r idx
     cancel counterDisplayThread
   where
     runDisplayProgressDump :: SatisfyMetrics TemporalEvent Text -> IORef (SatisfyMetrics TemporalEvent Text) -> IO ()
@@ -141,8 +150,6 @@ main = do
   setLocaleEncoding utf8
   options <- execParser opts
   ctx <- Map.toList . fromMaybe Map.empty <$> for options.context (readPropValues >=> dieOnYamlException)
-  putStrLn "Context:"
-  print ctx
   formulas <- readFormulas options.formulas (Context { interpDomain = ctx, varKinds = Map.empty }) Parser.name >>= dieOnYamlException
   for_ (fmap (\phi -> (phi, checkFormula mempty phi)) formulas) $ \case
     (phi, e : es) -> die $
@@ -154,6 +161,7 @@ main = do
     (_, []) -> pure ()
   let formulas' = fmap (interpTimeunit (\u -> timeunitToMicrosecond options.timeunit u `div` fromIntegral options.duration)) formulas
   tr <- setupTraceDispatcher options.traceDispatcherCfg
+  traceWith tr $ ContextDump (map (second showT) ctx)
   case options.mode of
     Offline -> do
       file <- case options.traces of

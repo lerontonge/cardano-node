@@ -38,18 +38,18 @@ data TraceMessage = FormulaStartCheck {
                   -- | Formula outcomes are split into (+) and (-) as we'd like to print them at distinct severity levels,
                   --   but severity level is indexed by namespace (= constructor name), hence
                   --   we can't store both outcomes in one constructor.
-                  | FormulaPositiveOutcome { formula :: Formula TemporalEvent Text, index :: Word, greppable :: Bool }
+                  | FormulaPositiveOutcome { formula :: Formula TemporalEvent Text, index :: Word }
                   | FormulaNegativeOutcome {
                       formula   :: Formula TemporalEvent Text,
                       relevance :: Relevance TemporalEvent Text,
-                      index     :: Word,
-                      greppable :: Bool
+                      index     :: Word
                   }
+                  | ContextDump { context :: [(Text, Text)] }
 
 -- | Smart constructor.
-formulaOutcome :: Bool -> Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Word -> TraceMessage
-formulaOutcome greppable formula Satisfied         idx = FormulaPositiveOutcome { formula, index = idx, greppable }
-formulaOutcome greppable formula (Unsatisfied rel) idx = FormulaNegativeOutcome { formula, relevance = rel, index = idx, greppable }
+formulaOutcome :: Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Word -> TraceMessage
+formulaOutcome formula Satisfied         idx = FormulaPositiveOutcome { formula, index = idx }
+formulaOutcome formula (Unsatisfied rel) idx = FormulaNegativeOutcome { formula, relevance = rel, index = idx }
 
 green :: Text -> Text
 green text = "\x001b[32m" <> text <> "\x001b[0m"
@@ -101,6 +101,8 @@ instance LogFormatting TraceMessage where
     ,
       "index" .= index
     ]
+  forMachine _ ContextDump{..} = mconcat
+    [ "context" .= context ]
 
   forHuman FormulaStartCheck{..} =
     "Starting satisfiability check on formula #" <> showT index <> ": " <> prettyFormula formula Prec.Universe
@@ -113,19 +115,24 @@ instance LogFormatting TraceMessage where
       <> "formula: " <> prettyFormula formula Prec.Universe <> "\n"
       <> "index: " <> showT index
   forHuman FormulaPositiveOutcome{..} =
-    if greppable then "" else prettySatisfactionResult formula Satisfied
+    prettySatisfactionResult formula Satisfied
   forHuman FormulaNegativeOutcome{..} =
-    if greppable then prettyRelevanceArray relevance else prettySatisfactionResult formula (Unsatisfied relevance)
+    prettySatisfactionResult formula (Unsatisfied relevance)
+  forHuman ContextDump{..} =
+    "Context:\n" <> Text.unlines (fmap (\(k, v) -> "  " <> k <> " = " <> v) context)
 
   asMetrics FormulaStartCheck{} = []
   asMetrics (FormulaProgressDump {catchupRatio, index}) = [DoubleM ("catchup_ratio_" <> showT index) catchupRatio]
   asMetrics FormulaPositiveOutcome{} = []
   asMetrics FormulaNegativeOutcome{} = []
+  asMetrics ContextDump{} = []
 
 
 instance MetaTrace TraceMessage where
   allNamespaces =
     [
+      Namespace [] ["ContextDump"]
+    ,
       Namespace [] ["FormulaStartCheck"]
     ,
       Namespace [] ["FormulaProgressDump"]
@@ -133,11 +140,13 @@ instance MetaTrace TraceMessage where
       Namespace [] ["FormulaOutcome"]
     ]
 
+  namespaceFor ContextDump{}            = Namespace [] ["ContextDump"]
   namespaceFor FormulaStartCheck{}      = Namespace [] ["FormulaStartCheck"]
   namespaceFor FormulaProgressDump{}    = Namespace [] ["FormulaProgressDump"]
   namespaceFor FormulaPositiveOutcome{} = Namespace [] ["FormulaPositiveOutcome"]
   namespaceFor FormulaNegativeOutcome{} = Namespace [] ["FormulaNegativeOutcome"]
 
+  severityFor (Namespace [] ["ContextDump"])            _ = Just Debug
   severityFor (Namespace [] ["FormulaStartCheck"])       _ = Just Info
   severityFor (Namespace [] ["FormulaProgressDump"])     _ = Just Debug
   severityFor (Namespace [] ["FormulaPositiveOutcome"])  _ = Just Info
@@ -146,6 +155,8 @@ instance MetaTrace TraceMessage where
 
   detailsFor _ _ =  Just DNormal
 
+  documentFor (Namespace [] ["ContextDump"]) =
+    Just "Dump of the context variables supplied to the formula parser."
   documentFor (Namespace [] ["FormulaStartCheck"]) =
     Just "Formula satisfiability check has started."
   documentFor (Namespace [] ["FormulaProgressDump"]) =
