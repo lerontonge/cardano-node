@@ -16,6 +16,10 @@ The application CLI takes as input:
 The application traverses the events from the given log files and checks if each given formula is satisfied by them.
 If negative, reports as such and lists the events that have been relevant to the formula.
 
+Pass `--grep` for machine-readable output: on a negative outcome only the JSON array of relevant events is written
+to stdout (bypassing trace-dispatcher), and nothing is printed on a positive outcome. This makes it straightforward
+to pipe results directly into `cardano-recon-grep`.
+
 #### CLI Syntax
 
 ```
@@ -23,7 +27,7 @@ Usage: cardano-recon FILE --mode <offline|online> --duration INT FILES
                      [--retention INT] [--trace-dispatcher-cfg FILE]
                      [--context FILE] [--dump-metrics BOOL] [--seek-to-end BOOL]
                      [--timeunit <hour|minute|second|millisecond|microsecond>]
-                     [--on-missing-key <crash|bottom>]
+                     [--on-missing-key <crash|bottom>] [--grep]
 
   Check formula satisfiability against a log of trace messages
 
@@ -43,6 +47,8 @@ Available options:
   --on-missing-key <crash|bottom>
                            behaviour when a formula atom references a missing
                            event property key (default: bottom)
+  --grep                   on formula violation print only the JSON array of
+                           relevant events; print nothing on satisfaction
   -h,--help                Show this help text
 ```
 

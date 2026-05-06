@@ -6,6 +6,9 @@
   converting a `Formula` and `eval` for deciding it against a single event.
 * Add `cardano-recon-grep` executable — filters a JSON array of `TraceMessage`s by a list of
   continuous formulas, emitting only the messages that satisfy all of them.
+* Add `--grep` flag to `cardano-recon` — on a negative formula outcome prints only the JSON array
+  of relevant events to stdout (bypassing trace-dispatcher); prints nothing on a positive outcome.
+* Replace the raw context printout with a `ContextDump` trace message at `Debug` severity.
 
 ## 1.1.1 -- April 2026
 * Support atoms that refer to property keys at arbitrary depth
