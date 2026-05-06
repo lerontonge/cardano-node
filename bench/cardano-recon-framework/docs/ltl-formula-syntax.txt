@@ -37,6 +37,9 @@ c ::= name = t                // property constraint, examples:
                               //   — slot = 1
                               //   — "host" = "macbook-pro"
                               //   — slot = x
+                              // Note: TraceMessage properties live inside the "data" JSON
+                              // object. The "data" prefix is omitted when writing names;
+                              // write `slot = 42`, not `data.slot = 42`.
 c̄ ::= {c, ..., c}             // set of property constraints, examples:
                               //   — {slot = x}
                               //   — {slot = 42, blockHash = "xyz"}

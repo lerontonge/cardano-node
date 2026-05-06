@@ -1,12 +1,14 @@
 module Cardano.ReCon.LTL.ContinuousFormula (
     ContinuousFormula(..)
+  , retract
   , interp
   , eval) where
 
 import           Cardano.ReCon.Common.Types (BinRel (..), IntValue, VariableIdentifier)
 import           Cardano.ReCon.Integer.Polynomial.Term (IntTerm (..))
-import           Cardano.ReCon.LTL.Formula (Event (..), OnMissingKey (..), PropConstraint (..),
+import           Cardano.ReCon.LTL.Formula (Event (..), Formula, OnMissingKey (..), PropConstraint (..),
                    TextTerm, TextValue)
+import qualified Cardano.ReCon.LTL.Formula as F
 import           Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula (HomogeneousFormula)
 import qualified Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula as H
 
@@ -68,6 +70,33 @@ data ContinuousFormula ty =
    | PropTextEq TextTerm TextValue
    -------------------------------------
    deriving (Show, Eq, Ord)
+
+-- | Retract a 'Formula' into a 'ContinuousFormula', returning 'Nothing' if
+--   the formula contains any temporal connective.
+retract :: Formula event ty -> Maybe (ContinuousFormula ty)
+retract (F.Forall {})            = Nothing
+retract (F.ForallN {})           = Nothing
+retract (F.ExistsN {})           = Nothing
+retract (F.Next {})              = Nothing
+retract (F.NextN {})             = Nothing
+retract (F.UntilN {})            = Nothing
+retract (F.Atom ty cs)           = Just (Atom ty cs)
+retract (F.Or phi psi)           = Or      <$> retract phi <*> retract psi
+retract (F.And phi psi)          = And     <$> retract phi <*> retract psi
+retract (F.Not phi)              = Not     <$> retract phi
+retract (F.Implies phi psi)      = Implies <$> retract phi <*> retract psi
+retract F.Top                    = Just Top
+retract F.Bottom                 = Just Bottom
+retract (F.PropIntForall  x phi)        = PropIntForall  x     <$> retract phi
+retract (F.PropTextForall x phi)        = PropTextForall x     <$> retract phi
+retract (F.PropIntForallN  x dom phi)   = PropIntForallN  x dom <$> retract phi
+retract (F.PropTextForallN x dom phi)   = PropTextForallN x dom <$> retract phi
+retract (F.PropIntExists  x phi)        = PropIntExists  x     <$> retract phi
+retract (F.PropTextExists x phi)        = PropTextExists x     <$> retract phi
+retract (F.PropIntExistsN  x dom phi)   = PropIntExistsN  x dom <$> retract phi
+retract (F.PropTextExistsN x dom phi)   = PropTextExistsN x dom <$> retract phi
+retract (F.PropIntBinRel rel _ t1 t2)   = Just (PropIntBinRel rel t1 t2)
+retract (F.PropTextEq _ t v)            = Just (PropTextEq t v)
 
 -- | Decide (e ⊧ φ).
 eval :: (Event event ty, Eq ty) => ContinuousFormula ty -> event -> Reader OnMissingKey Bool

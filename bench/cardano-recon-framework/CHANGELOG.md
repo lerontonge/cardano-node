@@ -1,5 +1,12 @@
 # Revision history for cardano-trace-ltl
 
+## 1.2.0 -- May 2026
+
+* Add `ContinuousFormula` — the temporal-operator-free fragment of `Formula`, with `retract` for
+  converting a `Formula` and `eval` for deciding it against a single event.
+* Add `cardano-recon-grep` executable — filters a JSON array of `TraceMessage`s by a list of
+  continuous formulas, emitting only the messages that satisfy all of them.
+
 ## 1.1.1 -- April 2026
 * Support atoms that refer to property keys at arbitrary depth
 * Replace the `crash-on-missing-key` build flag with a runtime CLI option `--on-missing-key <crash|bottom>` (default: `bottom`)

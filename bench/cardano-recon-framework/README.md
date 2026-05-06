@@ -1,6 +1,8 @@
 # Cardano Re(altime) Con(formance) Framework
 
-## What it does
+## Applications
+
+### `cardano-recon` — LTL conformance checker
 
 The application CLI takes as input:
   - A yaml list of strings, where each string is a parseable Linear Temporal Logic formula.
@@ -14,7 +16,7 @@ The application CLI takes as input:
 The application traverses the events from the given log files and checks if each given formula is satisfied by them.
 If negative, reports as such and lists the events that have been relevant to the formula.
 
-## CLI Syntax
+#### CLI Syntax
 
 ```
 Usage: cardano-recon FILE --mode <offline|online> --duration INT FILES
@@ -38,6 +40,42 @@ Available options:
                            (default: True)
   --timeunit <hour|minute|second|millisecond|microsecond>
                            timeunit (default: second)
+  --on-missing-key <crash|bottom>
+                           behaviour when a formula atom references a missing
+                           event property key (default: bottom)
+  -h,--help                Show this help text
+```
+
+### `cardano-recon-grep` — Global Realisation Print
+
+A stateless utility that filters a JSON array of trace messages by interpreting a list of
+_continuous_ (temporal-operator-free) formulas against each message individually.
+Only messages that satisfy **all** given formulas are written to stdout as a pretty-printed
+JSON array.
+
+Inputs:
+  - A YAML list of continuous formula strings (same syntax as `cardano-recon`, but temporal
+    operators such as `□`, `◇`, `○`, and `|` are not permitted).
+    For further details about the formula language, consult the [language overview](docs/formula-languages.txt).
+  - A JSON file containing an array of `TraceMessage` objects (e.g. the relevant-events output
+    produced by `cardano-recon` on a negative formula outcome).
+  - An optional context variables YAML file for variable substitution in formulas.
+  - An `--on-missing-key` policy (default: `bottom`) controlling behaviour when a formula
+    references a property absent from a message.
+
+#### CLI Syntax
+
+```
+Usage: cardano-recon-grep --formulas FILE --traces FILE
+                            [--context FILE]
+                            [--on-missing-key <crash|bottom>]
+
+  Filter log events that satisfy all given continuous formulas
+
+Available options:
+  --formulas FILE          YAML file with a list of ContinuousFormulas
+  --traces FILE            JSON array of TraceMessages to filter
+  --context FILE           context variables YAML file
   --on-missing-key <crash|bottom>
                            behaviour when a formula atom references a missing
                            event property key (default: bottom)

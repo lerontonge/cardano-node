@@ -5,17 +5,15 @@ module Cardano.ReCon.TraceMessage where
 import           Cardano.Logging
 import           Cardano.Logging.Prometheus.TCPServer (TracePrometheusSimple (..))
 import qualified Cardano.Logging.Types.TraceMessage as Envelop
-import           Cardano.ReCon.Common (extractJsonProps)
 import           Cardano.ReCon.LTL.Formula (Formula, Relevance)
 import qualified Cardano.ReCon.LTL.Formula.Prec as Prec
 import           Cardano.ReCon.LTL.Formula.Pretty (prettyFormula)
 import           Cardano.ReCon.LTL.Satisfy (SatisfactionResult (..))
 import           Cardano.ReCon.Trace.Feed (TemporalEvent (..))
 
-import           Data.Aeson (Value (..), (.=))
+import           Data.Aeson ((.=))
 import           Data.Aeson.Encode.Pretty
 import           Data.List (find)
-import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -59,13 +57,7 @@ red :: Text -> Text
 red text = "\x001b[31m" <> text <> "\x001b[0m"
 
 prettyTraceMessage :: Envelop.TraceMessage -> Text
-prettyTraceMessage Envelop.TraceMessage{..} =
-  toStrict $ toLazyText $ encodePrettyToTextBuilder  $
-    Map.insert "at" (String (showT tmsgAt))        $
-      Map.insert "namespace" (String tmsgNS)       $
-        Map.insert "host" (String tmsgHost)        $
-          Map.insert "thread" (String tmsgThread)  $
-            extractJsonProps tmsgData
+prettyTraceMessage = toStrict . toLazyText . encodePrettyToTextBuilder
 
 prettyTemporalEvent :: TemporalEvent -> Text -> Text
 prettyTemporalEvent (TemporalEvent _ msgs) ns =
@@ -75,32 +67,32 @@ prettySatisfactionResult :: Formula TemporalEvent Text -> SatisfactionResult Tem
 prettySatisfactionResult initial Satisfied = prettyFormula initial Prec.Universe <> " " <> green "(✔)"
 prettySatisfactionResult initial (Unsatisfied rel) =
   prettyFormula initial Prec.Universe <> red " (✗)" <> "\n"
-    <> Text.intercalate
-         "\n----------------------------------------------\n"
-         (fmap (uncurry prettyTemporalEvent) (Set.toList rel))
+    <> "[\n"
+    <> Text.intercalate "\n,\n" (fmap (uncurry prettyTemporalEvent) (Set.toList rel))
+    <> "\n]"
 
 instance LogFormatting TraceMessage where
   forMachine _ FormulaStartCheck{..} = mconcat
     [
-      "formula" .= String (prettyFormula formula Prec.Universe),
+      "formula" .= prettyFormula formula Prec.Universe,
       "index" .= index
     ]
   forMachine _ FormulaProgressDump{..} = mconcat
     [
-      "events_per_second" .= Number (fromIntegral eventsPerSecond),
-      "catch_up_ratio" .= Number (realToFrac catchupRatio),
+      "events_per_second" .= (fromIntegral eventsPerSecond :: Int),
+      "catch_up_ratio" .= (realToFrac catchupRatio :: Double),
       "index" .= index
     ]
   forMachine _ FormulaPositiveOutcome{..} = mconcat
     [
-      "formula" .= String (prettyFormula formula Prec.Universe),
+      "formula" .= prettyFormula formula Prec.Universe,
       "index" .= index
     ]
   forMachine _ FormulaNegativeOutcome{..} = mconcat
     [
-      "formula" .= String (prettyFormula formula Prec.Universe)
+      "formula" .= prettyFormula formula Prec.Universe
     ,
-      "relevance" .= String (showT relevance)
+      "relevance" .= showT relevance
     ,
       "index" .= index
     ]
