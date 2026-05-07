@@ -32,7 +32,7 @@ module Testnet.Start.Types
   , TestnetOnChainParams(..)
   , mainnetParamsRequest
   , TestnetNodeOptions(..)
-  , NodeOption(..)
+  , NodeOptions(..)
   , cardanoDefaultTestnetNodeOptions
   , GenesisOptions(..)
   , UserProvidedData(..)
@@ -258,13 +258,16 @@ instance Default GenesisOptions where
     , genesisActiveSlotsCoeff = 0.05
     }
 
-newtype NodeOption = NodeOption
-  { nodeExtraCliArgs :: [String]
+-- | Configuration specific to each node
+newtype NodeOptions = NodeOptions
+  { nodeExtraCliArgs :: [String] -- ^ Extra CLI arguments passed to @cardano-node run@
   } deriving (Eq, Show)
 
+-- | Specifies the nodes to create for the testnet, split by role (SPO and relay).
+-- SPO nodes participate in block production. Relay nodes only forward blocks.
 data TestnetNodeOptions = TestnetNodeOptions
-  { optSpoNodes :: NonEmpty NodeOption
-  , optRelayNodes :: [NodeOption]
+  { optSpoNodes :: NonEmpty NodeOptions -- ^ SPO (stake pool operator) nodes. Must have at least one.
+  , optRelayNodes :: [NodeOptions] -- ^ Relay (non-producing) nodes
   } deriving (Eq, Show)
 
 -- | Type used to track whether the user is providing its data (node configuration file path, genesis file, etc.)
@@ -279,9 +282,9 @@ instance Default (UserProvidedData a) where
 
 cardanoDefaultTestnetNodeOptions :: TestnetNodeOptions
 cardanoDefaultTestnetNodeOptions = TestnetNodeOptions
-  { optSpoNodes = NodeOption [] :| []
-  , optRelayNodes = [ NodeOption []
-                    , NodeOption []
+  { optSpoNodes = NodeOptions [] :| []
+  , optRelayNodes = [ NodeOptions []
+                    , NodeOptions []
                     ]
   }
 

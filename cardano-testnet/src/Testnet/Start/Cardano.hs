@@ -18,7 +18,7 @@ module Testnet.Start.Cardano
   , TestnetRuntimeOptions(..)
   , TestnetEnvOptions(..)
   , TestnetNodeOptions(..)
-  , NodeOption(..)
+  , NodeOptions(..)
   , cardanoDefaultTestnetNodeOptions
 
   , TestnetRuntime (..)
@@ -501,7 +501,7 @@ retryOnAddressInUseError act = withFrozenCallStack $ go maximumTimeout retryTime
 -- and checks @pools-keys/@ to classify each as SPO or relay.
 -- Validates that nodes are consecutively numbered starting from 1,
 -- and that all SPO nodes come before relay nodes.
-readNodeOptionsFromEnv :: MonadIO m => FilePath -> m TestnetNodeOptions
+readNodeOptionsFromEnv :: HasCallStack => MonadIO m => FilePath -> m TestnetNodeOptions
 readNodeOptionsFromEnv envDir = do
   entries <- liftIO $ IO.listDirectory (envDir </> "node-data")
   let nodeNums = sort $ mapMaybe parseNodeNum entries
@@ -517,8 +517,8 @@ readNodeOptionsFromEnv envDir = do
   when (null spoFlags) $
     throwString "No SPO node directories found in environment"
   let nSpos = length spoFlags
-  let spoOpts = map (const (NodeOption [])) [1 .. nSpos]
-      relayOpts = map (const (NodeOption [])) [nSpos + 1 .. length nodeNums]
+  let spoOpts = map (const (NodeOptions [])) [1 .. nSpos]
+      relayOpts = map (const (NodeOptions [])) [nSpos + 1 .. length nodeNums]
   case spoOpts of
     (s:ss) -> pure $ TestnetNodeOptions { optSpoNodes = s :| ss, optRelayNodes = relayOpts }
     [] -> throwString "No SPO node directories found in environment"

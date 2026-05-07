@@ -114,7 +114,7 @@ pTestnetNodeOptions =
       <>  OA.metavar "COUNT"
       )
   where
-    defaultSpoOption = NodeOption []
+    defaultSpoOption = NodeOptions []
 
     mkPoolNodes num = TestnetNodeOptions
       { optSpoNodes = defaultSpoOption :| L.replicate (num - 1) defaultSpoOption

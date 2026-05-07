@@ -209,7 +209,7 @@ hprop_shutdownOnSlotSynced = integrationRetryWorkspace 2 "shutdown-on-slot-synce
   let creationOptions = def
         { creationNodes =
             TestnetNodeOptions
-              { optSpoNodes = NodeOption ["--shutdown-on-slot-synced", show maxSlot] :| []
+              { optSpoNodes = NodeOptions ["--shutdown-on-slot-synced", show maxSlot] :| []
               , optRelayNodes = []
               }
         , creationGenesisOptions = def

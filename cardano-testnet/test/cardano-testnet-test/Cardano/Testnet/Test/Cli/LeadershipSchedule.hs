@@ -72,9 +72,9 @@ hprop_leadershipSchedule = integrationRetryWorkspace 2 "leadership-schedule" $ \
         { creationEra = asbe
         , creationNodes =
             TestnetNodeOptions
-              { optSpoNodes = NodeOption [] :|
-                [ NodeOption []
-                , NodeOption []
+              { optSpoNodes = NodeOptions [] :|
+                [ NodeOptions []
+                , NodeOptions []
                 ]
               , optRelayNodes = []
               }
