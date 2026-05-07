@@ -171,9 +171,6 @@ executable cardano-recon-grep
     main-is:          Cardano/ReConGrep.hs
 
     ghc-options:      -O2
-                      -threaded
-                      -rtsopts
-                      "-with-rtsopts=-N2"
 
     build-depends:
         base
@@ -185,7 +182,7 @@ executable cardano-recon-grep
       , mtl
       , time
       , cardano-recon-framework
-      , trace-dispatcher ^>= 2.12
+      , trace-dispatcher
       , optparse-applicative
 
     hs-source-dirs:   app
