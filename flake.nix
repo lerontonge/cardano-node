@@ -377,7 +377,7 @@
           # Once building, windowsProject candidate for win-arm64 is project.projectCross.ucrtAarch64.
           // optionalAttrs (elem system ["x86_64-linux"]) {
             windows = let
-              windowsProject = (project.appendModule {compiler-nix-name = windowsCompilerNixName;}).projectCross.mingwW64;
+              windowsProject = (project.appendModule {compiler-nix-name = windowsCompilerNixName;}).projectCross.ucrt64;
               projectExes = collectExes windowsProject;
             in
               projectExes
