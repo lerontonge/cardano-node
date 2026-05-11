@@ -66,9 +66,7 @@ prettyTemporalEvent (TemporalEvent _ msgs) ns =
 
 prettyRelevanceArray :: Relevance TemporalEvent Text -> Text
 prettyRelevanceArray rel =
-  "[\n"
-  <> Text.intercalate "\n,\n" (fmap (uncurry prettyTemporalEvent) (Set.toList rel))
-  <> "\n]"
+  Text.unlines $ "[" : fmap (uncurry prettyTemporalEvent) (Set.toList rel) ++ ["]"]
 
 prettySatisfactionResult :: Formula TemporalEvent Text -> SatisfactionResult TemporalEvent Text -> Text
 prettySatisfactionResult initial Satisfied = prettyFormula initial Prec.Universe <> " " <> green "(✔)"
@@ -84,8 +82,8 @@ instance LogFormatting TraceMessage where
     ]
   forMachine _ FormulaProgressDump{..} = mconcat
     [
-      "events_per_second" .= (fromIntegral eventsPerSecond :: Int),
-      "catch_up_ratio" .= (realToFrac catchupRatio :: Double),
+      "eventsPerSecond" .= (fromIntegral eventsPerSecond :: Int),
+      "catchUpRatio" .= (realToFrac catchupRatio :: Double),
       "index" .= index
     ]
   forMachine _ FormulaPositiveOutcome{..} = mconcat
@@ -119,7 +117,7 @@ instance LogFormatting TraceMessage where
   forHuman FormulaNegativeOutcome{..} =
     prettySatisfactionResult formula (Unsatisfied relevance)
   forHuman ContextDump{..} =
-    "Context:\n" <> Text.unlines (fmap (\(k, v) -> "  " <> k <> " = " <> v) context)
+    Text.unlines $ "Context:" : map (\(k, v) -> "  " <> k <> " = " <> v) context
 
   asMetrics FormulaStartCheck{} = []
   asMetrics (FormulaProgressDump {catchupRatio, index}) = [DoubleM ("catchup_ratio_" <> showT index) catchupRatio]

@@ -10,7 +10,7 @@ import           Cardano.ReCon.Trace.Event ()
 import           Cardano.ReCon.Trace.Feed (TemporalEvent (..))
 
 import           Control.Arrow ((>>>))
-import           Control.Monad (forM_, (>=>))
+import           Control.Monad ((>=>))
 import           Control.Monad.Reader (runReader)
 import           Data.Aeson (decodeStrict')
 import           Data.Aeson.Encode.Pretty (encodePrettyToTextBuilder)
@@ -21,7 +21,6 @@ import           Data.Text.Lazy (toStrict)
 import           Data.Text.Lazy.Builder (toLazyText)
 import           Data.Char (toLower)
 import qualified Data.Map.Strict as Map
-import           Data.Maybe (fromMaybe)
 import           Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import           Data.Text (Text)
 import qualified Data.Text as Text
@@ -78,19 +77,14 @@ prettyMsg = toStrict . toLazyText . encodePrettyToTextBuilder
 
 printArray :: [TraceMessage] -> IO ()
 printArray [] = TIO.putStrLn "[]"
-printArray (x : xs) = do
-  TIO.putStrLn "["
-  TIO.putStr (prettyMsg x)
-  forM_ xs $ \m -> do
-    TIO.putStr "\n,"
-    TIO.putStr (prettyMsg m)
-  TIO.putStrLn "\n]"
+printArray msgs =
+  TIO.putStr $ Text.unlines $ "[" : map prettyMsg msgs ++ ["]"]
 
 main :: IO ()
 main = do
   setLocaleEncoding utf8
   options <- execParser opts
-  ctx <- Map.toList . fromMaybe Map.empty <$>
+  ctx <- maybe [] Map.toList <$>
     for options.context (readPropValues >=> dieOnYamlError)
   rawFormulas <- readFormulas options.formulas
                    (Context { interpDomain = ctx, varKinds = Map.empty })
