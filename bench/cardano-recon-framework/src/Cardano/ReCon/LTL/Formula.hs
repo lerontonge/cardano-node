@@ -111,6 +111,9 @@ data Formula event ty =
      --   φ |¹⁺ᵏ ψ ≡ ψ ∨ ¬ ψ ∧ φ ∧ (φ |ᵏ ψ)
      --   φ until ψ in the n units of time from now
    | UntilN Word (Formula event ty) (Formula event ty)
+   -------------------------------------
+
+   -------------- Atomic ---------------
      -- | ty c̄
    | Atom ty (Set PropConstraint)
    -------------------------------------

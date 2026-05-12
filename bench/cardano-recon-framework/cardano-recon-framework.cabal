@@ -4,7 +4,7 @@ description:        Cardano Re(altime) Con(formance) Framework based on Linear T
 category:           Cardano
                     Testing
 copyright:          2026 Intersect.
-version:            1.1.1
+version:            1.2.0
 license:            Apache-2.0
 license-files:      LICENSE
                     NOTICE
@@ -72,6 +72,7 @@ library
                     , Cardano.ReCon.Common.Parser
 
                     , Cardano.ReCon.LTL.Check
+                    , Cardano.ReCon.LTL.ContinuousFormula
                     , Cardano.ReCon.LTL.Formula
                     , Cardano.ReCon.LTL.Formula.Parser
                     , Cardano.ReCon.LTL.Formula.Prec
@@ -98,7 +99,6 @@ library
                     , Cardano.ReCon.LTL.Internal.Subst
                     , Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula
                     , Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.FinFree
-                    , Cardano.ReCon.LTL.Internal.IR.HomogeneousFormula.TextFree
                     , Cardano.ReCon.Presburger.Internal.CooperQE
                     , Cardano.ReCon.Presburger.Internal.IR.AffineDNF
                     , Cardano.ReCon.Presburger.Internal.IR.CompNF
@@ -143,7 +143,6 @@ executable cardano-recon
     other-modules:
         Cardano.ReCon.TraceMessage
       , Cardano.ReCon.Cli
-      , Cardano.ReCon.Common
     other-extensions:
 
     -- Other library packages from which modules are imported.
@@ -165,6 +164,27 @@ executable cardano-recon
 
 
     -- Directories containing source files.
+    hs-source-dirs:   app
+
+executable cardano-recon-grep
+    import:           common
+    main-is:          Cardano/ReConGrep.hs
+
+    ghc-options:      -O2
+
+    build-depends:
+        base
+      , text
+      , containers
+      , bytestring
+      , aeson
+      , aeson-pretty
+      , mtl
+      , time
+      , cardano-recon-framework
+      , trace-dispatcher
+      , optparse-applicative
+
     hs-source-dirs:   app
 
 test-suite cardano-recon-test

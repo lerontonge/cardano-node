@@ -21,7 +21,7 @@ import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Text (Text)
 
--- | A `Formula` with no temporal operators.
+-- | A `Formula` with no temporal operators and no atoms.
 --   Equivalence of two `HomogeneousFormula`s is decidable.
 data HomogeneousFormula =
    ------------ Connective -------------
