@@ -59,10 +59,10 @@ hprop_ledger_events_propose_new_constitution_spo = integrationRetryWorkspace 2 "
       creationOptions = def
         { creationEra = AnyShelleyBasedEra sbe
         , creationNodes =
-            TestnetNodeOptions
-              { optSpoNodes = NodeOptions [] :|
-                [ NodeOptions []
-                , NodeOptions []
+            TestnetNodesWithOptions
+              { optSpoNodes = NodeWithOptions Nothing [] :|
+                [ NodeWithOptions Nothing []
+                , NodeWithOptions Nothing []
                 ]
               , optRelayNodes = []
               }
